@@ -1,0 +1,15 @@
+[
+  {
+    "id": "1a516bf1-9b7b-428b-b269-18e4711b9e3c",
+    "name": "FFIn",
+    "action": "accept",
+    "protocol": "tcp",
+    "src_address": "any",
+    "dst_address": "any",
+    "src_port": 0,
+    "dst_port": 8000,
+    "comment": "Default Firewall API Access",
+    "priority": 100,
+    "enabled": true
+  }
+]

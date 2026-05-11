@@ -1,0 +1,19 @@
+name: Firewall Plugin
+id: firewall_plugin
+version: "1.0.0"
+description: Manages firewall rules as a persistent JSON store and compiles them to platform-specific ACL configs via aerleon.
+author: hornetmadness@gmail.com
+enabled: true
+boot_priority: 3
+plugin_requirements: []
+py_requirements:
+  - aerleon
+  - pyyaml
+os_requirements:
+  - iptables
+
+config:
+  rules_file: firewall_rules.json
+  default_platform: iptables
+  default_filter_name: fastfirewall
+  auto_compile: false

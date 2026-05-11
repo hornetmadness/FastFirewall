@@ -1,0 +1,29 @@
+name: Networking Plugin
+id: networking_plugin
+version: "1.0.0"
+description: >
+  Manages network interfaces, routes, and kernel sysctl settings declaratively
+  via ifstate (ifstatecli). Desired state is stored locally and pushed to the
+  running kernel with POST /apply.  Routes mount at /v1/networking/.
+author: hornetmadness@gmail.com
+
+enabled: true
+boot_priority: 1
+
+plugin_requirements: []
+py_requirements:
+  - ifstate
+  - pyyaml
+os_requirements: []
+
+# Events emitted:
+#   networking.interface.configured – payload: {name, addresses?, link?}
+#   networking.interface.removed    – payload: {name}
+#   networking.route.added          – payload: {route_id, to}
+#   networking.route.removed        – payload: {route_id, to}
+#   networking.sysctl.changed       – payload: {key, value}
+#   networking.sysctl.removed       – payload: {key}
+#   networking.applied              – payload: {success, returncode}
+
+config:
+  state_file: networking_state.json

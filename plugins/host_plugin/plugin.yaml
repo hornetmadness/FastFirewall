@@ -1,0 +1,36 @@
+name: Host Plugin
+id: host_plugin
+version: "1.0.0"
+description: >
+  Manages basic host system configuration — hostname, system services,
+  sysctl kernel parameters, users, groups, and cron entries — via
+  pyinfra server.* operations.  Routes mount at /v1/host/.
+author: hornetmadness@gmail.com
+
+enabled: true
+boot_priority: 0
+
+plugin_requirements: []
+py_requirements: []    # pyinfra is already a core dependency
+os_requirements: []
+
+# Events emitted:
+#   host.hostname.changed  – payload: {hostname}
+#   host.service.changed   – payload: {service, running, enabled}
+#   host.service.deleted   – payload: {service}
+#   host.sysctl.changed    – payload: {key, value, persist}
+#   host.sysctl.deleted    – payload: {key}
+#   host.user.changed      – payload: {user, shell, home_dir, system, comment}
+#   host.user.deleted      – payload: {user}
+#   host.group.changed     – payload: {group, system, gid}
+#   host.group.deleted     – payload: {group}
+#   host.cron.changed      – payload: {name, command, ...schedule fields}
+#   host.cron.deleted      – payload: {name}
+
+config:
+  state_file: host_state.json
+  init:
+    enable_init_script: false   # when true, ensures service_name is running/enabled on startup
+    service_name: ff-claude     # systemd / init service name to manage
+    command: uv run /app/app.py
+    working_dir: /app           # working directory for the service process

@@ -1,0 +1,15 @@
+author: hornetmadness@gmail.com
+config:
+  ignored_events:
+  - heartbeat
+  - ping
+  include_payload: true
+  log_file: audit.log
+description: Records every event to an audit trail.
+enabled: true
+id: audit_plugin
+name: Audit Log Plugin
+os_requirements: []
+plugin_requirements: []
+py_requirements: []
+version: 0.9.0

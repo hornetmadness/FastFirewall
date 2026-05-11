@@ -1,0 +1,31 @@
+name: SMTP Plugin
+id: smtp_plugin
+version: "1.0.0"
+description: >
+  Manages Postfix SMTP server configuration — relay settings, TLS, SASL — and
+  provides email sending and test-mail endpoints. Routes mount at /v1/smtp/.
+author: hornetmadness@gmail.com
+
+enabled: true
+boot_priority: 10
+
+plugin_requirements: []
+py_requirements: []
+os_requirements:
+  - postfix
+
+# Events emitted:
+#   smtp.config.updated   – payload: {keys: [list of changed setting names]}
+#   smtp.email.sent       – payload: {to, subject, from_addr}
+#   smtp.queue.flushed    – payload: {}
+#   smtp.postfix.reloaded – payload: {}
+#
+# Events consumed:
+#   smtp.test             – payload: {to, subject?, body?}
+#     Sends a test email to the given address out-of-band.
+
+config:
+  state_file: smtp_state.json
+  smtp_host: "127.0.0.1"
+  smtp_port: 25
+  default_from: "fastfirewall@localhost"

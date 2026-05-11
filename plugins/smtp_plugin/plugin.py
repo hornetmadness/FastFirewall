@@ -1,0 +1,339 @@
+"""
+SMTP Plugin
+───────────
+Manages Postfix SMTP server configuration and provides email sending and
+test-mail endpoints. Routes mount at /v1/smtp/.
+
+Events emitted:
+  smtp.config.updated   – payload: {keys: [list of changed setting names]}
+  smtp.email.sent       – payload: {to, subject, from_addr}
+  smtp.queue.flushed    – payload: {}
+  smtp.postfix.reloaded – payload: {}
+
+Events consumed:
+  smtp.test             – payload: {to, subject?, body?}
+    Sends a test email to the given address out-of-band.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import smtplib
+import subprocess
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from pathlib import Path
+from typing import Any, List, Optional, Union
+
+from fastapi import HTTPException
+from pydantic import BaseModel
+
+from plugin_system.core import PluginBase, RoutedPlugin, Service, on
+from plugin_system.core.events import Event, bus
+
+
+# ── Pydantic schemas ────────────────────────────────────────────────────────────
+
+class PostfixSettingsUpdate(BaseModel):
+    myhostname: Optional[str] = None
+    mydomain: Optional[str] = None
+    myorigin: Optional[str] = None
+    mynetworks: Optional[str] = None
+    inet_interfaces: Optional[str] = None
+    relayhost: Optional[str] = None
+    smtp_tls_security_level: Optional[str] = None
+    smtp_sasl_auth_enable: Optional[bool] = None
+    smtp_sasl_password_maps: Optional[str] = None
+    message_size_limit: Optional[int] = None
+    mailbox_size_limit: Optional[int] = None
+
+
+class SendEmailRequest(BaseModel):
+    to: Union[str, List[str]]
+    subject: str
+    body: str
+    from_addr: Optional[str] = None
+    html: bool = False
+
+
+class TestEmailRequest(BaseModel):
+    to: str
+    subject: str = "FastFirewall Test Email"
+    body: Optional[str] = None
+
+
+# ── Plugin ──────────────────────────────────────────────────────────────────────
+
+class SmtpPlugin(PluginBase, RoutedPlugin):
+    service_name = Service.SMTP
+    services = [Service.SMTP]
+
+    def setup(self) -> None:
+        self._state_path = self.plugin_dir / "data" / self.config.get("state_file", "smtp_state.json")
+        self._smtp_host: str = self.config.get("smtp_host", "127.0.0.1")
+        self._smtp_port: int = int(self.config.get("smtp_port", 25))
+        self._default_from: str = self.config.get("default_from", "fastfirewall@localhost")
+        self._state: dict[str, Any] = self._load_state()
+        self._register_routes()
+        self.logger.info("SMTP plugin loaded (postfix at %s:%d)", self._smtp_host, self._smtp_port)
+
+    def teardown(self) -> None:
+        self._save_state()
+
+    # ── persistence ─────────────────────────────────────────────────────────────
+
+    def _load_state(self) -> dict[str, Any]:
+        if self._state_path.exists():
+            try:
+                with self._state_path.open() as fh:
+                    return json.load(fh)
+            except Exception:
+                self.logger.error("Failed to load state from %r, starting empty", self._state_path, exc_info=True)
+        return {"postfix_settings": {}}
+
+    def _save_state(self) -> None:
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with self._state_path.open("w") as fh:
+                json.dump(self._state, fh, indent=2)
+        except Exception:
+            self.logger.error("Failed to save state to %r", self._state_path, exc_info=True)
+
+    # ── system helpers (mockable) ────────────────────────────────────────────────
+
+    def _run_cmd(self, args: list[str], timeout: int = 10) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+
+    def _smtp_send(self, from_addr: str, recipients: list[str], msg_str: str) -> None:
+        with smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=10) as smtp:
+            smtp.sendmail(from_addr, recipients, msg_str)
+
+    # ── postfix helpers ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _which(cmd: str) -> Optional[str]:
+        """Find a binary, checking /usr/sbin first since that's where postfix tools live."""
+        return shutil.which(cmd) or shutil.which(cmd, path="/usr/sbin:/usr/bin:/sbin:/bin")
+
+    # Keys exposed by the config API — used for both reads and writes.
+    _MANAGED_KEYS = [
+        "myhostname", "mydomain", "myorigin", "mynetworks", "inet_interfaces",
+        "relayhost", "smtp_tls_security_level", "smtp_sasl_auth_enable",
+        "smtp_sasl_password_maps", "message_size_limit", "mailbox_size_limit",
+    ]
+
+    def _postconf_get(self, keys: list[str]) -> dict[str, str]:
+        """Read current live values from postconf; returns {} if postfix not installed."""
+        postconf = self._which("postconf")
+        if not postconf:
+            return {}
+        result = self._run_cmd([postconf] + keys)
+        if result.returncode != 0:
+            return {}
+        out: dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                out[k.strip()] = v.strip()
+        return out
+
+    @staticmethod
+    def _sudo_prefix() -> list[str]:
+        """Return ['sudo'] when not already root, so postconf can write main.cf."""
+        return [] if os.getuid() == 0 else ["sudo"]
+
+    def _postconf_set(self, settings: dict[str, str]) -> None:
+        postconf = self._which("postconf")
+        if not postconf:
+            raise HTTPException(503, "postconf not found — is Postfix installed?")
+        args = self._sudo_prefix() + [postconf, "-e"] + [f"{k}={v}" for k, v in settings.items()]
+        result = self._run_cmd(args)
+        if result.returncode != 0:
+            raise HTTPException(500, f"postconf -e failed: {result.stderr.strip()}")
+
+    def _postfix_running(self) -> bool:
+        """Check the Postfix master PID file — no subprocess needed."""
+        return (
+            Path("/var/spool/postfix/pid/master.pid").exists()
+            or Path("/var/run/postfix.pid").exists()
+        )
+
+    def _mailq_parse(self) -> dict[str, Any]:
+        mailq = self._which("mailq") or "mailq"
+        result = self._run_cmd([mailq], timeout=15)
+        output = result.stdout.strip()
+        queue_empty = "Mail queue is empty" in output
+        entries: list[dict[str, Any]] = []
+        lines = output.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            parts = line.split()
+            # Queue entry lines: ID size DOW Mon DD HH:MM:SS sender (≥7 fields, ID ≥6 chars)
+            if line and not line.startswith((" ", "-")) and len(parts) >= 6 and len(parts[0]) >= 6:
+                entry: dict[str, Any] = {
+                    "id": parts[0].rstrip("*!"),
+                    "size": parts[1],
+                    "arrival": f"{parts[2]} {parts[3]} {parts[4]} {parts[5]}",
+                    "sender": parts[6] if len(parts) > 6 else "",
+                    "recipients": [],
+                }
+                i += 1
+                while i < len(lines) and lines[i].startswith(" "):
+                    entry["recipients"].append(lines[i].strip())
+                    i += 1
+                entries.append(entry)
+            else:
+                i += 1
+        return {"empty": queue_empty, "count": len(entries), "entries": entries}
+
+    def _build_message(
+        self, recipients: list[str], subject: str, body: str, from_addr: str, html: bool
+    ) -> str:
+        msg = MIMEMultipart("alternative" if html else "mixed")
+        msg["From"] = from_addr
+        msg["To"] = ", ".join(recipients)
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "html" if html else "plain"))
+        return msg.as_string()
+
+    # ── route registration ───────────────────────────────────────────────────────
+
+    def _register_routes(self) -> None:
+        add = self.router.add_api_route
+        add("/status",  self._status,        methods=["GET"],    summary="Plugin and Postfix service status")
+        add("/config",  self._get_config,    methods=["GET"],    summary="Get managed Postfix settings")
+        add("/config",  self._update_config, methods=["PUT"],    summary="Apply Postfix settings via postconf")
+        add("/queue",   self._get_queue,     methods=["GET"],    summary="Show the Postfix mail queue")
+        add("/queue",   self._flush_queue,   methods=["DELETE"], summary="Flush the mail queue (postqueue -f)")
+        add("/send",    self._send,          methods=["POST"],   summary="Send an email via Postfix",          status_code=202)
+        add("/test",    self._test_email,    methods=["POST"],   summary="Send a test email via local SMTP",   status_code=202)
+        add("/reload",  self._reload,        methods=["POST"],   summary="Reload Postfix configuration")
+
+    # ── route handlers ───────────────────────────────────────────────────────────
+
+    def _status(self) -> dict:
+        return {
+            "plugin": self.meta["name"],
+            "version": self.meta["version"],
+            "postfix_running": self._postfix_running(),
+            "postfix_installed": self._which("postconf") is not None,
+            "smtp_host": self._smtp_host,
+            "smtp_port": self._smtp_port,
+            "default_from": self._default_from,
+            "managed_settings": len(self._state.get("postfix_settings", {})),
+        }
+
+    def _get_config(self) -> dict:
+        live = self._postconf_get(self._MANAGED_KEYS)
+        managed_keys = set(self._state.get("postfix_settings", {}).keys())
+        settings = {
+            k: {"value": v, "managed": k in managed_keys}
+            for k, v in live.items()
+        }
+        if not live:
+            # postfix not installed — fall back to stored state
+            settings = {
+                k: {"value": str(v), "managed": True}
+                for k, v in self._state.get("postfix_settings", {}).items()
+            }
+        return {"settings": settings, "postfix_installed": live != {}}
+
+    def _update_config(self, body: PostfixSettingsUpdate) -> dict:
+        updates = body.model_dump(exclude_none=True)
+        if not updates:
+            raise HTTPException(400, "No settings provided")
+        postconf_args: dict[str, str] = {
+            k: ("yes" if v is True else "no" if v is False else str(v))
+            for k, v in updates.items()
+        }
+        before = self._postconf_get(list(updates.keys()))
+        self._postconf_set(postconf_args)
+        self._state.setdefault("postfix_settings", {}).update(updates)
+        self._save_state()
+        diff = {
+            k: {"before": before.get(k, ""), "after": postconf_args[k]}
+            for k in updates
+        }
+        bus.emit(Event("smtp.config.updated", source=self.plugin_id, payload={"keys": list(updates.keys())}))
+        return {"updated": list(updates.keys()), "diff": diff}
+
+    def _get_queue(self) -> dict:
+        return self._mailq_parse()
+
+    def _flush_queue(self) -> dict:
+        postqueue = self._which("postqueue")
+        if not postqueue:
+            raise HTTPException(503, "postqueue not found — is Postfix installed?")
+        result = self._run_cmd([postqueue, "-f"], timeout=30)
+        if result.returncode != 0:
+            raise HTTPException(500, f"postqueue -f failed: {result.stderr.strip()}")
+        bus.emit(Event("smtp.queue.flushed", source=self.plugin_id, payload={}))
+        return {"flushed": True}
+
+    def _send(self, body: SendEmailRequest) -> dict:
+        from_addr = body.from_addr or self._default_from
+        recipients = body.to if isinstance(body.to, list) else [body.to]
+        msg_str = self._build_message(recipients, body.subject, body.body, from_addr, body.html)
+        try:
+            self._smtp_send(from_addr, recipients, msg_str)
+        except smtplib.SMTPException as exc:
+            raise HTTPException(502, f"SMTP error: {exc}") from exc
+        except OSError as exc:
+            raise HTTPException(503, f"Cannot reach Postfix at {self._smtp_host}:{self._smtp_port}: {exc}") from exc
+        bus.emit(Event(
+            "smtp.email.sent",
+            source=self.plugin_id,
+            payload={"to": recipients, "subject": body.subject, "from_addr": from_addr},
+        ))
+        return {"sent": True, "to": recipients, "subject": body.subject, "from": from_addr}
+
+    def _test_email(self, body: TestEmailRequest) -> dict:
+        test_body = body.body or (
+            "This is a test email from FastFirewall SMTP plugin.\n\n"
+            "If you received this, your Postfix configuration is working correctly."
+        )
+        from_addr = self._default_from
+        msg_str = self._build_message([body.to], body.subject, test_body, from_addr, False)
+        try:
+            self._smtp_send(from_addr, [body.to], msg_str)
+        except smtplib.SMTPException as exc:
+            raise HTTPException(502, f"SMTP error: {exc}") from exc
+        except OSError as exc:
+            raise HTTPException(503, f"Cannot reach Postfix at {self._smtp_host}:{self._smtp_port}: {exc}") from exc
+        bus.emit(Event(
+            "smtp.email.sent",
+            source=self.plugin_id,
+            payload={"to": [body.to], "subject": body.subject, "from_addr": from_addr},
+        ))
+        return {"sent": True, "to": body.to, "subject": body.subject, "from": from_addr}
+
+    def _reload(self) -> dict:
+        postfix = self._which("postfix")
+        if not postfix:
+            raise HTTPException(503, "postfix not found — is Postfix installed?")
+        result = self._run_cmd(self._sudo_prefix() + [postfix, "reload"], timeout=30)
+        if result.returncode != 0:
+            raise HTTPException(500, f"postfix reload failed: {result.stderr.strip()}")
+        bus.emit(Event("smtp.postfix.reloaded", source=self.plugin_id, payload={}))
+        return {"reloaded": True}
+
+    # ── event handler ────────────────────────────────────────────────────────────
+
+    @on("smtp.test")
+    def on_smtp_test(self, event: Event) -> None:
+        to = event.payload.get("to")
+        if not to:
+            self.logger.warning("smtp.test event missing 'to' field")
+            return
+        req = TestEmailRequest(
+            to=to,
+            subject=event.payload.get("subject", "FastFirewall Test Email"),
+            body=event.payload.get("body"),
+        )
+        try:
+            self._test_email(req)
+            self.logger.info("Test email sent to %r via smtp.test event", to)
+        except Exception as exc:
+            self.logger.error("smtp.test event handler failed: %s", exc)

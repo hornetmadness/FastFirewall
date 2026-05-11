@@ -1,0 +1,38 @@
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  level: DEBUG
+  format: "%(levelname)s %(name)s: %(message)s"
+
+# ── Plugins ───────────────────────────────────────────────────────────────────
+plugins:
+  directory: plugins        # relative to the repo root; resolved at startup
+
+# ── Server (uvicorn / FastAPI) ────────────────────────────────────────────────
+server:
+  host: "0.0.0.0"
+  port: 8000
+  reload: false
+  reload-excludes: ["*/plugins/*/data/*"]   # watch for code changes but ignore the data directory
+
+bootstrap:
+  enabled: fasle
+
+# ── Authentication ─────────────────────────────────────────────────────────────
+auth:
+  enabled: true
+  # Generate a strong key: openssl rand -hex 32
+  secret_key: "CHANGE-ME-use-openssl-rand-hex-32-in-production"
+  algorithm: HS256
+  token_expire_minutes: 60
+  # Paths that do not require a valid credential
+  exempt_paths:
+    - /token
+    - /docs
+    - /openapi.json
+    - /redoc
+  users:
+    - username: admin
+      # Plaintext is hashed at startup; use a bcrypt hash in production:
+      #   python -c "from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt']).hash('yourpassword'))"
+      password: "admin"
+      roles: [admin]
