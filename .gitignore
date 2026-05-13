@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# Local configuration file for FastFirewall
+plugins/*/data/*

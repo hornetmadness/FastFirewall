@@ -26,6 +26,7 @@ Events emitted:
 """
 from __future__ import annotations
 
+import configparser
 import io
 import json
 import os
@@ -186,19 +187,18 @@ class HostPlugin(PluginBase, RoutedPlugin):
 
     @staticmethod
     def _systemd_unit(service_name: str, command: str, working_dir: Optional[str] = None) -> str:
-        wd_line = f"WorkingDirectory={working_dir}\n" if working_dir else ""
-        return (
-            f"[Unit]\n"
-            f"Description={service_name}\n"
-            f"After=network.target\n\n"
-            f"[Service]\n"
-            f"{wd_line}"
-            f"ExecStart={command}\n"
-            f"Restart=on-failure\n"
-            f"RestartSec=5\n\n"
-            f"[Install]\n"
-            f"WantedBy=multi-user.target\n"
-        )
+        cfg = configparser.RawConfigParser()
+        cfg.optionxform = lambda optionstr: optionstr  # preserve key case — systemd keys are CamelCase
+        cfg["Unit"] = {"Description": service_name, "After": "network.target"}
+        service: dict[str, str] = {}
+        if working_dir:
+            service["WorkingDirectory"] = working_dir
+        service |= {"ExecStart": command, "Restart": "on-failure", "RestartSec": "5"}
+        cfg["Service"] = service
+        cfg["Install"] = {"WantedBy": "multi-user.target"}
+        buf = io.StringIO()
+        cfg.write(buf, space_around_delimiters=False)
+        return buf.getvalue()
 
     @staticmethod
     def _upstart_conf(service_name: str, command: str, working_dir: Optional[str] = None) -> str:
