@@ -5,7 +5,9 @@
       "Bash(uv sync *)",
       "Bash(python -m pip show pyinfra)",
       "Bash(find / -path \"*/pyinfra/py.typed\")",
-      "Bash(find / -path \"*/pyinfra/*.pyi\")"
+      "Bash(find / -path \"*/pyinfra/*.pyi\")",
+      "Edit(plugins/*/test_*.py)",
+      "Edit(tests/**)"
     ]
   },
   "hooks": {

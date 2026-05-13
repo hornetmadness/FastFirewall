@@ -22,8 +22,19 @@ author: Alice
 
 # --- optional metadata ---
 enabled: true               # default true; set false to skip loading
-boot_priority: 100          # load order — lower = earlier; default 100; ties broken alphabetically
-plugin_requirements: []    # list of other plugin ids this depends on
+plugin_requirements: []    # list of other plugin ids this depends on; load order is derived from this graph
+
+# --- port declarations (required) ---
+# Use -1 (scalar) when the plugin claims no services.
+# Otherwise a dict keyed by service name (must match declared services exactly).
+# Port value -1 means the service has no real listening port.
+service_ports:
+  dns:
+    tcp: [53]
+    udp: [53]
+
+# Set true for plugins that manage an already-running OS service (skips OS port check).
+skip_host_os_port_check: false
 
 # --- python package dependencies (installed via uv using pyinfra) ---
 py_requirements:
@@ -92,6 +103,7 @@ class LoadedPlugin:
         handlers: list[tuple[str | None, Any]],  # (event_name_or_None, fn)
         services: list[Service] | None = None,
         plugin_dir: Path | None = None,
+        service_ports: int | dict[str, dict[str, list[int]]] = -1,
     ) -> None:
         self.plugin_id = plugin_id
         self.meta = meta
@@ -100,6 +112,7 @@ class LoadedPlugin:
         self.handlers = handlers  # (event_name, fn) — None means wildcard
         self.services: list[Service] = services or []
         self.plugin_dir: Path | None = plugin_dir
+        self.service_ports: int | dict[str, dict[str, list[int]]] = service_ports
 
     def __repr__(self) -> str:
         return f"<LoadedPlugin {self.plugin_id!r} v{self.meta.get('version', '?')}>"
@@ -128,6 +141,7 @@ class PluginLoader:
         self.logger = logger or logging.getLogger(__name__)
         self._plugins: dict[str, LoadedPlugin] = {}
         self._service_registry: dict[Service, str] = {}  # service → plugin_id
+        self._port_registry: dict[tuple[str, int], str] = {}  # (proto, port) → plugin_id
 
     # ------------------------------------------------------------------
     # Public API
@@ -146,15 +160,23 @@ class PluginLoader:
         """
         Scan *directory* and return plugin metadata without loading anything.
 
-        Each entry contains: id, name, version, description, author,
-        enabled, boot_priority.
+        Each entry contains: id, name, version, description, author, enabled,
+        plugin_requirements, service_ports, services.  Rows are sorted in
+        topological load order (dependencies before dependents; alphabetical
+        tiebreaker).
+
+        ``services`` is read by importing the plugin module and inspecting
+        the PluginBase subclass — no setup() is called and no packages are
+        installed.  Falls back to an empty list if the module cannot be
+        imported.
         """
         root = Path(directory)
         if not root.is_dir():
             raise PluginError(f"Not a directory: {root}")
-        results = []
+        rows: dict[str, dict[str, Any]] = {}
         for child in sorted(root.iterdir()):
             yaml_path = child / YAML_FILENAME
+            module_path = child / MODULE_FILENAME
             if not child.is_dir() or not yaml_path.exists():
                 continue
             try:
@@ -162,16 +184,248 @@ class PluginLoader:
             except Exception:
                 self.logger.warning("Could not read %s", yaml_path)
                 continue
-            results.append({
-                "id": raw.get("id", child.name),
+            pid = raw.get("id", child.name)
+
+            services: list[str] = []
+            if module_path.exists():
+                try:
+                    mod = self._import_module(pid, module_path)
+                    for _name, obj in inspect.getmembers(mod, inspect.isclass):
+                        if issubclass(obj, PluginBase) and obj is not PluginBase:
+                            services = [s.value for s in getattr(obj, "services", [])]
+                            break
+                except Exception:
+                    self.logger.debug("Could not inspect services for %s", pid)
+
+            rows[pid] = {
+                "id": pid,
                 "name": raw.get("name", child.name),
                 "version": str(raw.get("version", "0.0.0")),
                 "description": raw.get("description", ""),
                 "author": raw.get("author", ""),
                 "enabled": bool(raw.get("enabled", True)),
-                "boot_priority": int(raw.get("boot_priority", 100)),
-            })
-        return results
+                "plugin_requirements": list(raw.get("plugin_requirements") or []),
+                "service_ports": raw.get("service_ports"),
+                "services": services,
+            }
+        deps = {pid: row["plugin_requirements"] for pid, row in rows.items()}
+        order = PluginLoader._topo_sort(deps)
+        return [rows[pid] for pid in order if pid in rows]
+
+    @staticmethod
+    def _validate_service_ports(
+        plugin_id: str,
+        value: Any,
+    ) -> int | dict[str, dict[str, list[int]]]:
+        """
+        Validate the ``service_ports`` field from plugin.yaml.
+
+        Accepted forms:
+          -1                              — plugin exposes no ports
+          {<service>: {tcp: [int, ...], udp: [int, ...]}}  — at least one protocol key
+        """
+        if value == -1:
+            return -1
+
+        if not isinstance(value, dict) or not value:
+            raise PluginError(
+                f"Plugin {plugin_id!r}: 'service_ports' must be -1 or a non-empty dict, "
+                f"got {value!r}"
+            )
+
+        validated: dict[str, dict[str, list[int]]] = {}
+        for svc_name, proto_map in value.items():
+            if not isinstance(svc_name, str):
+                raise PluginError(
+                    f"Plugin {plugin_id!r}: service_ports key {svc_name!r} must be a string"
+                )
+            if not isinstance(proto_map, dict):
+                raise PluginError(
+                    f"Plugin {plugin_id!r}: service_ports[{svc_name!r}] must be a dict "
+                    f"with 'tcp' and/or 'udp' keys, got {proto_map!r}"
+                )
+            known_protos = {"tcp", "udp"}
+            unknown = set(proto_map) - known_protos
+            if unknown:
+                raise PluginError(
+                    f"Plugin {plugin_id!r}: service_ports[{svc_name!r}] has unknown "
+                    f"protocol key(s) {unknown!r}; only 'tcp' and 'udp' are allowed"
+                )
+            if not proto_map:
+                raise PluginError(
+                    f"Plugin {plugin_id!r}: service_ports[{svc_name!r}] must have at "
+                    f"least one of 'tcp' or 'udp'"
+                )
+            validated_proto: dict[str, list[int]] = {}
+            for proto, ports in proto_map.items():
+                if not isinstance(ports, list) or not ports:
+                    raise PluginError(
+                        f"Plugin {plugin_id!r}: service_ports[{svc_name!r}][{proto!r}] "
+                        f"must be a non-empty list of integers, got {ports!r}"
+                    )
+                for p in ports:
+                    if not isinstance(p, int):
+                        raise PluginError(
+                            f"Plugin {plugin_id!r}: service_ports[{svc_name!r}][{proto!r}] "
+                            f"contains non-integer value {p!r}"
+                        )
+                validated_proto[proto] = list(ports)
+            validated[svc_name] = validated_proto
+
+        return validated
+
+    @staticmethod
+    def _validate_service_ports_vs_services(
+        plugin_id: str,
+        service_ports: int | dict[str, dict[str, list[int]]],
+        services: list[Service],
+    ) -> None:
+        """
+        Cross-validate that service_ports keys exactly match the services the
+        plugin advertises.
+
+        Rules:
+          - service_ports == -1  →  services must be empty
+          - service_ports is dict →  keys must equal {s.value for s in services}
+        """
+        declared = {s.value for s in services}
+        if service_ports == -1:
+            if declared:
+                raise PluginError(
+                    f"Plugin {plugin_id!r}: service_ports is -1 but the plugin "
+                    f"claims services {sorted(declared)!r}; use a dict with those "
+                    f"service names as keys"
+                )
+            return
+
+        port_keys = set(service_ports)  # type: ignore[arg-type]
+        if port_keys != declared:
+            extra = port_keys - declared
+            missing = declared - port_keys
+            parts: list[str] = []
+            if extra:
+                parts.append(f"unexpected keys {sorted(extra)!r}")
+            if missing:
+                parts.append(f"missing keys for declared services {sorted(missing)!r}")
+            raise PluginError(
+                f"Plugin {plugin_id!r}: service_ports keys do not match declared "
+                f"services — {'; '.join(parts)}"
+            )
+
+    @staticmethod
+    def _get_os_listening_ports(proto: str) -> set[int]:
+        """
+        Return ports currently in use by the OS for the given protocol.
+
+        Reads /proc/net/{tcp,tcp6,udp,udp6}.  TCP entries are filtered to
+        listening state (0A); all UDP entries are included.  Returns an empty
+        set on non-Linux hosts or when the proc files are unreadable.
+        """
+        proc_files = {
+            "tcp": ["/proc/net/tcp", "/proc/net/tcp6"],
+            "udp": ["/proc/net/udp", "/proc/net/udp6"],
+        }
+        ports: set[int] = set()
+        for path_str in proc_files.get(proto, []):
+            try:
+                with open(path_str) as fh:
+                    for line in fh:
+                        parts = line.split()
+                        if len(parts) < 4 or parts[0] == "sl":
+                            continue
+                        local_addr, state = parts[1], parts[3]
+                        if proto == "tcp" and state != "0A":
+                            continue
+                        port_hex = local_addr.split(":")[1]
+                        ports.add(int(port_hex, 16))
+            except (FileNotFoundError, OSError):
+                pass
+        return ports
+
+    def _check_plugin_port_conflicts(
+        self,
+        plugin_id: str,
+        service_ports: int | dict[str, dict[str, list[int]]],
+    ) -> None:
+        """Raise PluginError if any declared port is already claimed by a loaded plugin."""
+        if service_ports == -1:
+            return
+        for svc_name, proto_map in service_ports.items():
+            for proto, ports in proto_map.items():
+                for port in ports:
+                    if port == -1:
+                        continue
+                    owner = self._port_registry.get((proto, port))
+                    if owner is not None:
+                        raise PluginError(
+                            f"Plugin {plugin_id!r}: {proto.upper()} port {port} "
+                            f"(service {svc_name!r}) is already claimed by plugin {owner!r}"
+                        )
+
+    def _check_os_port_conflicts(
+        self,
+        plugin_id: str,
+        service_ports: int | dict[str, dict[str, list[int]]],
+    ) -> None:
+        """Raise PluginError if any declared port is already in use by the OS."""
+        if service_ports == -1:
+            return
+        for svc_name, proto_map in service_ports.items():
+            for proto, ports in proto_map.items():
+                os_ports = self._get_os_listening_ports(proto)
+                for port in ports:
+                    if port == -1:
+                        continue
+                    if port in os_ports:
+                        raise PluginError(
+                            f"Plugin {plugin_id!r}: {proto.upper()} port {port} "
+                            f"(service {svc_name!r}) is already in use by the OS"
+                        )
+
+    def _register_ports(self, plugin_id: str, service_ports: int | dict[str, dict[str, list[int]]]) -> None:
+        if service_ports == -1:
+            return
+        for proto_map in service_ports.values():
+            for proto, ports in proto_map.items():
+                for port in ports:
+                    if port != -1:
+                        self._port_registry[(proto, port)] = plugin_id
+
+    def _release_ports(self, service_ports: int | dict[str, dict[str, list[int]]]) -> None:
+        if service_ports == -1:
+            return
+        for proto_map in service_ports.values():
+            for proto, ports in proto_map.items():
+                for port in ports:
+                    if port != -1:
+                        self._port_registry.pop((proto, port), None)
+
+    @staticmethod
+    def _topo_sort(deps: dict[str, list[str]]) -> list[str]:
+        """
+        Return *deps* keys in topological order (dependencies first).
+        Ties within the same depth level are broken alphabetically.
+        Nodes listed only as values but not as keys are silently ignored.
+        Does NOT raise on cycles — callers that care (load_directory) detect
+        them by comparing len(result) to len(deps).
+        """
+        in_degree: dict[str, int] = {pid: 0 for pid in deps}
+        dependents: dict[str, list[str]] = {pid: [] for pid in deps}
+        for pid, reqs in deps.items():
+            for dep in reqs:
+                if dep in deps:
+                    in_degree[pid] += 1
+                    dependents[dep].append(pid)
+        ready = sorted(pid for pid, deg in in_degree.items() if deg == 0)
+        order: list[str] = []
+        while ready:
+            pid = ready.pop(0)
+            order.append(pid)
+            newly_ready = [d for d in dependents[pid] if in_degree[d] - 1 == 0]
+            for d in dependents[pid]:
+                in_degree[d] -= 1
+            ready = sorted(ready + newly_ready)
+        return order
 
     def set_plugin_enabled(self, directory: str | Path, plugin_id: str, enabled: bool) -> None:
         """
@@ -196,37 +450,103 @@ class PluginLoader:
         Scan *directory* for plugin sub-directories and load each one.
         Returns a list of successfully loaded plugin ids.
 
-        Load order is determined by the optional ``boot_priority`` field in each
-        plugin.yaml (lower number = loaded first).  Plugins without the field
-        default to boot_priority 100.  Ties are broken alphabetically.
+        Load order is derived from ``plugin_requirements`` via topological sort
+        (Kahn's algorithm).  Ties within the same dependency level are broken
+        alphabetically.  Raises ``PluginError`` on circular dependencies or
+        missing required plugins.  If a required plugin is disabled, all plugins
+        that depend on it (transitively) are also skipped with a warning.
+
+        If *only* is supplied, only those plugins (and their transitive
+        dependencies) are considered.
         """
         root = Path(directory)
         if not root.is_dir():
             raise PluginError(f"Not a directory: {root}")
 
-        def _priority_key(path: Path) -> tuple[int, str]:
+        # ── 1. Discover all plugins in the directory ───────────────────────
+        discovered: dict[str, dict[str, Any]] = {}
+        for child in sorted(root.iterdir()):
+            yaml_path = child / YAML_FILENAME
+            if not child.is_dir() or not yaml_path.exists():
+                continue
             try:
-                with (path / YAML_FILENAME).open() as fh:
-                    raw = yaml.safe_load(fh) or {}
-                return (int(raw.get("boot_priority", 100)), path.name)
+                raw: dict[str, Any] = yaml.safe_load(yaml_path.read_text()) or {}
             except Exception:
-                return (100, path.name)
+                self.logger.warning("Could not read %s, skipping", yaml_path)
+                continue
+            pid = raw.get("id", child.name)
+            discovered[pid] = {
+                "path": child,
+                "enabled": bool(raw.get("enabled", True)),
+                "requirements": list(raw.get("plugin_requirements") or []),
+            }
 
-        candidates = [
-            child for child in root.iterdir()
-            if child.is_dir()
-            and (child / YAML_FILENAME).exists()
-            and (only is None or child.name in only)
-        ]
+        # ── 2. Apply `only` filter, expanding to transitive dependencies ───
+        if only is not None:
+            for pid in only:
+                if pid not in discovered:
+                    self.logger.warning("Requested plugin %r not found in %s", pid, root)
+            include: set[str] = set(only)
+            queue = [p for p in only if p in discovered]
+            while queue:
+                pid = queue.pop()
+                for dep in discovered.get(pid, {}).get("requirements", []):
+                    if dep not in include:
+                        include.add(dep)
+                        queue.append(dep)
+            candidates: dict[str, dict[str, Any]] = {
+                pid: info for pid, info in discovered.items() if pid in include
+            }
+        else:
+            candidates = dict(discovered)
 
-        loaded = []
-        for child in sorted(candidates, key=_priority_key):
-            if child.is_dir() and (child / YAML_FILENAME).exists():
-                try:
-                    plugin_id = self.load_plugin(child)
-                    loaded.append(plugin_id)
-                except Exception:
-                    self.logger.exception("Failed to load plugin from %s", child)
+        # ── 3. Guard against requirements that don't exist at all ──────────
+        for pid, info in candidates.items():
+            if not info["enabled"]:
+                continue
+            for dep in info["requirements"]:
+                if dep not in discovered:
+                    raise PluginError(
+                        f"Plugin {pid!r} requires {dep!r} which was not found in {root}"
+                    )
+
+        # ── 4. Propagate disabled state to dependents (cascading) ──────────
+        disabled: set[str] = {pid for pid, info in candidates.items() if not info["enabled"]}
+        changed = True
+        while changed:
+            changed = False
+            for pid, info in candidates.items():
+                if pid in disabled:
+                    continue
+                for dep in info["requirements"]:
+                    if dep in disabled:
+                        self.logger.warning(
+                            "Skipping plugin %r: required plugin %r is disabled",
+                            pid, dep,
+                        )
+                        disabled.add(pid)
+                        changed = True
+                        break
+
+        active = {pid: info for pid, info in candidates.items() if pid not in disabled}
+
+        # ── 5 & 6. Topological sort + cycle detection ──────────────────────
+        active_deps = {pid: info["requirements"] for pid, info in active.items()}
+        load_order = PluginLoader._topo_sort(active_deps)
+        if len(load_order) != len(active):
+            cycle_members = sorted(pid for pid in active if pid not in set(load_order))
+            raise PluginError(
+                f"Circular dependency detected among plugins: {', '.join(cycle_members)}"
+            )
+
+        # ── 7. Load in resolved order ──────────────────────────────────────
+        loaded: list[str] = []
+        for pid in load_order:
+            try:
+                loaded_id = self.load_plugin(active[pid]["path"])
+                loaded.append(loaded_id)
+            except Exception:
+                self.logger.exception("Failed to load plugin from %s", active[pid]["path"])
         return loaded
 
     def load_plugin(self, path: str | Path) -> str:
@@ -259,6 +579,13 @@ class PluginLoader:
         enabled: bool = raw.get("enabled", True)
         py_requirements: list[str] = raw.get("py_requirements", []) or []
         os_requirements: list[str] = raw.get("os_requirements", []) or []
+        skip_host_os_port_check: bool = bool(raw.get("skip_host_os_port_check", False))
+
+        if "service_ports" not in raw:
+            raise PluginError(
+                f"Plugin {plugin_id!r}: missing required key 'service_ports' in {yaml_path}"
+            )
+        service_ports = PluginLoader._validate_service_ports(plugin_id, raw["service_ports"])
 
         if not enabled:
             self.logger.info("Plugin %r is disabled, skipping", plugin_id)
@@ -302,6 +629,19 @@ class PluginLoader:
                 "Plugin %r claims services: %s",
                 plugin_id,
                 ", ".join(s.value for s in services),
+            )
+
+        # --- cross-check service_ports keys against declared services ----
+        PluginLoader._validate_service_ports_vs_services(plugin_id, service_ports, services)
+
+        # --- check for port conflicts (other plugins + OS) ---------------
+        self._check_plugin_port_conflicts(plugin_id, service_ports)
+        if not skip_host_os_port_check:
+            self._check_os_port_conflicts(plugin_id, service_ports)
+        elif service_ports != -1:
+            self.logger.info(
+                "Plugin %r: skipping OS port conflict check (skip_host_os_port_check=true)",
+                plugin_id,
             )
 
         # --- check dependencies ----------------------------------------
@@ -368,11 +708,12 @@ class PluginLoader:
                     handlers.append((None, method))
 
         # --- store & setup --------------------------------------------
-        loaded = LoadedPlugin(plugin_id, meta, config, instance, handlers, services, path.resolve())
+        loaded = LoadedPlugin(plugin_id, meta, config, instance, handlers, services, path.resolve(), service_ports)
         self._plugins[plugin_id] = loaded
         for svc in services:
             self._service_registry[svc] = plugin_id
         self._bus.plugin_services[plugin_id] = [s.value for s in services]
+        self._register_ports(plugin_id, service_ports)
 
         if instance is not None:
             instance.setup()
@@ -398,10 +739,11 @@ class PluginLoader:
         if loaded is None:
             raise PluginError(f"Plugin {plugin_id!r} is not loaded")
 
-        # Release service claims
+        # Release service claims and port reservations
         for svc in loaded.services:
             self._service_registry.pop(svc, None)
         self._bus.plugin_services.pop(plugin_id, None)
+        self._release_ports(loaded.service_ports)
 
         # Unsubscribe all handlers
         for event_name, fn in loaded.handlers:

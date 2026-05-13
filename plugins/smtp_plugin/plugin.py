@@ -321,6 +321,24 @@ class SmtpPlugin(PluginBase, RoutedPlugin):
 
     # ── event handler ────────────────────────────────────────────────────────────
 
+    @on("smtp.send")
+    def on_smtp_send(self, event: Event) -> None:
+        to = event.payload.get("to")
+        if not to:
+            self.logger.warning("smtp.send event missing 'to' field")
+            return
+        req = SendEmailRequest(
+            to=to,
+            subject=event.payload.get("subject", "(no subject)"),
+            body=event.payload.get("body", ""),
+            from_addr=event.payload.get("from_addr"),
+            html=bool(event.payload.get("html", False)),
+        )
+        try:
+            self._send(req)
+        except Exception as exc:
+            self.logger.error("smtp.send event handler failed for %r: %s", to, exc)
+
     @on("smtp.test")
     def on_smtp_test(self, event: Event) -> None:
         to = event.payload.get("to")

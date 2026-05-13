@@ -16,6 +16,13 @@ Events emitted:
   host.group.deleted     – payload: {group}
   host.cron.changed      – payload: {name, command, minute, hour, ...}
   host.cron.deleted      – payload: {name}
+  host.package.changed   – payload: {package, present, latest, platform}
+  host.package.updated   – payload: {package, platform}
+  host.package.deleted   – payload: {package, platform}
+  host.repo.changed          – payload: {repo, platform, ...body fields}
+  host.repo.deleted          – payload: {repo, platform}
+  host.package.upgrade-system.started – payload: {task_id, email, platform}
+  host.package.upgrade-system.done    – payload: {platform, returncode, email}
 """
 from __future__ import annotations
 
@@ -27,20 +34,25 @@ import shutil
 import socket
 import subprocess
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from pydantic import BaseModel
-from pyinfra.api.connect import connect_all
-from pyinfra.api.operations import run_ops
 from pyinfra.operations import files as files_ops
 from pyinfra.operations import server as server_ops
 from pyinfra.operations import systemd as systemd_ops
 
 from plugin_system.core import PluginBase, RoutedPlugin, Service
 from plugin_system.core.events import Event, bus
-
+from plugins.host_plugin._pkg_manager import (
+    PackageBody,
+    PackageManager,
+    RepoBody,
+    detect_package_manager,
+)
 
 # ── Pydantic schemas ───────────────────────────────────────────────────────────
 
@@ -80,6 +92,10 @@ class CronBody(BaseModel):
     user: str = "root"
 
 
+class UpgradeBody(BaseModel):
+    email: str
+
+
 # ── Plugin ─────────────────────────────────────────────────────────────────────
 
 class HostPlugin(PluginBase, RoutedPlugin):
@@ -92,6 +108,8 @@ class HostPlugin(PluginBase, RoutedPlugin):
         "users": {},
         "groups": {},
         "cron": {},
+        "packages": {},
+        "repos": {},
     }
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
@@ -99,6 +117,12 @@ class HostPlugin(PluginBase, RoutedPlugin):
     def setup(self) -> None:
         self._state_path = self.plugin_dir / "data" / self.config.get("state_file", "host_state.json")
         self._state: dict[str, Any] = self._load_state()
+        self._bg_tasks: dict[str, dict[str, Any]] = {}
+        self._pkg_mgr = PackageManager(
+            self._pyinfra_run,
+            detect_package_manager(),
+            cache_ttl=int(self.config.get("os_pkgmgr_max_cache_ttl_secs", 300)),
+        )
         self._register_routes()
         init_cfg: dict[str, Any] = self.config.get("init") or {}
         if init_cfg.get("enable_init_script", False):
@@ -110,13 +134,14 @@ class HostPlugin(PluginBase, RoutedPlugin):
     # ── persistence ────────────────────────────────────────────────────────────
 
     def _load_state(self) -> dict[str, Any]:
+        state = {k: {} for k in self._EMPTY_STATE}
         if self._state_path.exists():
             try:
                 with self._state_path.open() as fh:
-                    return json.load(fh)
+                    state.update(json.load(fh))
             except Exception:
                 self.logger.error("Failed to load state from %r, starting empty", self._state_path, exc_info=True)
-        return {k: {} for k in self._EMPTY_STATE}
+        return state
 
     def _save_state(self) -> None:
         try:
@@ -303,6 +328,8 @@ class HostPlugin(PluginBase, RoutedPlugin):
         add = self.router.add_api_route
 
         add("/status",              self._status,           methods=["GET"],    summary="Plugin status and managed-resource counts")
+        add("/tasks",               self._list_bg_tasks,    methods=["GET"],    summary="List background tasks and their status")
+
 
         add("/hostname",            self._get_hostname,     methods=["GET"],    summary="Get current hostname")
         add("/hostname",            self._set_hostname,     methods=["PUT"],    summary="Set system hostname")
@@ -328,6 +355,17 @@ class HostPlugin(PluginBase, RoutedPlugin):
         add("/cron/{name}",         self._set_cron,         methods=["POST"],   summary="Create or update a cron entry",         status_code=201)
         add("/cron/{name}",         self._delete_cron,      methods=["DELETE"], summary="Remove a cron entry")
 
+        add("/packages",            self._list_packages,    methods=["GET"],    summary="List managed packages")
+        add("/packages/search",     self._search_packages,  methods=["GET"],    summary="Search available packages")
+        add("/packages/upgrade-system",    self._upgrade_system,   methods=["POST"],   summary="Run a full unattended system upgrade and email the output")
+        add("/packages/{name}",     self._install_package,  methods=["POST"],   summary="Install or ensure a package",           status_code=201)
+        add("/packages/{name}",     self._update_package,   methods=["PUT"],    summary="Update a package to latest")
+        add("/packages/{name}",     self._remove_package,   methods=["DELETE"], summary="Remove a package")
+
+        add("/repos",               self._list_repos,       methods=["GET"],    summary="List managed repos")
+        add("/repos/{name}",        self._add_repo,         methods=["POST"],   summary="Add or update a package repository",    status_code=201)
+        add("/repos/{name}",        self._remove_repo,      methods=["DELETE"], summary="Remove a package repository")
+
     # ── status ─────────────────────────────────────────────────────────────────
 
     def _status(self) -> dict:
@@ -335,14 +373,25 @@ class HostPlugin(PluginBase, RoutedPlugin):
             "plugin": self.meta["name"],
             "version": self.meta["version"],
             "hostname": socket.gethostname(),
+            "package_manager": self._pkg_mgr.platform,
             "managed": {
                 "services": len(self._state["services"]),
                 "sysctl":   len(self._state["sysctl"]),
                 "users":    len(self._state["users"]),
                 "groups":   len(self._state["groups"]),
                 "cron":     len(self._state["cron"]),
+                "packages": len(self._state["packages"]),
+                "repos":    len(self._state["repos"]),
             },
         }
+
+    def _list_bg_tasks(self, task_id: Optional[str] = None) -> dict:
+        if task_id is not None:
+            task = self._bg_tasks.get(task_id)
+            if task is None:
+                raise HTTPException(404, f"Task {task_id!r} not found")
+            return {"tasks": [task]}
+        return {"tasks": list(self._bg_tasks.values())}
 
     # ── hostname ───────────────────────────────────────────────────────────────
 
@@ -528,4 +577,146 @@ class HostPlugin(PluginBase, RoutedPlugin):
         del self._state["cron"][name]
         self._save_state()
         self._emit("host.cron.deleted", {"name": name})
+        return {"deleted": name}
+
+    # ── packages ───────────────────────────────────────────────────────────────
+
+    def _list_packages(self, mode: str = "installed") -> dict:
+        if mode not in ("installed", "available", "managed"):
+            raise HTTPException(400, "mode must be one of: installed, available, managed")
+        managed = self._state["packages"]
+        system = self._pkg_mgr.list_system_packages()
+        if mode == "available":
+            pool: dict[str, Any] = {
+                name: {"version": system[name]["version"] if name in system else None, "installed": name in system}
+                for name in self._pkg_mgr.list_available_packages()
+            }
+        elif mode == "installed":
+            pool = {name: {"version": info["version"], "installed": True} for name, info in system.items()}
+        else:  # managed
+            pool = {
+                name: {"version": system[name]["version"] if name in system else None, "installed": name in system}
+                for name in managed
+            }
+        result: dict[str, Any] = {}
+        for name, base in pool.items():
+            result[name] = {**base, "managed": name in managed}
+            if name in managed:
+                result[name].update(managed[name])
+        return {"packages": result, "platform": self._pkg_mgr.platform, "mode": mode}
+
+    def _search_packages(self, q: str) -> dict:
+        self._pkg_mgr.assert_supported()
+        return {"query": q, "results": self._pkg_mgr.search_packages(q), "platform": self._pkg_mgr.platform}
+
+    def _install_package(self, name: str, body: PackageBody) -> dict:
+        self._pkg_mgr.assert_supported()
+        self._pkg_mgr.install(name, body)
+        self._state["packages"][name] = body.model_dump()
+        self._save_state()
+        self._emit("host.package.changed", {"package": name, **body.model_dump(), "platform": self._pkg_mgr.platform})
+        return {"package": name, **body.model_dump(), "platform": self._pkg_mgr.platform}
+
+    def _update_package(self, name: str) -> dict:
+        self._pkg_mgr.assert_supported()
+        if name not in self._state["packages"]:
+            raise HTTPException(404, f"Package {name!r} not managed")
+        self._pkg_mgr.update(name)
+        self._state["packages"][name]["latest"] = True
+        self._save_state()
+        self._emit("host.package.updated", {"package": name, "platform": self._pkg_mgr.platform})
+        return {"package": name, "updated": True, "platform": self._pkg_mgr.platform}
+
+    def _remove_package(self, name: str) -> dict:
+        self._pkg_mgr.assert_supported()
+        if name not in self._state["packages"]:
+            raise HTTPException(404, f"Package {name!r} not managed")
+        self._pkg_mgr.remove(name)
+        del self._state["packages"][name]
+        self._save_state()
+        self._emit("host.package.deleted", {"package": name, "platform": self._pkg_mgr.platform})
+        return {"deleted": name}
+
+    def _upgrade_system(self, body: UpgradeBody, background_tasks: BackgroundTasks) -> dict:
+        self._pkg_mgr.assert_supported()
+        task_id = str(uuid.uuid4())
+        self._bg_tasks[task_id] = {
+            "id": task_id,
+            "type": "upgrade_system",
+            "status": "running",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": None,
+            "error": None,
+            "email": body.email,
+        }
+        background_tasks.add_task(self._run_upgrade_task, task_id, body.email)
+        self._emit("host.package.upgrade-system.started", {"task_id": task_id, "email": body.email, "platform": self._pkg_mgr.platform})
+        return {"status": "started", "task_id": task_id, "email": body.email}
+
+    def _run_upgrade_task(self, task_id: str, email: str) -> None:
+        try:
+            result = self._pkg_mgr.upgrade_system()
+        except Exception as exc:
+            result = {"platform": self._pkg_mgr.platform, "returncode": -1, "stdout": "", "stderr": str(exc)}
+        ok = result["returncode"] == 0
+        self._bg_tasks[task_id].update({
+            "status": "done" if ok else "failed",
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "error": result["stderr"] if not ok else None,
+        })
+        hostname = socket.gethostname()
+        subject = (
+            f"[FastFirewall] System upgrade {'succeeded' if ok else 'FAILED'} on {hostname}"
+        )
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        body_text = (
+            f"Host:       {hostname}\n"
+            f"Time:       {ts}\n"
+            f"Platform:   {result['platform']}\n"
+            f"Exit code:  {result['returncode']}\n"
+            f"\n--- stdout ---\n{result['stdout'] or '(empty)'}\n"
+            f"\n--- stderr ---\n{result['stderr'] or '(empty)'}\n"
+        )
+        self._emit("smtp.send", {"to": email, "subject": subject, "body": body_text})
+        self._emit("host.package.upgrade-system.done", {
+            "platform": result["platform"],
+            "returncode": result["returncode"],
+            "email": email,
+        })
+
+    # ── repos ──────────────────────────────────────────────────────────────────
+
+    def _list_repos(self) -> dict:
+        system = self._pkg_mgr.list_system_repos()
+        managed = self._state["repos"]
+
+        result: dict[str, Any] = {}
+        for sys_id, attrs in system.items():
+            result[sys_id] = {**attrs, "managed": False}
+        for name, attrs in managed.items():
+            sys_id = self._pkg_mgr.repo_system_id(name, attrs)
+            if sys_id is not None and sys_id in result:
+                result[sys_id] = {**result[sys_id], **attrs, "managed": True}
+            else:
+                result[name] = {**attrs, "managed": True}
+
+        return {"repos": result, "platform": self._pkg_mgr.platform}
+
+    def _add_repo(self, name: str, body: RepoBody) -> dict:
+        self._pkg_mgr.assert_supported()
+        self._pkg_mgr.apply_repo(name, body)
+        self._state["repos"][name] = body.model_dump()
+        self._save_state()
+        self._emit("host.repo.changed", {"repo": name, **body.model_dump(), "platform": self._pkg_mgr.platform})
+        return {"repo": name, **body.model_dump(), "platform": self._pkg_mgr.platform}
+
+    def _remove_repo(self, name: str) -> dict:
+        self._pkg_mgr.assert_supported()
+        if name not in self._state["repos"]:
+            raise HTTPException(404, f"Repo {name!r} not managed")
+        stored = self._state["repos"][name]
+        self._pkg_mgr.apply_repo(name, RepoBody(**{**stored, "present": False}))
+        del self._state["repos"][name]
+        self._save_state()
+        self._emit("host.repo.deleted", {"repo": name, "platform": self._pkg_mgr.platform})
         return {"deleted": name}

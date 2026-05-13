@@ -55,7 +55,7 @@ This is a **FastAPI application driven entirely by plugins**. The app itself (`a
 
 1. `AppConfig.load()` reads `app_config.yaml` into typed dataclasses.
 2. `manager_cli.run(loader, plugins_dir)` parses CLI args; exits early for management commands, otherwise returns an optional plugin allow-list.
-3. `PluginLoader.load_directory()` scans the configured `plugins/` directory, sorted by `boot_priority` (lower = earlier). Pass `only=[...]` to restrict which plugins are loaded.
+3. `PluginLoader.load_directory()` scans the configured `plugins/` directory and derives load order via topological sort of `plugin_requirements` (dependencies before dependents; alphabetical tiebreaker). Pass `only=[...]` to restrict which plugins are loaded; transitive dependencies are included automatically.
 4. For each plugin directory with a `plugin.yaml` + `plugin.py`: the loader imports the module, instantiates any `PluginBase` subclass, wires up event handlers, calls `setup()`, then mounts FastAPI routes if the plugin is a `RoutedPlugin`.
 5. After loading, a `plugin.loaded` event is emitted on the bus.
 
@@ -65,9 +65,17 @@ Every plugin is a directory under `plugins/` with two required files:
 
 **`plugin.yaml`** — metadata and config:
 - `id`, `name`, `version`, `author`, `description`
-- `enabled` (default `true`), `boot_priority` (default `100`)
-- `plugin_requirements` — list of other plugin ids that must already be loaded
+- `enabled` (default `true`)
+- `plugin_requirements` — list of other plugin ids this depends on; determines load order
 - `py_requirements` / `os_requirements` — installed at load time via pyinfra
+- `service_ports` **(required)** — declares which ports the plugin listens on. Must be `-1` (no ports) or a dict keyed by service name matching the plugin's declared `services`:
+  ```yaml
+  service_ports:
+    smtp:
+      tcp: [25, 587, 465]   # use -1 as the port value when the service has no real ports
+  ```
+  Keys must exactly match the `Service` enum values the plugin claims. The loader validates this at load time, checks for conflicts with other loaded plugins, and checks the OS isn't already using the port (reads `/proc/net/tcp`, `/proc/net/udp`).
+- `skip_host_os_port_check` (default `false`) — set to `true` for plugins that manage a service already running on the host (e.g. Postfix, rsyslog). Skips the OS port-in-use check; inter-plugin port conflict check still runs.
 - `config` — arbitrary dict passed to the plugin instance as `self.config`
 
 **`plugin.py`** — must contain either a `PluginBase` subclass or decorated module-level functions (or both).
@@ -129,8 +137,12 @@ The bus auto-injects the emitting plugin's `services` list into `event.payload` 
 
 Beyond `load_plugin` / `unload_plugin`, `PluginLoader` exposes two read/write helpers that do not load or execute any plugin code:
 
-- `list_plugins(directory)` — scans `directory` and returns a list of dicts with `id`, `name`, `version`, `description`, `author`, `enabled`, `boot_priority` for every discovered plugin.
+- `list_plugins(directory)` — scans `directory` and returns a list of dicts with `id`, `name`, `version`, `description`, `author`, `enabled`, `plugin_requirements`, `service_ports` for every discovered plugin, sorted in topological load order.
 - `set_plugin_enabled(directory, plugin_id, enabled)` — finds the plugin by id, sets the `enabled` field in its `plugin.yaml`, and writes it back. Raises `PluginError` if the plugin is not found.
+
+`PluginLoader` maintains two runtime registries updated on every load/unload:
+- `service_registry` — `{Service → plugin_id}`: which plugin owns each service
+- `_port_registry` — `{(proto, port) → plugin_id}`: which plugin has claimed each port; port `-1` is never registered
 
 ### Dependency installation
 

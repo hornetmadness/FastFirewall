@@ -1,5 +1,4 @@
 author: hornetmadness@gmail.com
-boot_priority: 10
 config:
   enable_systemd_input: true
   fastfirewall_conf: /etc/fluent-bit/conf.d/fastfirewall
@@ -29,4 +28,10 @@ os_requirements:
 - logrotate
 plugin_requirements: []
 py_requirements: []
+skip_host_os_port_check: true  # rsyslog/fluent-bit are already running; this plugin manages them
+
+service_ports:
+  syslog:
+    tcp: [514]
+    udp: [514]
 version: 1.0.0

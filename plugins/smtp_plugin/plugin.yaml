@@ -7,12 +7,17 @@ description: >
 author: hornetmadness@gmail.com
 
 enabled: true
-boot_priority: 10
 
 plugin_requirements: []
 py_requirements: []
 os_requirements:
   - postfix
+
+skip_host_os_port_check: true  # Postfix is already running; this plugin manages it rather than starting it
+
+service_ports:
+  smtp:
+    tcp: [25, 587, 465]
 
 # Events emitted:
 #   smtp.config.updated   – payload: {keys: [list of changed setting names]}
@@ -23,6 +28,8 @@ os_requirements:
 # Events consumed:
 #   smtp.test             – payload: {to, subject?, body?}
 #     Sends a test email to the given address out-of-band.
+#   smtp.send             – payload: {to, subject, body, from_addr?, html?}
+#     Sends an email on behalf of any plugin.
 
 config:
   state_file: smtp_state.json

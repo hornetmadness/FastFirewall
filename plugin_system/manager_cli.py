@@ -68,13 +68,46 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _format_services(services: list) -> str:
+    return ", ".join(services) if services else "-"
+
+
+def _format_service_ports(service_ports) -> str:
+    if service_ports in (-1, None):
+        return "-"
+    parts = []
+    for svc, proto_map in service_ports.items():
+        proto_parts = []
+        for proto, ports in proto_map.items():
+            real = [p for p in ports if p != -1]
+            if real:
+                proto_parts.append(f"{proto}:{','.join(str(p) for p in real)}")
+        if proto_parts:
+            parts.append(f"{svc} {' '.join(proto_parts)}")
+    return "  ".join(parts) if parts else "-"
+
+
 def _print_plugin_table(rows: list[dict]) -> None:
-    id_w = max((len(r["id"]) for r in rows), default=2)
-    name_w = max((len(r["name"]) for r in rows), default=4)
-    ver_w = max((len(r["version"]) for r in rows), default=7)
-    header = f"{'ID':<{id_w}}  {'NAME':<{name_w}}  {'VERSION':<{ver_w}}  STATE"
+    formatted_services = [_format_services(r.get("services", []))      for r in rows]
+    formatted_ports    = [_format_service_ports(r.get("service_ports")) for r in rows]
+
+    id_w    = max((len(r["id"])      for r in rows),              default=2)
+    name_w  = max((len(r["name"])    for r in rows),              default=4)
+    ver_w   = max((len(r["version"]) for r in rows),              default=7)
+    req_w   = max((len(", ".join(r["plugin_requirements"])) for r in rows), default=8)
+    svc_w   = max((len(s)            for s in formatted_services), default=8)
+    ports_w = max((len(p)            for p in formatted_ports),    default=5)
+
+    header = (
+        f"{'ID':<{id_w}}  {'NAME':<{name_w}}  {'VERSION':<{ver_w}}  "
+        f"STATE     {'REQUIRES':<{req_w}}  {'SERVICES':<{svc_w}}  {'PORTS':<{ports_w}}"
+    )
     print(header)
     print("-" * len(header))
-    for r in rows:
-        state = "enabled" if r["enabled"] else "disabled"
-        print(f"{r['id']:<{id_w}}  {r['name']:<{name_w}}  {r['version']:<{ver_w}}  {state}")
+    for r, svc, ports in zip(rows, formatted_services, formatted_ports):
+        state    = "enabled" if r["enabled"] else "disabled"
+        requires = ", ".join(r["plugin_requirements"]) if r["plugin_requirements"] else "-"
+        print(
+            f"{r['id']:<{id_w}}  {r['name']:<{name_w}}  {r['version']:<{ver_w}}  "
+            f"{state:<9} {requires:<{req_w}}  {svc:<{svc_w}}  {ports}"
+        )

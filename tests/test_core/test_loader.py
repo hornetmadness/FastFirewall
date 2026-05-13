@@ -15,7 +15,10 @@ from plugin_system.core.loader import PluginError
 def make_plugin(root: Path, name: str, yaml_content: str, py_content: str) -> Path:
     plugin_dir = root / name
     plugin_dir.mkdir()
-    (plugin_dir / "plugin.yaml").write_text(textwrap.dedent(yaml_content))
+    content = textwrap.dedent(yaml_content)
+    if "service_ports" not in content:
+        content += "service_ports: -1\n"
+    (plugin_dir / "plugin.yaml").write_text(content)
     (plugin_dir / "plugin.py").write_text(textwrap.dedent(py_content))
     return plugin_dir
 
@@ -48,7 +51,7 @@ def test_load_minimal_plugin(tmp_path, loader):
 def test_plugin_id_defaults_to_directory_name(tmp_path, loader):
     plugin_dir = tmp_path / "dir_name_plugin"
     plugin_dir.mkdir()
-    (plugin_dir / "plugin.yaml").write_text("name: Dir Name\n")  # no id field
+    (plugin_dir / "plugin.yaml").write_text("name: Dir Name\nservice_ports: -1\n")  # no id field
     (plugin_dir / "plugin.py").write_text("# empty\n")
     pid = loader.load_plugin(plugin_dir)
     assert pid == "dir_name_plugin"
@@ -162,6 +165,216 @@ def test_syntax_error_in_plugin_module_raises(tmp_path, loader):
         loader.load_plugin(tmp_path / "syntax_err")
 
 
+def test_missing_service_ports_raises(tmp_path, loader):
+    d = tmp_path / "no_ports"
+    d.mkdir()
+    (d / "plugin.yaml").write_text("name: NoPorts\nid: no_ports\n")
+    (d / "plugin.py").write_text("# empty\n")
+    with pytest.raises(PluginError, match="service_ports"):
+        loader.load_plugin(d)
+
+
+def test_invalid_service_ports_bad_type_raises(tmp_path, loader):
+    d = tmp_path / "bad_ports"
+    d.mkdir()
+    (d / "plugin.yaml").write_text("name: Bad\nid: bad_ports\nservice_ports: somestring\n")
+    (d / "plugin.py").write_text("# empty\n")
+    with pytest.raises(PluginError, match="service_ports"):
+        loader.load_plugin(d)
+
+
+def test_invalid_service_ports_unknown_protocol_raises(tmp_path, loader):
+    d = tmp_path / "bad_proto"
+    d.mkdir()
+    (d / "plugin.yaml").write_text(
+        "name: BP\nid: bad_proto\nservice_ports:\n  svc:\n    icmp: [1]\n"
+    )
+    (d / "plugin.py").write_text("# empty\n")
+    with pytest.raises(PluginError, match="icmp"):
+        loader.load_plugin(d)
+
+
+def test_service_ports_minus_one_is_valid(tmp_path, loader):
+    d = tmp_path / "no_svc_ports"
+    d.mkdir()
+    (d / "plugin.yaml").write_text("name: NS\nid: no_svc_ports\nservice_ports: -1\n")
+    (d / "plugin.py").write_text("# empty\n")
+    loader.load_plugin(d)
+    assert loader.plugins["no_svc_ports"].service_ports == -1
+
+
+def test_service_ports_dict_stored_on_loaded_plugin(tmp_path, loader):
+    d = tmp_path / "has_ports"
+    d.mkdir()
+    (d / "plugin.yaml").write_text(
+        "name: HP\nid: has_ports\nservice_ports:\n  dns:\n    tcp: [8080, 443]\n    udp: [53]\n"
+    )
+    (d / "plugin.py").write_text(textwrap.dedent("""
+        from plugin_system.core import PluginBase, Service
+
+        class HasPorts(PluginBase):
+            services = [Service.DNS]
+    """))
+    loader.load_plugin(d)
+    sp = loader.plugins["has_ports"].service_ports
+    assert sp == {"dns": {"tcp": [8080, 443], "udp": [53]}}
+
+
+def test_service_ports_minus_one_with_declared_service_raises(tmp_path, loader):
+    d = tmp_path / "mismatch_a"
+    d.mkdir()
+    (d / "plugin.yaml").write_text("name: MA\nid: mismatch_a\nservice_ports: -1\n")
+    (d / "plugin.py").write_text(textwrap.dedent("""
+        from plugin_system.core import PluginBase, Service
+
+        class MismatchA(PluginBase):
+            services = [Service.DNS]
+    """))
+    with pytest.raises(PluginError, match="service_ports is -1"):
+        loader.load_plugin(d)
+
+
+def test_service_ports_key_mismatch_raises(tmp_path, loader):
+    d = tmp_path / "mismatch_b"
+    d.mkdir()
+    (d / "plugin.yaml").write_text(
+        "name: MB\nid: mismatch_b\nservice_ports:\n  dhcp:\n    udp: [67]\n"
+    )
+    (d / "plugin.py").write_text(textwrap.dedent("""
+        from plugin_system.core import PluginBase, Service
+
+        class MismatchB(PluginBase):
+            services = [Service.DNS]
+    """))
+    with pytest.raises(PluginError, match="service_ports keys do not match"):
+        loader.load_plugin(d)
+
+
+def test_service_ports_dict_with_no_services_raises(tmp_path, loader):
+    d = tmp_path / "mismatch_c"
+    d.mkdir()
+    (d / "plugin.yaml").write_text(
+        "name: MC\nid: mismatch_c\nservice_ports:\n  dns:\n    udp: [53]\n"
+    )
+    (d / "plugin.py").write_text("# empty\n")
+    with pytest.raises(PluginError, match="service_ports keys do not match"):
+        loader.load_plugin(d)
+
+
+# ---------------------------------------------------------------------------
+# Port conflict checks
+# ---------------------------------------------------------------------------
+
+def test_plugin_port_conflict_raises(tmp_path, bus):
+    loader = PluginLoader(bus=bus)
+    # DNS and MDNS are different services but both can listen on UDP 5353 — use
+    # that to trigger a port collision without a service-exclusivity collision.
+    make_plugin(tmp_path, "dns_p", (
+        "name: DNS\nid: dns_p\n"
+        "service_ports:\n  dns:\n    udp: [5353]\n"
+    ), textwrap.dedent("""
+        from plugin_system.core import PluginBase, Service
+
+        class DNSP(PluginBase):
+            services = [Service.DNS]
+    """))
+    make_plugin(tmp_path, "mdns_p", (
+        "name: MDNS\nid: mdns_p\n"
+        "service_ports:\n  mdns:\n    udp: [5353]\n"
+    ), textwrap.dedent("""
+        from plugin_system.core import PluginBase, Service
+
+        class MDNSP(PluginBase):
+            services = [Service.MDNS]
+    """))
+    loader.load_plugin(tmp_path / "dns_p")
+    with pytest.raises(PluginError, match="already claimed by plugin"):
+        loader.load_plugin(tmp_path / "mdns_p")
+
+
+def test_port_released_after_unload(tmp_path, bus):
+    loader = PluginLoader(bus=bus)
+    make_plugin(tmp_path, "dns_p", (
+        "name: DNS\nid: dns_p\n"
+        "service_ports:\n  dns:\n    udp: [5353]\n"
+    ), textwrap.dedent("""
+        from plugin_system.core import PluginBase, Service
+
+        class DNSP(PluginBase):
+            services = [Service.DNS]
+    """))
+    make_plugin(tmp_path, "mdns_p", (
+        "name: MDNS\nid: mdns_p\n"
+        "service_ports:\n  mdns:\n    udp: [5353]\n"
+    ), textwrap.dedent("""
+        from plugin_system.core import PluginBase, Service
+
+        class MDNSP(PluginBase):
+            services = [Service.MDNS]
+    """))
+    loader.load_plugin(tmp_path / "dns_p")
+    loader.unload_plugin("dns_p")
+    loader.load_plugin(tmp_path / "mdns_p")
+    assert "mdns_p" in loader.plugins
+
+
+def test_os_port_conflict_raises(tmp_path, loader):
+    from unittest.mock import patch
+    d = tmp_path / "smtp_p"
+    d.mkdir()
+    (d / "plugin.yaml").write_text(
+        "name: SMTP\nid: smtp_p\nservice_ports:\n  smtp:\n    tcp: [25]\n"
+    )
+    (d / "plugin.py").write_text(textwrap.dedent("""
+        from plugin_system.core import PluginBase, Service
+
+        class SMTPPlugin(PluginBase):
+            services = [Service.SMTP]
+    """))
+    with patch.object(loader, "_get_os_listening_ports", return_value={25}):
+        with pytest.raises(PluginError, match="already in use by the OS"):
+            loader.load_plugin(d)
+
+
+def test_skip_host_os_port_check_bypasses_os_check(tmp_path, loader):
+    from unittest.mock import patch
+    d = tmp_path / "managed_smtp"
+    d.mkdir()
+    (d / "plugin.yaml").write_text(
+        "name: MS\nid: managed_smtp\n"
+        "skip_host_os_port_check: true\n"
+        "service_ports:\n  smtp:\n    tcp: [25]\n"
+    )
+    (d / "plugin.py").write_text(textwrap.dedent("""
+        from plugin_system.core import PluginBase, Service
+
+        class ManagedSMTP(PluginBase):
+            services = [Service.SMTP]
+    """))
+    with patch.object(loader, "_get_os_listening_ports", return_value={25}) as mock_check:
+        loader.load_plugin(d)
+    mock_check.assert_not_called()
+    assert "managed_smtp" in loader.plugins
+
+
+def test_os_port_conflict_skips_sentinel(tmp_path, loader):
+    from unittest.mock import patch
+    d = tmp_path / "no_real_port"
+    d.mkdir()
+    (d / "plugin.yaml").write_text(
+        "name: NRP\nid: no_real_port\nservice_ports:\n  firewall:\n    tcp: [-1]\n"
+    )
+    (d / "plugin.py").write_text(textwrap.dedent("""
+        from plugin_system.core import PluginBase, Service
+
+        class NRPPlugin(PluginBase):
+            services = [Service.FIREWALL]
+    """))
+    with patch.object(loader, "_get_os_listening_ports", return_value={-1}):
+        loader.load_plugin(d)
+    assert "no_real_port" in loader.plugins
+
+
 def test_invalid_service_raises_plugin_error(tmp_path, loader):
     make_plugin(tmp_path, "bad_svc", "name: BadSvc\nid: bad_svc\n", """
         from plugin_system.core import PluginBase
@@ -179,7 +392,7 @@ def test_invalid_service_raises_plugin_error(tmp_path, loader):
 
 def test_service_registered_after_load(tmp_path, bus):
     loader = PluginLoader(bus=bus)
-    make_plugin(tmp_path, "dns_plugin", "name: DNS\nid: dns_plugin\n", """
+    make_plugin(tmp_path, "dns_plugin", "name: DNS\nid: dns_plugin\nservice_ports:\n  dns:\n    udp: [53]\n", """
         from plugin_system.core import PluginBase, Service
 
         class DNSPlugin(PluginBase):
@@ -191,13 +404,13 @@ def test_service_registered_after_load(tmp_path, bus):
 
 def test_service_conflict_raises(tmp_path, bus):
     loader = PluginLoader(bus=bus)
-    make_plugin(tmp_path, "plugin_a", "name: A\nid: plugin_a\n", """
+    make_plugin(tmp_path, "plugin_a", "name: A\nid: plugin_a\nservice_ports:\n  dns:\n    udp: [53]\n", """
         from plugin_system.core import PluginBase, Service
 
         class PluginA(PluginBase):
             services = [Service.DNS]
     """)
-    make_plugin(tmp_path, "plugin_b", "name: B\nid: plugin_b\n", """
+    make_plugin(tmp_path, "plugin_b", "name: B\nid: plugin_b\nservice_ports:\n  dns:\n    udp: [53]\n", """
         from plugin_system.core import PluginBase, Service
 
         class PluginB(PluginBase):
@@ -210,7 +423,7 @@ def test_service_conflict_raises(tmp_path, bus):
 
 def test_service_registry_snapshot(tmp_path, bus):
     loader = PluginLoader(bus=bus)
-    make_plugin(tmp_path, "reg_plugin", "name: Reg\nid: reg_plugin\n", """
+    make_plugin(tmp_path, "reg_plugin", "name: Reg\nid: reg_plugin\nservice_ports:\n  ntp:\n    udp: [123]\n", """
         from plugin_system.core import PluginBase, Service
 
         class RegPlugin(PluginBase):
@@ -331,13 +544,13 @@ def test_unload_unknown_plugin_raises(loader):
 
 def test_unload_releases_service_for_reuse(tmp_path, bus):
     loader = PluginLoader(bus=bus)
-    make_plugin(tmp_path, "svc_a", "name: SvcA\nid: svc_a\n", """
+    make_plugin(tmp_path, "svc_a", "name: SvcA\nid: svc_a\nservice_ports:\n  dns:\n    udp: [53]\n", """
         from plugin_system.core import PluginBase, Service
 
         class SvcA(PluginBase):
             services = [Service.DNS]
     """)
-    make_plugin(tmp_path, "svc_b", "name: SvcB\nid: svc_b\n", """
+    make_plugin(tmp_path, "svc_b", "name: SvcB\nid: svc_b\nservice_ports:\n  dns:\n    udp: [53]\n", """
         from plugin_system.core import PluginBase, Service
 
         class SvcB(PluginBase):
@@ -464,53 +677,102 @@ def test_load_directory_not_a_dir_raises(loader):
 
 
 # ---------------------------------------------------------------------------
-# boot_priority ordering
+# Topological load ordering (plugin_requirements)
 # ---------------------------------------------------------------------------
 
-def test_boot_priority_zero_loads_before_default(tmp_path, bus):
+def test_dependency_loads_before_dependent(tmp_path, bus):
     loader = PluginLoader(bus=bus)
-    make_plugin(tmp_path, "zzz_late", "name: Late\nid: zzz_late\n", "# empty\n")
-    make_plugin(tmp_path, "aaa_early", "name: Early\nid: aaa_early\nboot_priority: 0\n", "# empty\n")
+    make_plugin(tmp_path, "base",     "name: Base\nid: base\n",                                         "# empty\n")
+    make_plugin(tmp_path, "consumer", "name: Consumer\nid: consumer\nplugin_requirements: [base]\n",    "# empty\n")
     loaded = loader.load_directory(tmp_path)
-    assert loaded.index("aaa_early") < loaded.index("zzz_late")
+    assert loaded.index("base") < loaded.index("consumer")
 
 
-def test_boot_priority_explicit_ordering(tmp_path, bus):
+def test_alphabetical_tiebreaker_within_same_level(tmp_path, bus):
     loader = PluginLoader(bus=bus)
-    make_plugin(tmp_path, "p3", "name: P3\nid: p3\nboot_priority: 30\n", "# empty\n")
-    make_plugin(tmp_path, "p1", "name: P1\nid: p1\nboot_priority: 10\n", "# empty\n")
-    make_plugin(tmp_path, "p2", "name: P2\nid: p2\nboot_priority: 20\n", "# empty\n")
-    loaded = loader.load_directory(tmp_path)
-    assert loaded == ["p1", "p2", "p3"]
-
-
-def test_boot_priority_ties_broken_alphabetically(tmp_path, bus):
-    loader = PluginLoader(bus=bus)
-    make_plugin(tmp_path, "charlie", "name: C\nid: charlie\nboot_priority: 50\n", "# empty\n")
-    make_plugin(tmp_path, "alice",   "name: A\nid: alice\nboot_priority: 50\n",   "# empty\n")
-    make_plugin(tmp_path, "bob",     "name: B\nid: bob\nboot_priority: 50\n",     "# empty\n")
+    make_plugin(tmp_path, "charlie", "name: C\nid: charlie\n", "# empty\n")
+    make_plugin(tmp_path, "alice",   "name: A\nid: alice\n",   "# empty\n")
+    make_plugin(tmp_path, "bob",     "name: B\nid: bob\n",     "# empty\n")
     loaded = loader.load_directory(tmp_path)
     assert loaded == ["alice", "bob", "charlie"]
 
 
-def test_boot_priority_missing_defaults_to_100(tmp_path, bus):
+def test_chain_of_dependencies_ordered_correctly(tmp_path, bus):
     loader = PluginLoader(bus=bus)
-    make_plugin(tmp_path, "explicit_99", "name: E\nid: explicit_99\nboot_priority: 99\n", "# empty\n")
-    make_plugin(tmp_path, "no_priority", "name: N\nid: no_priority\n", "# empty\n")
+    make_plugin(tmp_path, "c", "name: C\nid: c\nplugin_requirements: [b]\n", "# empty\n")
+    make_plugin(tmp_path, "b", "name: B\nid: b\nplugin_requirements: [a]\n", "# empty\n")
+    make_plugin(tmp_path, "a", "name: A\nid: a\n",                           "# empty\n")
     loaded = loader.load_directory(tmp_path)
-    assert loaded.index("explicit_99") < loaded.index("no_priority")
+    assert loaded == ["a", "b", "c"]
 
 
-def test_boot_priority_bad_yaml_falls_back_to_100(tmp_path, bus):
+def test_circular_dependency_raises(tmp_path, bus):
     loader = PluginLoader(bus=bus)
-    # Plugin with boot_priority: 1 should load before the one with a bad YAML (defaults to 100)
-    make_plugin(tmp_path, "good",  "name: Good\nid: good\nboot_priority: 1\n", "# empty\n")
+    make_plugin(tmp_path, "alpha", "name: A\nid: alpha\nplugin_requirements: [beta]\n",  "# empty\n")
+    make_plugin(tmp_path, "beta",  "name: B\nid: beta\nplugin_requirements: [alpha]\n",  "# empty\n")
+    with pytest.raises(PluginError, match="Circular dependency"):
+        loader.load_directory(tmp_path)
+
+
+def test_three_way_cycle_raises(tmp_path, bus):
+    loader = PluginLoader(bus=bus)
+    make_plugin(tmp_path, "x", "name: X\nid: x\nplugin_requirements: [z]\n", "# empty\n")
+    make_plugin(tmp_path, "y", "name: Y\nid: y\nplugin_requirements: [x]\n", "# empty\n")
+    make_plugin(tmp_path, "z", "name: Z\nid: z\nplugin_requirements: [y]\n", "# empty\n")
+    with pytest.raises(PluginError, match="Circular dependency"):
+        loader.load_directory(tmp_path)
+
+
+def test_missing_required_plugin_raises(tmp_path, bus):
+    loader = PluginLoader(bus=bus)
+    make_plugin(tmp_path, "needy", "name: N\nid: needy\nplugin_requirements: [ghost]\n", "# empty\n")
+    with pytest.raises(PluginError, match="ghost"):
+        loader.load_directory(tmp_path)
+
+
+def test_disabled_dependency_skips_dependent(tmp_path, bus):
+    loader = PluginLoader(bus=bus)
+    make_plugin(tmp_path, "dep",      "name: Dep\nid: dep\nenabled: false\n",                              "# empty\n")
+    make_plugin(tmp_path, "consumer", "name: C\nid: consumer\nplugin_requirements: [dep]\n",               "# empty\n")
+    loaded = loader.load_directory(tmp_path)
+    assert "consumer" not in loaded
+    assert "dep" not in loaded
+
+
+def test_disabled_cascades_transitively(tmp_path, bus):
+    loader = PluginLoader(bus=bus)
+    make_plugin(tmp_path, "root",    "name: R\nid: root\nenabled: false\n",                               "# empty\n")
+    make_plugin(tmp_path, "middle",  "name: M\nid: middle\nplugin_requirements: [root]\n",                 "# empty\n")
+    make_plugin(tmp_path, "leaf",    "name: L\nid: leaf\nplugin_requirements: [middle]\n",                 "# empty\n")
+    make_plugin(tmp_path, "unrelated", "name: U\nid: unrelated\n",                                         "# empty\n")
+    loaded = loader.load_directory(tmp_path)
+    assert "root" not in loaded
+    assert "middle" not in loaded
+    assert "leaf" not in loaded
+    assert "unrelated" in loaded
+
+
+def test_only_expands_to_include_transitive_deps(tmp_path, bus):
+    loader = PluginLoader(bus=bus)
+    make_plugin(tmp_path, "infra",    "name: I\nid: infra\n",                                              "# empty\n")
+    make_plugin(tmp_path, "service",  "name: S\nid: service\nplugin_requirements: [infra]\n",              "# empty\n")
+    make_plugin(tmp_path, "unrelated","name: U\nid: unrelated\n",                                          "# empty\n")
+    loaded = loader.load_directory(tmp_path, only=["service"])
+    assert "infra" in loaded
+    assert "service" in loaded
+    assert "unrelated" not in loaded
+    assert loaded.index("infra") < loaded.index("service")
+
+
+def test_bad_yaml_plugin_is_skipped_gracefully(tmp_path, bus):
+    loader = PluginLoader(bus=bus)
+    make_plugin(tmp_path, "good", "name: Good\nid: good\n", "# empty\n")
     bad_dir = tmp_path / "bad_yaml"
     bad_dir.mkdir()
     (bad_dir / "plugin.yaml").write_text("this: {is: [bad yaml\n")
     (bad_dir / "plugin.py").write_text("# empty\n")
     loaded = loader.load_directory(tmp_path)
-    assert loaded.index("good") == 0
+    assert "good" in loaded
 
 
 # ---------------------------------------------------------------------------

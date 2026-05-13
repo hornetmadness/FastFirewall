@@ -8,13 +8,16 @@ description: >
 author: hornetmadness@gmail.com
 
 enabled: true
-boot_priority: 1
 
 plugin_requirements: []
 py_requirements:
   - ifstate
   - pyyaml
 os_requirements: []
+
+service_ports:
+  networking:
+    tcp: [-1]
 
 # Events emitted:
 #   networking.interface.configured – payload: {name, addresses?, link?}
