@@ -1,4 +1,25 @@
 author: hornetmadness@gmail.com
+description: 'Installs and configures fluent-bit and rsyslog to collect system logs
+  (including systemd journal) and write them to /var/log/. Provides an API to read
+  and tail log files.
+
+  '
+enabled: true
+id: syslog_plugin
+name: Syslog Plugin
+version: 1.0.0
+os_requirements:
+- fluent-bit
+- logrotate
+plugin_requirements: []
+py_requirements: []
+skip_host_os_port_check: true  # rsyslog/fluent-bit are already running; this plugin manages them
+
+service_ports:
+  syslog:
+    tcp: [514]
+    udp: [514]
+
 config:
   enable_systemd_input: true
   fastfirewall_conf: /etc/fluent-bit/conf.d/fastfirewall
@@ -15,23 +36,3 @@ config:
   syslog_port: 514
   syslog_unix_mode: unix_udp
   syslog_unix_path: ''
-description: 'Installs and configures fluent-bit and rsyslog to collect system logs
-  (including systemd journal) and write them to /var/log/. Provides an API to read
-  and tail log files.
-
-  '
-enabled: true
-id: syslog_plugin
-name: Syslog Plugin
-os_requirements:
-- fluent-bit
-- logrotate
-plugin_requirements: []
-py_requirements: []
-skip_host_os_port_check: true  # rsyslog/fluent-bit are already running; this plugin manages them
-
-service_ports:
-  syslog:
-    tcp: [514]
-    udp: [514]
-version: 1.0.0

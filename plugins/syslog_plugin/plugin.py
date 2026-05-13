@@ -151,9 +151,10 @@ class SyslogPlugin(PluginBase, RoutedPlugin):
 
         self._pyinfra_run(
             server_ops.service,
-            name="Enable fluent-bit at boot",
+            name="Enable and start fluent-bit",
             service="fluent-bit",
             enabled=True,
+            running=True,
             _sudo=True,
         )
 
@@ -647,7 +648,7 @@ def _build_fastfirewall_conf_classic(
     out_cfg["Match"] = "*"
     out_cfg["Path"] = str(log_dir)
     out_cfg["File"] = "fluent-bit.log"
-    out_cfg["Format"] = "json_lines"
+    out_cfg["Format"] = "json"
 
     return _build_fb_ini(dict(sections))
 

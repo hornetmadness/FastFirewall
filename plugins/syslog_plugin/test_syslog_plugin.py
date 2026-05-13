@@ -100,6 +100,18 @@ def test_setup_calls_pyinfra(tmp_path):
     assert plugin._pyinfra_run.called
 
 
+def test_setup_starts_fluent_bit_service(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    service_calls = [
+        call for call in plugin._pyinfra_run.call_args_list
+        if call[1].get("service") == "fluent-bit"
+    ]
+    assert service_calls, "expected a server_ops.service call for fluent-bit"
+    kwargs = service_calls[0][1]
+    assert kwargs.get("enabled") is True
+    assert kwargs.get("running") is True, "fluent-bit must be started (running=True), not just enabled at boot"
+
+
 # ── status ─────────────────────────────────────────────────────────────────────
 
 def test_fluent_conf_network_input_present(tmp_path):
