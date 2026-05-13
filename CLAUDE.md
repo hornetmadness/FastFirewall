@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Coding conventions
+
+- All imports go at the module level — never inside functions or methods.
+
+## Working style
+
+- Never ask the user to edit `test_*` files — make all test changes directly.
+- When committing, never silently exclude modified files. If there are changed files beyond what was directly touched, ask the user whether to include them in the same commit, a separate one, or leave them unstaged.
+
 ## Commands
 
 ```bash
