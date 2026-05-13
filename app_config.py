@@ -54,11 +54,23 @@ class ServerConfig:
 
 
 @dataclass
+class StateBackupConfig:
+    enabled: bool = False
+    directory: str = "/var/tmp/ff-backups/states"
+
+
+@dataclass
+class StateConfig:
+    backup: StateBackupConfig = field(default_factory=StateBackupConfig)
+
+
+@dataclass
 class AppConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
+    state: StateConfig = field(default_factory=StateConfig)
     logger: logging.Logger = field(
         init=False, repr=False, compare=False,
         default_factory=lambda: logging.getLogger("app"),
@@ -77,6 +89,8 @@ class AppConfig:
         plugins_raw = raw.get("plugins", {})
         server_raw = raw.get("server", {})
         auth_raw = {**_AUTH_DEFAULTS, **raw.get("auth", {})}
+        state_raw = raw.get("state", {})
+        backup_raw = state_raw.get("backup", {})
 
         cfg = cls(
             logging=LoggingConfig(
@@ -98,6 +112,12 @@ class AppConfig:
                 token_expire_minutes=int(auth_raw["token_expire_minutes"]),
                 exempt_paths=list(auth_raw["exempt_paths"]),
                 users=list(auth_raw["users"]),
+            ),
+            state=StateConfig(
+                backup=StateBackupConfig(
+                    enabled=bool(backup_raw.get("enabled", False)),
+                    directory=str(backup_raw.get("directory", "backup/state")),
+                ),
             ),
         )
         extra = {k.replace("-", "_"): v for k, v in server_raw.items() if k not in _SERVER_KNOWN_KEYS}

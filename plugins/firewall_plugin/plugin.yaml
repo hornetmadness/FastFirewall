@@ -5,6 +5,7 @@ description: Manages firewall rules as a persistent JSON store and compiles them
 author: hornetmadness@gmail.com
 enabled: true
 plugin_requirements: ["host_plugin", "networking_plugin"]
+py_requirements:
   - aerleon
   - pyyaml
 os_requirements:
@@ -19,3 +20,4 @@ config:
   default_platform: iptables
   default_filter_name: fastfirewall
   auto_compile: false
+  ignore_state_on_boot: false

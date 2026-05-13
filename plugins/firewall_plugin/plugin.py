@@ -16,7 +16,6 @@ Events consumed:
 """
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import tempfile
@@ -28,7 +27,7 @@ from fastapi import HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from plugin_system.core import PluginBase, RoutedPlugin, Service, on
+from plugin_system.core import PluginBase, PluginStateFile, RoutedPlugin, Service, on
 from plugin_system.core.events import Event, bus
 
 
@@ -227,12 +226,16 @@ class FirewallPlugin(PluginBase, RoutedPlugin):
     # ── lifecycle ──────────────────────────────────────────────────────
 
     def setup(self) -> None:
-        self._rules_file = self.plugin_dir / "data" / self.config.get('rules_file', 'firewall_rules.json')
+        self._state_file = PluginStateFile.from_config(
+            self.plugin_dir, self.config, "rules_file", "firewall_rules.json", self.logger
+        )
         self._default_platform = self.config.get("default_platform", "iptables")
         self._default_filter = self.config.get("default_filter_name", "fastfirewall")
         self._rules: dict[str, FirewallRule] = {}
-        self._load_rules()
-        self.logger.info("Loaded %d rules from %r", len(self._rules), self._rules_file)
+        if not self.config.get("ignore_state_on_boot", False):
+            self._load_rules()
+            self._apply_state()
+        self.logger.info("Loaded %d rules from %r", len(self._rules), self._state_file.path)
         self._register_routes()
 
     def teardown(self) -> None:
@@ -242,23 +245,41 @@ class FirewallPlugin(PluginBase, RoutedPlugin):
     # ── persistence ────────────────────────────────────────────────────
 
     def _load_rules(self) -> None:
+        raw = self._state_file.load(default=[])
         try:
-            with open(self._rules_file) as fh:
-                self._rules = {r["id"]: FirewallRule(**r) for r in json.load(fh)}
-        except FileNotFoundError:
-            self.logger.debug("No rules file at %r, starting empty", self._rules_file)
-            self._rules = {}
+            self._rules = {r["id"]: FirewallRule(**r) for r in raw}
         except Exception:
-            self.logger.error("Failed to load rules from %r, starting empty", self._rules_file, exc_info=True)
+            self.logger.error("Failed to parse rules from %r, starting empty", self._state_file.path, exc_info=True)
             self._rules = {}
 
     def _save_rules(self) -> None:
+        self._state_file.save([r.model_dump() for r in self._rules.values()])
+
+    def _apply_state(self) -> None:
+        enabled = [r for r in self._rules.values() if r.enabled]
+        if not enabled:
+            return
         try:
-            self._rules_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._rules_file, "w") as fh:
-                json.dump([r.model_dump() for r in self._rules.values()], fh, indent=2)
-        except Exception:
-            self.logger.error("Failed to save rules to %r", self._rules_file, exc_info=True)
+            output = _compile_rules(enabled, self._default_filter, self._default_platform)
+            if output.startswith("#"):
+                self.logger.warning("Skipping boot-time rule apply — aerleon did not produce clean output")
+                return
+            self._execute_compiled_rules(output)
+            self.logger.info("Re-applied %d rules to %s on boot", len(enabled), self._default_platform)
+        except Exception as exc:
+            self.logger.warning("Could not re-apply rules on boot: %s", exc)
+
+    def _execute_compiled_rules(self, output: str) -> None:
+        if self._default_platform != "iptables":
+            raise RuntimeError(
+                f"Auto-apply unsupported for platform {self._default_platform!r}; apply manually"
+            )
+        result = subprocess.run(
+            ["sudo", "iptables-restore"],
+            input=output, text=True, capture_output=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"iptables-restore failed: {result.stderr.strip()}")
 
     # ── route registration ─────────────────────────────────────────────
 
@@ -363,7 +384,7 @@ class FirewallPlugin(PluginBase, RoutedPlugin):
             "plugin": self.meta["name"],
             "version": self.meta["version"],
             "rules": {"total": total, "enabled": enabled, "disabled": total - enabled},
-            "rules_file": self._rules_file,
+            "rules_file": self._state_file.path,
             "default_platform": self._default_platform,
             "default_filter": self._default_filter,
         }

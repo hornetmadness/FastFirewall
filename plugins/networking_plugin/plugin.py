@@ -31,7 +31,7 @@ from fastapi import HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
-from plugin_system.core import PluginBase, RoutedPlugin, Service
+from plugin_system.core import PluginBase, PluginStateFile, RoutedPlugin, Service
 from plugin_system.core.events import Event, bus
 
 
@@ -70,7 +70,7 @@ class RouteCreate(BaseModel):
     to: str                         # destination: "default" or CIDR like "10.0.0.0/8"
     via: Optional[str] = None       # gateway IP
     dev: Optional[str] = None       # outgoing interface name
-    metric: Optional[int] = None
+    preference: Optional[int] = None
     table: Optional[int] = None
 
     @field_validator("to")
@@ -115,13 +115,15 @@ class NetworkingPlugin(PluginBase, RoutedPlugin):
     # ── lifecycle ──────────────────────────────────────────────────────
 
     def setup(self) -> None:
-        data_dir = self.plugin_dir / "data"
-        data_dir.mkdir(exist_ok=True)
-        self._state_file = data_dir / self.config.get("state_file", "networking_state.json")
+        self._state_file = PluginStateFile.from_config(
+            self.plugin_dir, self.config, "state_file", "networking_state.json", self.logger
+        )
         self._interfaces: dict[str, dict[str, Any]] = {}
         self._routes: dict[str, dict[str, Any]] = {}   # {uuid: route_dict}
         self._sysctl: dict[str, str] = {}
-        self._load_state()
+        if not self.config.get("ignore_state_on_boot", False):
+            self._load_state()
+            self._apply_state()
         self.logger.info(
             "Networking plugin loaded: %d interface(s), %d route(s), %d sysctl(s)",
             len(self._interfaces), len(self._routes), len(self._sysctl),
@@ -135,26 +137,27 @@ class NetworkingPlugin(PluginBase, RoutedPlugin):
     # ── state persistence ──────────────────────────────────────────────
 
     def _load_state(self) -> None:
-        try:
-            with open(self._state_file) as fh:
-                data = json.load(fh)
-            self._interfaces = data.get("interfaces", {})
-            self._routes = data.get("routes", {})
-            self._sysctl = data.get("sysctl", {})
-        except FileNotFoundError:
-            pass
-        except Exception:
-            self.logger.error("Failed to load state from %r", self._state_file, exc_info=True)
+        data = self._state_file.load(default={})
+        self._interfaces = data.get("interfaces", {})
+        self._routes = data.get("routes", {})
+        self._sysctl = data.get("sysctl", {})
 
     def _save_state(self) -> None:
+        self._state_file.save(
+            {"interfaces": self._interfaces, "routes": self._routes, "sysctl": self._sysctl}
+        )
+
+    def _apply_state(self) -> None:
+        if not any([self._interfaces, self._routes, self._sysctl]):
+            return
         try:
-            with open(self._state_file, "w") as fh:
-                json.dump(
-                    {"interfaces": self._interfaces, "routes": self._routes, "sysctl": self._sysctl},
-                    fh, indent=2,
-                )
-        except Exception:
-            self.logger.error("Failed to save state to %r", self._state_file, exc_info=True)
+            result = self._run_ifstate_with_config("apply")
+            if result["success"]:
+                self.logger.info("Re-applied networking config on boot")
+            else:
+                self.logger.warning("Boot-time networking apply returned non-zero: %s", result.get("output", ""))
+        except Exception as exc:
+            self.logger.warning("Could not re-apply networking config on boot: %s", exc)
 
     # ── ifstate YAML builder ───────────────────────────────────────────
 
@@ -176,7 +179,7 @@ class NetworkingPlugin(PluginBase, RoutedPlugin):
             routes_list = []
             for route in self._routes.values():
                 r: dict[str, Any] = {"to": route["to"]}
-                for key in ("via", "dev", "metric", "table"):
+                for key in ("via", "dev", "preference", "table"):
                     if route.get(key) is not None:
                         r[key] = route[key]
                 routes_list.append(r)
@@ -256,7 +259,7 @@ class NetworkingPlugin(PluginBase, RoutedPlugin):
                 "routes": len(self._routes),
                 "sysctl": len(self._sysctl),
             },
-            "state_file": str(self._state_file),
+            "state_file": str(self._state_file.path),
         }
 
     # ── live state ─────────────────────────────────────────────────────

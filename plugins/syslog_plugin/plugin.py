@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 from pyinfra.operations import files as files_ops
 from pyinfra.operations import server as server_ops
 
-from plugin_system.core import PluginBase, RoutedPlugin, Service
+from plugin_system.core import PluginBase, PluginStateFile, RoutedPlugin, Service
 from plugin_system.core.events import Event, bus
 
 
@@ -76,10 +76,15 @@ class SyslogPlugin(PluginBase, RoutedPlugin):
         self._log_dir = Path(self.config.get("log_dir", "/var/log/fastfirewall"))
         self._fastfirewall_conf = Path(self.config.get("fastfirewall_conf", "/etc/fluent-bit/conf.d/fastfirewall")).with_suffix(".conf")
         self._fluent_bit_main_conf = Path(self.config.get("fluent_bit_main_conf", "/etc/fluent-bit/fluent-bit.conf"))
-        self._overrides_file = self.plugin_dir / "data" / "syslog_overrides.json"
-        self._overrides_file.parent.mkdir(parents=True, exist_ok=True)
+        self._state_file = PluginStateFile.from_config(
+            self.plugin_dir, self.config, "overrides_file", "syslog_overrides.json", self.logger
+        )
 
-        cfg = {**self.config, **self._load_overrides()}
+        if self.config.get("ignore_state_on_boot", False):
+            overrides: dict = {}
+        else:
+            overrides = self._state_file.load(default={})
+        cfg = {**self.config, **overrides}
         self._syslog_port = int(cfg.get("syslog_port", 514))
         self._syslog_mode = cfg.get("syslog_mode", "udp")
         self._syslog_unix_path = cfg.get("syslog_unix_path") or None
@@ -87,7 +92,7 @@ class SyslogPlugin(PluginBase, RoutedPlugin):
         self._enable_systemd = bool(cfg.get("enable_systemd_input", True))
         self._max_tail_lines = int(cfg.get("max_tail_lines", 1000))
 
-        lr = {**self.config.get("logrotate", {}), **self._load_overrides().get("logrotate", {})}
+        lr = {**self.config.get("logrotate", {}), **overrides.get("logrotate", {})}
         self._logrotate_conf = Path(lr.get("conf", "/etc/logrotate.d/fastfirewall"))
         self._log_rotate_count = int(lr.get("rotate", 7))
         self._log_rotate_frequency = lr.get("frequency", "daily")
@@ -202,18 +207,8 @@ class SyslogPlugin(PluginBase, RoutedPlugin):
 
     # ── overrides persistence ──────────────────────────────────────────────────
 
-    def _load_overrides(self) -> dict:
-        try:
-            with self._overrides_file.open() as fh:
-                return json.load(fh)
-        except FileNotFoundError:
-            return {}
-        except Exception:
-            self.logger.warning("Could not read overrides file %r, ignoring", self._overrides_file)
-            return {}
-
     def _save_overrides(self) -> None:
-        overrides = {
+        self._state_file.save({
             "syslog_port": self._syslog_port,
             "syslog_mode": self._syslog_mode,
             "syslog_unix_path": self._syslog_unix_path,
@@ -225,9 +220,7 @@ class SyslogPlugin(PluginBase, RoutedPlugin):
                 "compress": self._log_compress,
                 "max_size": self._log_max_size,
             },
-        }
-        with self._overrides_file.open("w") as fh:
-            json.dump(overrides, fh, indent=2)
+        })
 
     def _apply_logrotate_config(self) -> None:
         content = _build_logrotate_conf(

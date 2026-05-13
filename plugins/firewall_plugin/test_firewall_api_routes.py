@@ -7,8 +7,11 @@ py_requirements installation while still exercising the real production code.
 from __future__ import annotations
 
 import importlib.util
+import json
+import logging
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -36,7 +39,6 @@ def _load_module():
 
 
 def _make_app(tmp_path):
-    import logging
     mod = _load_module()
     inst = mod.FirewallPlugin()
     inst.plugin_id = "firewall_plugin"
@@ -309,7 +311,8 @@ def test_policy_yaml_always_includes_default_deny(client):
 # ---------------------------------------------------------------------------
 
 def test_corrupt_rules_file_starts_empty(tmp_path):
-    (tmp_path / "rules.json").write_text("this is not valid json {{{")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "rules.json").write_text("this is not valid json {{{")
     client = TestClient(_make_app(tmp_path))
     assert client.get("/v1/firewall/rules").json() == {"rules": [], "count": 0}
 
@@ -328,6 +331,71 @@ def test_rules_survive_across_plugin_instances(tmp_path):
     r = TestClient(_make_app(tmp_path)).get(f"/v1/firewall/rules/{rule['id']}")
     assert r.status_code == 200
     assert r.json()["name"] == "persistent-rule"
+
+
+def _make_inst(tmp_path, config=None):
+    """Return a bare plugin instance with attributes set but setup() not called."""
+    mod = _load_module()
+    inst = mod.FirewallPlugin()
+    inst.plugin_id = "firewall_plugin"
+    inst.meta = {"name": "Firewall Plugin", "version": "1.0.0", "description": "", "author": ""}
+    inst.plugin_dir = tmp_path
+    inst.logger = logging.getLogger("test.firewall_plugin")
+    inst.config = {
+        "rules_file": "rules.json",
+        "default_platform": "iptables",
+        "default_filter_name": "test-fw",
+        **(config or {}),
+    }
+    return inst, mod
+
+
+# ---------------------------------------------------------------------------
+# Boot-time state apply
+# ---------------------------------------------------------------------------
+
+_BOOT_RULE = [{"id": "r1", "name": "allow-http", "action": "accept"}]
+_CLEAN_OUTPUT = "*filter\n-P INPUT ACCEPT\nCOMMIT\n"
+
+
+def test_rules_applied_to_iptables_on_boot(tmp_path):
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "rules.json").write_text(json.dumps(_BOOT_RULE))
+    inst, mod = _make_inst(tmp_path)
+    inst._execute_compiled_rules = MagicMock()
+    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+        inst.setup()
+    inst._execute_compiled_rules.assert_called_once_with(_CLEAN_OUTPUT)
+
+
+def test_ignore_state_on_boot_skips_load_and_apply(tmp_path):
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "rules.json").write_text(json.dumps(_BOOT_RULE))
+    inst, _ = _make_inst(tmp_path, config={"ignore_state_on_boot": True})
+    inst._execute_compiled_rules = MagicMock()
+    inst.setup()
+    inst._execute_compiled_rules.assert_not_called()
+    assert inst._rules == {}
+
+
+def test_apply_state_skips_when_aerleon_unavailable(tmp_path):
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "rules.json").write_text(json.dumps(_BOOT_RULE))
+    inst, _ = _make_inst(tmp_path)
+    inst._execute_compiled_rules = MagicMock()
+    inst.setup()  # aerleon not installed → _compile_rules returns "# ..." → skips apply
+    inst._execute_compiled_rules.assert_not_called()
+    assert "r1" in inst._rules  # rules still loaded
+
+
+def test_apply_state_does_not_crash_on_iptables_failure(tmp_path):
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "rules.json").write_text(json.dumps(_BOOT_RULE))
+    inst, mod = _make_inst(tmp_path)
+    inst._execute_compiled_rules = MagicMock(side_effect=RuntimeError("iptables-restore failed: permission denied"))
+    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+        inst.setup()  # must not raise
+    assert "r1" in inst._rules
 
 
 def test_deleted_rule_not_present_after_reload(tmp_path):

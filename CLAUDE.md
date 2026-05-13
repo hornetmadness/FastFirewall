@@ -62,7 +62,7 @@ This is a **FastAPI application driven entirely by plugins**. The app itself (`a
 
 ### Boot sequence
 
-1. `AppConfig.load()` reads `app_config.yaml` into typed dataclasses.
+1. `AppConfig.load()` reads `app_config.yaml` into typed dataclasses. `configure_state()` is called immediately after to apply backup settings before any plugin runs.
 2. `manager_cli.run(loader, plugins_dir)` parses CLI args; exits early for management commands, otherwise returns an optional plugin allow-list.
 3. `PluginLoader.load_directory()` scans the configured `plugins/` directory and derives load order via topological sort of `plugin_requirements` (dependencies before dependents; alphabetical tiebreaker). Pass `only=[...]` to restrict which plugins are loaded; transitive dependencies are included automatically.
 4. For each plugin directory with a `plugin.yaml` + `plugin.py`: the loader imports the module, instantiates any `PluginBase` subclass, wires up event handlers, calls `setup()`, then mounts FastAPI routes if the plugin is a `RoutedPlugin`.
@@ -217,6 +217,40 @@ finally:
 ```
 
 Async tests are automatically discovered because `asyncio_mode = auto` is set; no `@pytest.mark.asyncio` is required (though it is accepted).
+
+### Plugin state files
+
+`PluginStateFile` (`plugin_system/core/state_manager.py`) is a shared primitive for JSON-backed state. Plugins should use it instead of writing their own load/save boilerplate.
+
+```python
+from plugin_system.core.state_manager import PluginStateFile
+
+# In setup():
+self._state_file = PluginStateFile.from_config(
+    self.plugin_dir, self.config, "state_file", "my_state.json", self.logger
+)
+self._state = self._state_file.load(default={"key": {}})
+
+# In teardown() or on mutation:
+self._state_file.save(self._state)
+```
+
+`from_config` resolves `plugin_dir / "data" / config.get(key, default_filename)`.  
+`load(default)` returns `default` if the file is missing; logs and returns `default` on any parse error.  
+`save(data)` creates the `data/` directory if needed, writes indented JSON, and returns `bool` success.
+
+**Backups** — when `state.backup.enabled` is `true` in `app_config.yaml`, `save()` snapshots the existing file to `state.backup.directory` (default `/var/tmp/ff-backups/states`) before overwriting. Backup filenames include a timestamp: `<stem>_<YYYYMMDD_HHMMSS>.json`. The backup path is global (not inside the plugin's own `data/` dir) so backups survive plugin removal.
+
+```yaml
+state:
+  backup:
+    enabled: true
+    directory: /var/tmp/ff-backups/states
+```
+
+`configure_state()` is called once at startup in `app.py` to apply the `app_config.yaml` settings before any plugin `setup()` runs.
+
+**Testing** — in plugin tests, `state_manager._backup_enabled` is `False` by default (module default), so no backup directory is created. If a test exercises the backup path, patch `plugin_system.core.state_manager._backup_enabled` and `_backup_directory` directly.
 
 ### Authentication
 

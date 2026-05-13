@@ -17,6 +17,12 @@ server:
 bootstrap:
   enabled: fasle
 
+# ── State ─────────────────────────────────────────────────────────────────────
+state:
+  backup:
+    enabled: true          # set to true to snapshot state files before each save
+    directory: /var/tmp/ff-backups/states
+
 # ── Authentication ─────────────────────────────────────────────────────────────
 auth:
   enabled: true

@@ -36,3 +36,4 @@ config:
   syslog_port: 514
   syslog_unix_mode: unix_udp
   syslog_unix_path: ''
+  ignore_state_on_boot: false

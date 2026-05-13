@@ -1411,3 +1411,75 @@ def test_upgrade_system_pacman_uses_syu(tmp_path):
     assert "pacman" in cmd
     assert "-Syu" in cmd
     assert "--noconfirm" in cmd
+
+
+# ── boot-time state apply ──────────────────────────────────────────────────────
+
+_BOOT_STATE = {
+    "services": {"nginx": {"running": True, "enabled": True}},
+    "sysctl": {"vm.swappiness": {"value": "10", "persist": True}},
+    "users": {"deploy": {"shell": "/bin/bash", "home_dir": None, "system": False, "comment": None}},
+    "groups": {"ops": {"system": False, "gid": None}},
+    "cron": {"backup": {"command": "/usr/bin/backup.sh", "minute": "0", "hour": "2", "day_of_month": "*", "month": "*", "day_of_week": "*", "user": "root"}},
+    "packages": {},
+    "repos": {},
+}
+
+
+def _write_boot_state(tmp_path, state=None):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "host_state.json").write_text(json.dumps(state or _BOOT_STATE))
+
+
+def _make_inst(tmp_path, config=None):
+    mod = _load_plugin_module()
+    plugin = mod.HostPlugin()
+    plugin.plugin_id = "host_plugin"
+    plugin.meta = {"name": "Host Plugin", "version": "1.0.0"}
+    plugin.config = config or {}
+    plugin.plugin_dir = tmp_path
+    plugin.logger = logging.getLogger("test.host_plugin")
+    plugin._pyinfra_run = MagicMock()
+    return plugin, mod
+
+
+def test_state_reapplied_on_boot_calls_pyinfra(tmp_path):
+    from pyinfra.operations import server as server_ops
+    _write_boot_state(tmp_path)
+    plugin, _ = _make_inst(tmp_path)
+    plugin.setup()
+    ops = [c[0][0] for c in plugin._pyinfra_run.call_args_list]
+    assert server_ops.service in ops
+    assert server_ops.sysctl in ops
+    assert server_ops.user in ops
+    assert server_ops.group in ops
+    assert server_ops.crontab in ops
+
+
+def test_ignore_state_on_boot_skips_apply(tmp_path):
+    from pyinfra.operations import server as server_ops
+    _write_boot_state(tmp_path)
+    plugin, _ = _make_inst(tmp_path, config={"ignore_state_on_boot": True})
+    plugin.setup()
+    ops = [c[0][0] for c in plugin._pyinfra_run.call_args_list]
+    assert server_ops.service not in ops
+    assert server_ops.sysctl not in ops
+    assert plugin._state == {k: {} for k in plugin._EMPTY_STATE}
+
+
+def test_apply_state_does_not_crash_on_pyinfra_failure(tmp_path):
+    _write_boot_state(tmp_path)
+    plugin, _ = _make_inst(tmp_path)
+    plugin._pyinfra_run = MagicMock(side_effect=RuntimeError("pyinfra failed"))
+    plugin.setup()  # must not raise
+    assert "nginx" in plugin._state["services"]
+
+
+def test_empty_state_skips_apply_calls(tmp_path):
+    from pyinfra.operations import server as server_ops
+    plugin, _ = _make_inst(tmp_path)
+    plugin.setup()  # no state file — all categories empty
+    ops = [c[0][0] for c in plugin._pyinfra_run.call_args_list]
+    assert server_ops.service not in ops
+    assert server_ops.sysctl not in ops

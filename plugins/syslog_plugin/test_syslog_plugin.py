@@ -207,7 +207,7 @@ def test_patch_config_persists_to_overrides(plugin, client):
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(stdout="", returncode=0)
         client.patch("/v1/syslog/config", json={"syslog_port": 5140, "syslog_mode": "tcp"})
-    overrides = json.loads((plugin._overrides_file).read_text())
+    overrides = json.loads(plugin._state_file.path.read_text())
     assert overrides["syslog_port"] == 5140
     assert overrides["syslog_mode"] == "tcp"
 

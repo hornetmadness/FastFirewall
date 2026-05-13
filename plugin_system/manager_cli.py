@@ -3,10 +3,13 @@ import sys
 from pathlib import Path
 
 
-def run(loader, plugins_dir: str | Path) -> list[str] | None:
+def run(loader, plugins_dir: str | Path) -> tuple[list[str] | None, bool]:
     """
-    Parse CLI arguments, handle any management commands, and return the plugin
-    allow-list for normal server startup (None means load all plugins).
+    Parse CLI arguments, handle any management commands, and return
+    ``(only, ignore_plugins_states)`` for normal server startup.
+
+    ``only`` is the plugin allow-list (None means load all plugins).
+    ``ignore_plugins_states`` is True when --ignore-plugins-states was passed.
     """
     parser = _build_parser()
     args, _ = parser.parse_known_args()
@@ -29,7 +32,7 @@ def run(loader, plugins_dir: str | Path) -> list[str] | None:
         _print_plugin_table(loader.list_plugins(plugins_dir))
         sys.exit(0)
 
-    return args.plugins or None
+    return args.plugins or None, bool(args.ignore_plugins_states)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -64,6 +67,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--disable-plugin",
         metavar="PLUGIN_ID",
         help="Disable a plugin in its plugin.yaml, then exit.",
+    )
+    parser.add_argument(
+        "--ignore-plugins-states",
+        dest="ignore_plugins_states",
+        action="store_true",
+        help="Skip re-applying saved state files on boot (all plugins).",
     )
     return parser
 

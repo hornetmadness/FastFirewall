@@ -4,6 +4,7 @@ from .plugin_base import PluginBase
 from .routed_plugin import RoutedPlugin
 from .decorators import on, on_any
 from .services import Service
+from infra.state_manager import PluginStateFile
 
 __all__ = [
     "Event", "EventBus", "bus",
@@ -11,4 +12,5 @@ __all__ = [
     "PluginBase", "RoutedPlugin",
     "on", "on_any",
     "Service",
+    "PluginStateFile",
 ]

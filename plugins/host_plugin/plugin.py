@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import configparser
 import io
-import json
 import os
 import pickle
 import shutil
@@ -46,7 +45,7 @@ from pyinfra.operations import files as files_ops
 from pyinfra.operations import server as server_ops
 from pyinfra.operations import systemd as systemd_ops
 
-from plugin_system.core import PluginBase, RoutedPlugin, Service
+from plugin_system.core import PluginBase, PluginStateFile, RoutedPlugin, Service
 from plugin_system.core.events import Event, bus
 from plugins.host_plugin._pkg_manager import (
     PackageBody,
@@ -116,14 +115,20 @@ class HostPlugin(PluginBase, RoutedPlugin):
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
     def setup(self) -> None:
-        self._state_path = self.plugin_dir / "data" / self.config.get("state_file", "host_state.json")
-        self._state: dict[str, Any] = self._load_state()
+        self._state_file = PluginStateFile.from_config(
+            self.plugin_dir, self.config, "state_file", "host_state.json", self.logger
+        )
         self._bg_tasks: dict[str, dict[str, Any]] = {}
         self._pkg_mgr = PackageManager(
             self._pyinfra_run,
             detect_package_manager(),
             cache_ttl=int(self.config.get("os_pkgmgr_max_cache_ttl_secs", 300)),
         )
+        if self.config.get("ignore_state_on_boot", False):
+            self._state: dict[str, Any] = {k: {} for k in self._EMPTY_STATE}
+        else:
+            self._state = self._load_state()
+            self._apply_state()
         self._register_routes()
         init_cfg: dict[str, Any] = self.config.get("init") or {}
         if init_cfg.get("enable_init_script", False):
@@ -136,21 +141,98 @@ class HostPlugin(PluginBase, RoutedPlugin):
 
     def _load_state(self) -> dict[str, Any]:
         state = {k: {} for k in self._EMPTY_STATE}
-        if self._state_path.exists():
-            try:
-                with self._state_path.open() as fh:
-                    state.update(json.load(fh))
-            except Exception:
-                self.logger.error("Failed to load state from %r, starting empty", self._state_path, exc_info=True)
+        state.update(self._state_file.load(default={}))
         return state
 
     def _save_state(self) -> None:
-        try:
-            self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._state_path.open("w") as fh:
-                json.dump(self._state, fh, indent=2)
-        except Exception:
-            self.logger.error("Failed to save state to %r", self._state_path, exc_info=True)
+        self._state_file.save(self._state)
+
+    def _apply_state(self) -> None:
+        if not any(self._state.get(k) for k in self._EMPTY_STATE):
+            return
+
+        for svc_name, v in self._state.get("services", {}).items():
+            try:
+                self._pyinfra_run(
+                    server_ops.service,
+                    name=f"Restore service {svc_name}",
+                    service=svc_name,
+                    running=v["running"],
+                    enabled=v["enabled"],
+                )
+            except Exception as exc:
+                self.logger.warning("Boot-time restore failed for service %r: %s", svc_name, exc)
+
+        for sysctl_key, v in self._state.get("sysctl", {}).items():
+            try:
+                self._pyinfra_run(
+                    server_ops.sysctl,
+                    name=f"Restore sysctl {sysctl_key}",
+                    key=sysctl_key,
+                    value=v["value"],
+                    persist=v["persist"],
+                )
+            except Exception as exc:
+                self.logger.warning("Boot-time restore failed for sysctl %r: %s", sysctl_key, exc)
+
+        for user_name, v in self._state.get("users", {}).items():
+            try:
+                user_kw: dict[str, Any] = {
+                    "name": f"Restore user {user_name}",
+                    "user": user_name,
+                    "shell": v["shell"],
+                    "system": v["system"],
+                }
+                if v.get("home_dir"):
+                    user_kw["home"] = v["home_dir"]
+                if v.get("comment"):
+                    user_kw["comment"] = v["comment"]
+                self._pyinfra_run(server_ops.user, **user_kw)
+            except Exception as exc:
+                self.logger.warning("Boot-time restore failed for user %r: %s", user_name, exc)
+
+        for group_name, v in self._state.get("groups", {}).items():
+            try:
+                group_kw: dict[str, Any] = {
+                    "name": f"Restore group {group_name}",
+                    "group": group_name,
+                    "system": v["system"],
+                }
+                if v.get("gid") is not None:
+                    group_kw["gid"] = v["gid"]
+                self._pyinfra_run(server_ops.group, **group_kw)
+            except Exception as exc:
+                self.logger.warning("Boot-time restore failed for group %r: %s", group_name, exc)
+
+        for cron_name, v in self._state.get("cron", {}).items():
+            try:
+                self._pyinfra_run(
+                    server_ops.crontab,
+                    name=f"Restore cron {cron_name}",
+                    command=v["command"],
+                    minute=v["minute"],
+                    hour=v["hour"],
+                    day_of_month=v["day_of_month"],
+                    month=v["month"],
+                    day_of_week=v["day_of_week"],
+                    user=v["user"],
+                )
+            except Exception as exc:
+                self.logger.warning("Boot-time restore failed for cron %r: %s", cron_name, exc)
+
+        for pkg_name, v in self._state.get("packages", {}).items():
+            try:
+                self._pkg_mgr.install(pkg_name, PackageBody(**v))
+            except Exception as exc:
+                self.logger.warning("Boot-time restore failed for package %r: %s", pkg_name, exc)
+
+        for repo_name, v in self._state.get("repos", {}).items():
+            try:
+                self._pkg_mgr.apply_repo(repo_name, RepoBody(**v))
+            except Exception as exc:
+                self.logger.warning("Boot-time restore failed for repo %r: %s", repo_name, exc)
+
+        self.logger.info("Re-applied host state on boot")
 
     # ── pyinfra helper ─────────────────────────────────────────────────────────
 

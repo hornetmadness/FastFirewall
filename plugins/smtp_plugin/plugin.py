@@ -16,7 +16,6 @@ Events consumed:
 """
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import smtplib
@@ -29,7 +28,7 @@ from typing import Any, List, Optional, Union
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from plugin_system.core import PluginBase, RoutedPlugin, Service, on
+from plugin_system.core import PluginBase, PluginStateFile, RoutedPlugin, Service, on
 from plugin_system.core.events import Event, bus
 
 
@@ -70,35 +69,34 @@ class SmtpPlugin(PluginBase, RoutedPlugin):
     services = [Service.SMTP]
 
     def setup(self) -> None:
-        self._state_path = self.plugin_dir / "data" / self.config.get("state_file", "smtp_state.json")
+        self._state_file = PluginStateFile.from_config(
+            self.plugin_dir, self.config, "state_file", "smtp_state.json", self.logger
+        )
         self._smtp_host: str = self.config.get("smtp_host", "127.0.0.1")
         self._smtp_port: int = int(self.config.get("smtp_port", 25))
         self._default_from: str = self.config.get("default_from", "fastfirewall@localhost")
-        self._state: dict[str, Any] = self._load_state()
+        self._state: dict[str, Any] = self._state_file.load(default={"postfix_settings": {}})
+        if not self.config.get("ignore_state_on_boot", False):
+            self._apply_state()
         self._register_routes()
         self.logger.info("SMTP plugin loaded (postfix at %s:%d)", self._smtp_host, self._smtp_port)
 
     def teardown(self) -> None:
-        self._save_state()
+        self._state_file.save(self._state)
 
-    # ── persistence ─────────────────────────────────────────────────────────────
-
-    def _load_state(self) -> dict[str, Any]:
-        if self._state_path.exists():
-            try:
-                with self._state_path.open() as fh:
-                    return json.load(fh)
-            except Exception:
-                self.logger.error("Failed to load state from %r, starting empty", self._state_path, exc_info=True)
-        return {"postfix_settings": {}}
-
-    def _save_state(self) -> None:
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+    def _apply_state(self) -> None:
+        settings = self._state.get("postfix_settings", {})
+        if not settings:
+            return
+        postconf_args = {
+            k: ("yes" if v is True else "no" if v is False else str(v))
+            for k, v in settings.items()
+        }
         try:
-            with self._state_path.open("w") as fh:
-                json.dump(self._state, fh, indent=2)
-        except Exception:
-            self.logger.error("Failed to save state to %r", self._state_path, exc_info=True)
+            self._postconf_set(postconf_args)
+            self.logger.info("Re-applied %d postfix setting(s) from state on boot", len(settings))
+        except HTTPException as exc:
+            self.logger.warning("Could not re-apply postfix settings on boot: %s", exc.detail)
 
     # ── system helpers (mockable) ────────────────────────────────────────────────
 
@@ -251,7 +249,7 @@ class SmtpPlugin(PluginBase, RoutedPlugin):
         before = self._postconf_get(list(updates.keys()))
         self._postconf_set(postconf_args)
         self._state.setdefault("postfix_settings", {}).update(updates)
-        self._save_state()
+        self._state_file.save(self._state)
         diff = {
             k: {"before": before.get(k, ""), "after": postconf_args[k]}
             for k in updates

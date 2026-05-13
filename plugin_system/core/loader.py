@@ -142,6 +142,7 @@ class PluginLoader:
         self._plugins: dict[str, LoadedPlugin] = {}
         self._service_registry: dict[Service, str] = {}  # service → plugin_id
         self._port_registry: dict[tuple[str, int], str] = {}  # (proto, port) → plugin_id
+        self.ignore_state_on_boot: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -574,7 +575,9 @@ class PluginLoader:
             "author": raw.get("author", ""),
             "plugin_requirements": raw.get("plugin_requirements", []),
         }
-        config: dict[str, Any] = raw.get("config", {}) or {}
+        config: dict[str, Any] = dict(raw.get("config", {}) or {})
+        if self.ignore_state_on_boot:
+            config["ignore_state_on_boot"] = True
         plugin_id: str = raw.get("id", path.name)
         enabled: bool = raw.get("enabled", True)
         py_requirements: list[str] = raw.get("py_requirements", []) or []

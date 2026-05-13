@@ -19,6 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from plugin_system import manager_cli
 from app_config import AppConfig
 from plugin_system.core import PluginLoader, bus
+from infra.state_manager import configure as configure_state
 from ff_auth import (
     AuthUser,
     authenticate_for_token,
@@ -30,6 +31,10 @@ from ff_auth import (
 
 cfg = AppConfig.load()
 auth_setup(cfg.auth)
+configure_state(
+    backup_enabled=cfg.state.backup.enabled,
+    backup_directory=cfg.state.backup.directory,
+)
 
 app = FastAPI(
     title="Fastfirewall",
@@ -82,7 +87,8 @@ async def validation_exception_handler(
     )
 
 loader = PluginLoader(bus=bus, app=app, logger=cfg.logger)
-only_plugins = manager_cli.run(loader, cfg.plugins_dir())
+only_plugins, ignore_plugins_states = manager_cli.run(loader, cfg.plugins_dir())
+loader.ignore_state_on_boot = ignore_plugins_states
 loader.load_directory(cfg.plugins_dir(), only=only_plugins)
 
 if __name__ == "__main__":

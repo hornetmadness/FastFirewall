@@ -32,6 +32,7 @@ service_ports:
 
 config:
   state_file: host_state.json
+  ignore_state_on_boot: false
   os_pkgmgr_max_cache_ttl_secs: 300   # seconds before the package index is considered stale; 0 = always refresh
 
   init:

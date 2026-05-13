@@ -7,6 +7,7 @@ system changes are made.
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import sys
 from pathlib import Path
@@ -353,11 +354,11 @@ def test_add_route_default_gateway(client):
     assert "id" in data
 
 
-def test_add_route_with_dev_and_metric(client):
-    r = client.post("/v1/networking/config/routes", json={"to": "10.0.0.0/8", "dev": "eth1", "metric": 100})
+def test_add_route_with_dev_and_preference(client):
+    r = client.post("/v1/networking/config/routes", json={"to": "10.0.0.0/8", "dev": "eth1", "preference": 100})
     assert r.status_code == 201
     assert r.json()["dev"] == "eth1"
-    assert r.json()["metric"] == 100
+    assert r.json()["preference"] == 100
 
 
 def test_add_route_minimal(client):
@@ -610,3 +611,52 @@ def test_state_file_written_to_configured_path(tmp_path):
     c.put("/v1/networking/config/interfaces/eth0", json={})
     p.teardown()
     assert (tmp_path / "data" / "custom_net_state.json").exists()
+
+
+# ── boot-time state apply ──────────────────────────────────────────────────────
+
+_BOOT_STATE = {
+    "interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}},
+    "routes": {},
+    "sysctl": {},
+}
+
+
+def _write_boot_state(tmp_path, state=None):
+    (tmp_path / "data").mkdir(exist_ok=True)
+    (tmp_path / "data" / "networking_state.json").write_text(json.dumps(state or _BOOT_STATE))
+
+
+def test_ifstate_apply_called_on_boot_when_state_exists(tmp_path):
+    _write_boot_state(tmp_path)
+    plugin = _make_plugin(tmp_path)
+    apply_calls = [c for c in plugin._run_ifstate.call_args_list if c[0][-1] == "apply"]
+    assert len(apply_calls) == 1
+
+
+def test_ignore_state_on_boot_skips_load_and_apply(tmp_path):
+    _write_boot_state(tmp_path)
+    plugin = _make_plugin(tmp_path, config={"ignore_state_on_boot": True})
+    apply_calls = [c for c in plugin._run_ifstate.call_args_list if c[0][-1] == "apply"]
+    assert len(apply_calls) == 0
+    assert plugin._interfaces == {}
+
+
+def test_apply_skipped_when_state_is_empty(tmp_path):
+    plugin = _make_plugin(tmp_path)  # no pre-existing state file
+    apply_calls = [c for c in plugin._run_ifstate.call_args_list if c[0][-1] == "apply"]
+    assert len(apply_calls) == 0
+
+
+def test_apply_state_does_not_crash_on_ifstate_failure(tmp_path):
+    _write_boot_state(tmp_path)
+    mod = _load_module()
+    plugin = mod.NetworkingPlugin()
+    plugin.plugin_id = "networking_plugin"
+    plugin.meta = {"name": "Networking Plugin", "version": "1.0.0"}
+    plugin.config = {}
+    plugin.plugin_dir = tmp_path
+    plugin.logger = logging.getLogger("test.networking_plugin")
+    plugin._run_ifstate = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr="permission denied"))
+    plugin.setup()  # must not raise
+    assert plugin._interfaces == {"eth0": {"addresses": ["10.0.0.1/24"]}}
