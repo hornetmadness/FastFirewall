@@ -38,4 +38,5 @@ class RoutedPlugin:
             )
 
     def __init__(self) -> None:
-        self.router: APIRouter = APIRouter()
+        svc = getattr(self, "service_name", None)
+        self.router: APIRouter = APIRouter(tags=[svc.value] if svc is not None else [])

@@ -32,6 +32,9 @@ def greeter_app(tmp_path):
         name: Greeter
         id: greeter
         version: "1.0.0"
+        service_ports:
+          ntp:
+            tcp: [-1]
     """, """
         from plugin_system.core import PluginBase, RoutedPlugin, Service
 
@@ -107,6 +110,9 @@ def test_shout_config_uppercases_response(tmp_path):
         id: shouter
         config:
           shout: true
+        service_ports:
+          ntp:
+            tcp: [-1]
     """, """
         from plugin_system.core import PluginBase, RoutedPlugin, Service
 
@@ -135,7 +141,7 @@ def test_shout_config_uppercases_response(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_add_api_route_style_endpoints(tmp_path):
-    make_plugin(tmp_path, "log_plugin", "name: Log\nid: log_plugin\n", """
+    make_plugin(tmp_path, "log_plugin", "name: Log\nid: log_plugin\nservice_ports:\n  syslog:\n    tcp: [-1]\n", """
         from plugin_system.core import PluginBase, RoutedPlugin, Service
 
         class LogPlugin(PluginBase, RoutedPlugin):
@@ -176,7 +182,7 @@ def test_add_api_route_style_endpoints(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_two_plugins_mounted_at_distinct_prefixes(tmp_path):
-    make_plugin(tmp_path, "ntp_plugin", "name: NTP\nid: ntp_plugin\n", """
+    make_plugin(tmp_path, "ntp_plugin", "name: NTP\nid: ntp_plugin\nservice_ports:\n  ntp:\n    tcp: [-1]\n", """
         from plugin_system.core import PluginBase, RoutedPlugin, Service
 
         class NTPPlugin(PluginBase, RoutedPlugin):
@@ -188,7 +194,7 @@ def test_two_plugins_mounted_at_distinct_prefixes(tmp_path):
                 def ping():
                     return {"service": "ntp"}
     """)
-    make_plugin(tmp_path, "dns_plugin", "name: DNS\nid: dns_plugin\n", """
+    make_plugin(tmp_path, "dns_plugin", "name: DNS\nid: dns_plugin\nservice_ports:\n  dns:\n    tcp: [-1]\n", """
         from plugin_system.core import PluginBase, RoutedPlugin, Service
 
         class DNSPlugin(PluginBase, RoutedPlugin):
@@ -216,7 +222,7 @@ def test_two_plugins_mounted_at_distinct_prefixes(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_routed_plugin_without_fastapi_app_does_not_raise(tmp_path):
-    make_plugin(tmp_path, "no_app", "name: NoApp\nid: no_app\n", """
+    make_plugin(tmp_path, "no_app", "name: NoApp\nid: no_app\nservice_ports:\n  dns:\n    tcp: [-1]\n", """
         from plugin_system.core import PluginBase, RoutedPlugin, Service
 
         class NoAppPlugin(PluginBase, RoutedPlugin):
@@ -229,7 +235,7 @@ def test_routed_plugin_without_fastapi_app_does_not_raise(tmp_path):
 
 
 def test_routed_plugin_without_service_name_raises(tmp_path):
-    make_plugin(tmp_path, "no_svcname", "name: NSN\nid: no_svcname\n", """
+    make_plugin(tmp_path, "no_svcname", "name: NSN\nid: no_svcname\nservice_ports: -1\n", """
         from plugin_system.core import PluginBase, RoutedPlugin
 
         class NoSvcName(PluginBase, RoutedPlugin):
@@ -242,7 +248,7 @@ def test_routed_plugin_without_service_name_raises(tmp_path):
 
 
 def test_non_routed_plugin_has_no_routes(tmp_path):
-    make_plugin(tmp_path, "plain", "name: Plain\nid: plain\n", """
+    make_plugin(tmp_path, "plain", "name: Plain\nid: plain\nservice_ports: -1\n", """
         from plugin_system.core import PluginBase
 
         class PlainPlugin(PluginBase):
