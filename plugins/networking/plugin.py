@@ -32,7 +32,7 @@ from fastapi import HTTPException, logger
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
-from plugin_system.core import PluginBase, PluginStateFile, RoutedPlugin, Service
+from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service
 from plugin_system.core.events import Event, bus
 
 
@@ -114,8 +114,7 @@ class ActionResult(BaseModel):
 
 # ── plugin class ───────────────────────────────────────────────────────────────
 
-class NetworkingPlugin(PluginBase, RoutedPlugin):
-    service_name = Service.NETWORKING
+class NetworkingPlugin(PluginBase, ApiRouterPlugin):
     services = [Service.NETWORKING]
 
     # ── lifecycle ──────────────────────────────────────────────────────

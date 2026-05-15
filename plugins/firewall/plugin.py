@@ -27,7 +27,7 @@ from fastapi import HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from plugin_system.core import PluginBase, PluginStateFile, RoutedPlugin, Service, on
+from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service, on
 from plugin_system.core.events import Event, bus
 
 
@@ -219,8 +219,7 @@ def _compile_rules(rules: list[FirewallRule], filter_name: str, platform: str) -
 
 # ── plugin class ───────────────────────────────────────────────────────────────
 
-class FirewallPlugin(PluginBase, RoutedPlugin):
-    service_name = Service.FIREWALL
+class FirewallPlugin(PluginBase, ApiRouterPlugin):
     services = [Service.FIREWALL]
 
     # ── lifecycle ──────────────────────────────────────────────────────

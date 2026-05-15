@@ -2,17 +2,14 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from .services import Service
 
-
-class RoutedPlugin:
+class ApiRouterPlugin:
     """
     Optional mixin that signals a plugin contributes FastAPI routes.
 
     ``PluginBase`` is always required alongside this mixin::
 
-        class MyPlugin(PluginBase, RoutedPlugin):
-            service_name = Service.DNS
+        class MyPlugin(PluginBase, ApiRouterPlugin):
             services = [Service.DNS]
 
             def setup(self):
@@ -20,12 +17,9 @@ class RoutedPlugin:
                 def list_zones():
                     return {"zones": []}
 
-    ``service_name`` must be a ``Service`` enum member; the loader mounts the
-    router at /v1/<service_name.value>/.  ``self.router`` is created
-    automatically — add routes to it inside ``setup()``.
+    The loader mounts the router at /v1/<plugin_id>/.  ``self.router`` is
+    created automatically — add routes to it inside ``setup()``.
     """
-
-    service_name: Service
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -34,9 +28,8 @@ class RoutedPlugin:
         if not issubclass(cls, PluginBase):
             raise TypeError(
                 f"{cls.__name__} must also inherit from PluginBase: "
-                f"class {cls.__name__}(PluginBase, RoutedPlugin)"
+                f"class {cls.__name__}(PluginBase, ApiRouterPlugin)"
             )
 
     def __init__(self) -> None:
-        svc = getattr(self, "service_name", None)
-        self.router: APIRouter = APIRouter(tags=[svc.value] if svc is not None else [])
+        self.router: APIRouter = APIRouter()

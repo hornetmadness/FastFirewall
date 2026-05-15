@@ -36,10 +36,9 @@ def greeter_app(tmp_path):
           ntp:
             tcp: [-1]
     """, """
-        from plugin_system.core import PluginBase, RoutedPlugin, Service
+        from plugin_system.core import PluginBase, ApiRouterPlugin, Service
 
-        class GreeterPlugin(PluginBase, RoutedPlugin):
-            service_name = Service.NTP
+        class GreeterPlugin(PluginBase, ApiRouterPlugin):
             services = [Service.NTP]
 
             def setup(self):
@@ -71,19 +70,19 @@ def client(greeter_app):
 # ---------------------------------------------------------------------------
 
 def test_hello_endpoint_returns_greeting(client):
-    response = client.get("/v1/ntp/hello/world")
+    response = client.get("/v1/greeter/hello/world")
     assert response.status_code == 200
     assert response.json() == {"message": "Hello, world!"}
 
 
 def test_hello_endpoint_uses_username_path_param(client):
-    response = client.get("/v1/ntp/hello/alice")
+    response = client.get("/v1/greeter/hello/alice")
     assert response.status_code == 200
     assert "alice" in response.json()["message"]
 
 
 def test_status_endpoint_returns_metadata(client):
-    response = client.get("/v1/ntp/status")
+    response = client.get("/v1/greeter/status")
     assert response.status_code == 200
     data = response.json()
     assert data["plugin"] == "Greeter"
@@ -91,7 +90,7 @@ def test_status_endpoint_returns_metadata(client):
 
 
 def test_unknown_route_returns_404(client):
-    response = client.get("/v1/ntp/nonexistent")
+    response = client.get("/v1/greeter/nonexistent")
     assert response.status_code == 404
 
 
@@ -114,10 +113,9 @@ def test_shout_config_uppercases_response(tmp_path):
           ntp:
             tcp: [-1]
     """, """
-        from plugin_system.core import PluginBase, RoutedPlugin, Service
+        from plugin_system.core import PluginBase, ApiRouterPlugin, Service
 
-        class ShouterPlugin(PluginBase, RoutedPlugin):
-            service_name = Service.NTP
+        class ShouterPlugin(PluginBase, ApiRouterPlugin):
             services = [Service.NTP]
 
             def setup(self):
@@ -132,7 +130,7 @@ def test_shout_config_uppercases_response(tmp_path):
     loader = PluginLoader(bus=EventBus(), app=app)
     loader.load_plugin(tmp_path / "shouter")
     client = TestClient(app)
-    response = client.get("/v1/ntp/hello/bob")
+    response = client.get("/v1/shouter/hello/bob")
     assert response.json()["message"] == "HELLO, BOB!"
 
 
@@ -142,10 +140,9 @@ def test_shout_config_uppercases_response(tmp_path):
 
 def test_add_api_route_style_endpoints(tmp_path):
     make_plugin(tmp_path, "log_plugin", "name: Log\nid: log_plugin\nservice_ports:\n  syslog:\n    tcp: [-1]\n", """
-        from plugin_system.core import PluginBase, RoutedPlugin, Service
+        from plugin_system.core import PluginBase, ApiRouterPlugin, Service
 
-        class LogPlugin(PluginBase, RoutedPlugin):
-            service_name = Service.SYSLOG
+        class LogPlugin(PluginBase, ApiRouterPlugin):
             services = [Service.SYSLOG]
 
             def setup(self):
@@ -165,15 +162,15 @@ def test_add_api_route_style_endpoints(tmp_path):
     loader.load_plugin(tmp_path / "log_plugin")
     client = TestClient(app)
 
-    response = client.get("/v1/syslog/logs")
+    response = client.get("/v1/log_plugin/logs")
     assert response.status_code == 200
     assert response.json()["entries"] == ["entry1", "entry2"]
 
-    response = client.delete("/v1/syslog/logs")
+    response = client.delete("/v1/log_plugin/logs")
     assert response.status_code == 200
     assert response.json()["cleared"] is True
 
-    response = client.get("/v1/syslog/logs")
+    response = client.get("/v1/log_plugin/logs")
     assert response.json()["entries"] == []
 
 
@@ -183,10 +180,9 @@ def test_add_api_route_style_endpoints(tmp_path):
 
 def test_two_plugins_mounted_at_distinct_prefixes(tmp_path):
     make_plugin(tmp_path, "ntp_plugin", "name: NTP\nid: ntp_plugin\nservice_ports:\n  ntp:\n    tcp: [-1]\n", """
-        from plugin_system.core import PluginBase, RoutedPlugin, Service
+        from plugin_system.core import PluginBase, ApiRouterPlugin, Service
 
-        class NTPPlugin(PluginBase, RoutedPlugin):
-            service_name = Service.NTP
+        class NTPPlugin(PluginBase, ApiRouterPlugin):
             services = [Service.NTP]
 
             def setup(self):
@@ -195,10 +191,9 @@ def test_two_plugins_mounted_at_distinct_prefixes(tmp_path):
                     return {"service": "ntp"}
     """)
     make_plugin(tmp_path, "dns_plugin", "name: DNS\nid: dns_plugin\nservice_ports:\n  dns:\n    tcp: [-1]\n", """
-        from plugin_system.core import PluginBase, RoutedPlugin, Service
+        from plugin_system.core import PluginBase, ApiRouterPlugin, Service
 
-        class DNSPlugin(PluginBase, RoutedPlugin):
-            service_name = Service.DNS
+        class DNSPlugin(PluginBase, ApiRouterPlugin):
             services = [Service.DNS]
 
             def setup(self):
@@ -213,8 +208,8 @@ def test_two_plugins_mounted_at_distinct_prefixes(tmp_path):
     loader.load_plugin(tmp_path / "dns_plugin")
     client = TestClient(app)
 
-    assert client.get("/v1/ntp/ping").json() == {"service": "ntp"}
-    assert client.get("/v1/dns/ping").json() == {"service": "dns"}
+    assert client.get("/v1/ntp_plugin/ping").json() == {"service": "ntp"}
+    assert client.get("/v1/dns_plugin/ping").json() == {"service": "dns"}
 
 
 # ---------------------------------------------------------------------------
@@ -223,10 +218,9 @@ def test_two_plugins_mounted_at_distinct_prefixes(tmp_path):
 
 def test_routed_plugin_without_fastapi_app_does_not_raise(tmp_path):
     make_plugin(tmp_path, "no_app", "name: NoApp\nid: no_app\nservice_ports:\n  dns:\n    tcp: [-1]\n", """
-        from plugin_system.core import PluginBase, RoutedPlugin, Service
+        from plugin_system.core import PluginBase, ApiRouterPlugin, Service
 
-        class NoAppPlugin(PluginBase, RoutedPlugin):
-            service_name = Service.DNS
+        class NoAppPlugin(PluginBase, ApiRouterPlugin):
             services = [Service.DNS]
     """)
     loader = PluginLoader(bus=EventBus(), app=None)
@@ -234,17 +228,21 @@ def test_routed_plugin_without_fastapi_app_does_not_raise(tmp_path):
     assert "no_app" in loader.plugins
 
 
-def test_routed_plugin_without_service_name_raises(tmp_path):
-    make_plugin(tmp_path, "no_svcname", "name: NSN\nid: no_svcname\nservice_ports: -1\n", """
-        from plugin_system.core import PluginBase, RoutedPlugin
+def test_routed_plugin_with_no_services_loads_at_plugin_id_prefix(tmp_path):
+    make_plugin(tmp_path, "bare_routed", "name: Bare\nid: bare_routed\nservice_ports: -1\n", """
+        from plugin_system.core import PluginBase, ApiRouterPlugin
 
-        class NoSvcName(PluginBase, RoutedPlugin):
-            pass  # missing service_name
+        class BareApiRouterPlugin(PluginBase, ApiRouterPlugin):
+            def setup(self):
+                @self.router.get("/ping")
+                def ping():
+                    return {"ok": True}
     """)
     app = FastAPI()
     loader = PluginLoader(bus=EventBus(), app=app)
-    with pytest.raises(PluginError, match="service_name"):
-        loader.load_plugin(tmp_path / "no_svcname")
+    loader.load_plugin(tmp_path / "bare_routed")
+    client = TestClient(app)
+    assert client.get("/v1/bare_routed/ping").status_code == 200
 
 
 def test_non_routed_plugin_has_no_routes(tmp_path):

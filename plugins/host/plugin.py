@@ -45,7 +45,7 @@ from pyinfra.operations import files as files_ops
 from pyinfra.operations import server as server_ops
 from pyinfra.operations import systemd as systemd_ops
 
-from plugin_system.core import PluginBase, PluginStateFile, RoutedPlugin, Service
+from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service
 from plugin_system.core.events import Event, bus
 from plugins.host._pkg_manager import (
     PackageBody,
@@ -98,8 +98,7 @@ class UpgradeBody(BaseModel):
 
 # ── Plugin ─────────────────────────────────────────────────────────────────────
 
-class HostPlugin(PluginBase, RoutedPlugin):
-    service_name = Service.HOST
+class HostPlugin(PluginBase, ApiRouterPlugin):
     services = [Service.HOST]
 
     _EMPTY_STATE: dict[str, Any] = {

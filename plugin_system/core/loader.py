@@ -80,7 +80,7 @@ from pyinfra.operations import yum as yum_ops
 from .decorators import _HANDLER_EVENTS_ATTR, _WILDCARD_ATTR
 from .events import Event, EventBus, bus as default_bus
 from .plugin_base import PluginBase
-from .routed_plugin import RoutedPlugin
+from .api_router_plugin import ApiRouterPlugin
 from .services import Service
 
 YAML_FILENAME = "plugin.yaml"
@@ -137,7 +137,7 @@ class PluginLoader:
         logger: logging.Logger | None = None,
     ) -> None:
         self._bus = bus or default_bus
-        self._app = app  # FastAPI app; optional — only needed for RoutedPlugin support
+        self._app = app  # FastAPI app; optional — only needed for ApiRouterPlugin support
         self.logger = logger or logging.getLogger(__name__)
         self._plugins: dict[str, LoadedPlugin] = {}
         self._service_registry: dict[Service, str] = {}  # service → plugin_id
@@ -848,22 +848,18 @@ class PluginLoader:
         )
 
     def _register_api_routes(self, instance: PluginBase, plugin_id: str) -> None:
-        """Mount a RoutedPlugin's router on the FastAPI app at /v1/<service_name>/."""
-        if not isinstance(instance, RoutedPlugin):
+        """Mount a ApiRouterPlugin's router on the FastAPI app at /v1/<plugin_id>/."""
+        if not isinstance(instance, ApiRouterPlugin):
             return
         if self._app is None:
             self.logger.warning(
-                "Plugin %r is a RoutedPlugin but no FastAPI app was supplied to PluginLoader "
+                "Plugin %r is a ApiRouterPlugin but no FastAPI app was supplied to PluginLoader "
                 "— routes will not be registered",
                 plugin_id,
             )
             return
-        if not hasattr(instance, "service_name"):
-            raise PluginError(
-                f"RoutedPlugin {plugin_id!r} must define a 'service_name' (Service enum member)"
-            )
-        prefix = f"/v1/{instance.service_name.value}"
-        self._app.include_router(instance.router, prefix=prefix)
+        prefix = f"/v1/{plugin_id}"
+        self._app.include_router(instance.router, prefix=prefix, tags=[plugin_id])
         self.logger.info(
             "Mounted %r routes at %s",
             plugin_id,

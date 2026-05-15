@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 from pyinfra.operations import files as files_ops
 from pyinfra.operations import server as server_ops
 
-from plugin_system.core import PluginBase, PluginStateFile, RoutedPlugin, Service
+from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service
 from plugin_system.core.events import Event, bus
 
 
@@ -66,8 +66,7 @@ _VALID_PRIORITIES = {"emerg", "alert", "crit", "err", "warning", "notice", "info
 
 # ── plugin ─────────────────────────────────────────────────────────────────────
 
-class SyslogPlugin(PluginBase, RoutedPlugin):
-    service_name = Service.SYSLOG
+class SyslogPlugin(PluginBase, ApiRouterPlugin):
     services = [Service.SYSLOG]
 
     _WORKER_SCRIPT = Path(__file__).parent / "_pyinfra_worker.py"

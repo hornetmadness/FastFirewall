@@ -65,7 +65,7 @@ This is a **FastAPI application driven entirely by plugins**. The app itself (`a
 1. `AppConfig.load()` reads `app_config.yaml` into typed dataclasses. `configure_state()` is called immediately after to apply backup settings before any plugin runs.
 2. `manager_cli.run(loader, plugins_dir)` parses CLI args; exits early for management commands, otherwise returns an optional plugin allow-list.
 3. `PluginLoader.load_directory()` scans the configured `plugins/` directory and derives load order via topological sort of `plugin_requirements` (dependencies before dependents; alphabetical tiebreaker). Pass `only=[...]` to restrict which plugins are loaded; transitive dependencies are included automatically.
-4. For each plugin directory with a `plugin.yaml` + `plugin.py`: the loader imports the module, instantiates any `PluginBase` subclass, wires up event handlers, calls `setup()`, then mounts FastAPI routes if the plugin is a `RoutedPlugin`.
+4. For each plugin directory with a `plugin.yaml` + `plugin.py`: the loader imports the module, instantiates any `PluginBase` subclass, wires up event handlers, calls `setup()`, then mounts FastAPI routes if the plugin is a `ApiRouterPlugin`.
 5. After loading, a `plugin.loaded` event is emitted on the bus.
 
 ### Plugin anatomy
@@ -96,13 +96,12 @@ Every plugin is a directory under `plugins/` with two required files:
 - `teardown()` — called on unload; persist state, close connections
 - Instance attributes set by the loader before `setup()`: `self.config`, `self.meta`, `self.plugin_id`, `self.plugin_dir`, `self.logger`
 
-`RoutedPlugin` (`plugin_system/core/routed_plugin.py`) — mixin for plugins that contribute API routes. Must also inherit `PluginBase`:
+`ApiRouterPlugin` (`plugin_system/core/api_router_plugin.py`) — mixin for plugins that contribute API routes. Must also inherit `PluginBase`:
 ```python
-class MyPlugin(PluginBase, RoutedPlugin):
-    service_name = Service.DNS   # required — determines mount path
+class MyPlugin(PluginBase, ApiRouterPlugin):
     services = [Service.DNS]     # exclusive ownership claim
 ```
-The loader mounts `self.router` at `/v1/<service_name.value>/`. Add routes to `self.router` inside `setup()`.
+The loader mounts `self.router` at `/v1/<plugin_id>/`. Add routes to `self.router` inside `setup()`.
 
 ### Service exclusivity
 

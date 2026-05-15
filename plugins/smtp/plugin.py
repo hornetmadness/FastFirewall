@@ -28,7 +28,7 @@ from typing import Any, List, Optional, Union
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from plugin_system.core import PluginBase, PluginStateFile, RoutedPlugin, Service, on
+from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service, on
 from plugin_system.core.events import Event, bus
 
 
@@ -64,8 +64,7 @@ class TestEmailRequest(BaseModel):
 
 # ── Plugin ──────────────────────────────────────────────────────────────────────
 
-class SmtpPlugin(PluginBase, RoutedPlugin):
-    service_name = Service.SMTP
+class SmtpPlugin(PluginBase, ApiRouterPlugin):
     services = [Service.SMTP]
 
     def setup(self) -> None:

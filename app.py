@@ -1,8 +1,8 @@
 """
 app.py — FastAPI entry point with plugin-supplied routes.
 
-Routes are auto-discovered from plugins that subclass RoutedPlugin and mounted
-at /v1/<service_name>/.  Visit /docs for the interactive OpenAPI UI.
+Routes are auto-discovered from plugins that subclass ApiRouterPlugin and mounted
+at /v1/<plugin_id>/.  Visit /docs for the interactive OpenAPI UI.
 
 Authentication: every route except those in auth.exempt_paths requires a valid
 credential.  Clients may use either HTTP Basic or an OAuth2 Bearer JWT (obtained

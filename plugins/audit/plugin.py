@@ -1,8 +1,8 @@
 """
 Audit Log Plugin
 ────────────────
-Demonstrates RoutedPlugin using add_api_route() instead of decorators.
-Routes are mounted at /v1/syslog/.
+Demonstrates ApiRouterPlugin using add_api_route() instead of decorators.
+Routes are mounted at /v1/audit/.
 """
 import datetime
 from plugin_system.core import PluginBase, Service, on, on_any
@@ -10,7 +10,6 @@ from plugin_system.core.events import Event
 
 
 class AuditPlugin(PluginBase):
-    service_name = Service.SECURITY_LOG
     services = [Service.SECURITY_LOG]
 
     def setup(self):
