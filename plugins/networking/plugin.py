@@ -22,6 +22,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -102,14 +103,66 @@ class ImportInterfacesRequest(BaseModel):
     overwrite: bool = False             # if True, overwrite already-managed interfaces
 
 
+class ImportRoutesRequest(BaseModel):
+    destinations: Optional[list[str]] = None  # None means import all discovered routes
+    overwrite: bool = False                    # if True, overwrite already-managed routes
+
+
+def _validate_host(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("host must not be empty")
+    # Allow IPs and hostnames; reject obvious shell metacharacters
+    if re.search(r"[;&|`$<>()\n\r]", value):
+        raise ValueError(f"{value!r} contains invalid characters")
+    return value
+
+
+class PingRequest(BaseModel):
+    host: str
+    count: int = Field(default=4, ge=1, le=100)
+    timeout: int = Field(default=30, ge=1, le=120)
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, v: str) -> str:
+        return _validate_host(v)
+
+
+class MtrRequest(BaseModel):
+    host: str
+    count: int = Field(default=10, ge=1, le=100)
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, v: str) -> str:
+        return _validate_host(v)
+
+
 class SysctlValue(BaseModel):
     value: str
 
 
-class ActionResult(BaseModel):
-    success: bool
-    output: list[str]
-    returncode: int
+# ── state diff ─────────────────────────────────────────────────────────────────
+
+def _diff_state(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """Return a structured diff between two desired-state dicts."""
+    diff: dict[str, Any] = {}
+    for section in ("interfaces", "routes", "sysctl"):
+        o: dict = old.get(section) or {}
+        n: dict = new.get(section) or {}
+        added = {k: n[k] for k in n if k not in o}
+        removed = {k: o[k] for k in o if k not in n}
+        modified = {k: {"from": o[k], "to": n[k]} for k in n if k in o and o[k] != n[k]}
+        if added or removed or modified:
+            diff[section] = {}
+            if added:
+                diff[section]["added"] = added
+            if removed:
+                diff[section]["removed"] = removed
+            if modified:
+                diff[section]["modified"] = modified
+    return diff
 
 
 # ── plugin class ───────────────────────────────────────────────────────────────
@@ -126,6 +179,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
         self._interfaces: dict[str, dict[str, Any]] = {}
         self._routes: dict[str, dict[str, Any]] = {}   # {uuid: route_dict}
         self._sysctl: dict[str, str] = {}
+        self._last_applied: dict[str, Any] | None = None
         if not self.config.get("ignore_state_on_boot", False):
             self._load_state()
             if not any([self._interfaces, self._routes, self._sysctl]):
@@ -149,11 +203,24 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
         self._interfaces = data.get("interfaces", {})
         self._routes = data.get("routes", {})
         self._sysctl = data.get("sysctl", {})
+        self._last_applied = data.get("last_applied")
 
     def _save_state(self) -> None:
-        self._state_file.save(
-            {"interfaces": self._interfaces, "routes": self._routes, "sysctl": self._sysctl}
-        )
+        data: dict[str, Any] = {
+            "interfaces": self._interfaces,
+            "routes": self._routes,
+            "sysctl": self._sysctl,
+        }
+        if self._last_applied is not None:
+            data["last_applied"] = self._last_applied
+        self._state_file.save(data)
+
+    def _desired_snapshot(self) -> dict[str, Any]:
+        return json.loads(json.dumps({
+            "interfaces": self._interfaces,
+            "routes": self._routes,
+            "sysctl": self._sysctl,
+        }))
 
     def _apply_state(self) -> None:
         if not any([self._interfaces, self._routes, self._sysctl]):
@@ -161,11 +228,22 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
         try:
             self.logger.info("Applying networking config on boot: %d interface(s), %d route(s), %d sysctl(s)",
                              len(self._interfaces), len(self._routes), len(self._sysctl))
-            result = self._run_ifstate_with_config("apply")
-            if result["success"]:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
+                fh.write(self._build_ifstate_yaml())
+                tmp = fh.name
+            try:
+                result = self._run_ifstate("-c", tmp, "apply")
+            finally:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            if result.returncode == 0:
+                self._last_applied = self._desired_snapshot()
+                self._save_state()
                 self.logger.info("Re-applied networking config on boot")
             else:
-                self.logger.warning("Boot-time networking apply returned non-zero: %s", "\n".join(result.get("output", [])))
+                self.logger.warning("Boot-time networking apply returned non-zero: %s", result.stderr.strip())
         except Exception as exc:
             self.logger.warning("Could not re-apply networking config on boot: %s", exc)
 
@@ -201,6 +279,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
             self._routes[route_id] = route
 
         if self._interfaces or self._routes:
+            self._last_applied = self._desired_snapshot()
             self._save_state()
             self.logger.info(
                 "Boot-time import: %d interface(s), %d route(s)",
@@ -247,23 +326,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
             capture_output=True, text=True, timeout=30,
         )
 
-    def _run_ifstate_with_config(self, action: str) -> dict:
-        config_yaml = self._build_ifstate_yaml()
-        tmp = None
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
-                fh.write(config_yaml)
-                tmp = fh.name
-            result = self._run_ifstate("-c", tmp, action)
-            output = (result.stdout + result.stderr).strip().splitlines()
-            return {"success": result.returncode == 0, "output": output, "returncode": result.returncode}
-        finally:
-            if tmp:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-
     # ── route registration ─────────────────────────────────────────────
 
     def _register_routes(self) -> None:
@@ -285,6 +347,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
 
         # managed desired-state — routes
         add("/config/routes",            self._list_routes,            methods=["GET"],    summary="List configured routes")
+        add("/config/routes/import",     self._import_routes,          methods=["POST"],   summary="Import existing routes from running state")
         add("/config/routes",            self._add_route,              methods=["POST"],   summary="Add a route", status_code=201)
         add("/config/routes/{route_id}", self._delete_route,           methods=["DELETE"], summary="Remove a route")
 
@@ -293,14 +356,20 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
         add("/config/sysctl/{key}",      self._set_sysctl,             methods=["PUT"],    summary="Set a sysctl value")
         add("/config/sysctl/{key}",      self._delete_sysctl,          methods=["DELETE"], summary="Remove a sysctl setting")
 
-        # full config + apply / check
+        # full config + apply / check / discard
         add("/config",                   self._get_config,             methods=["GET"],    summary="Full ifstate config (YAML or JSON)")
         add("/apply",                    self._apply,                  methods=["POST"],   summary="Apply config via ifstatecli apply")
         add("/check",                    self._check,                  methods=["POST"],   summary="Dry-run via ifstatecli check")
+        add("/discard",                  self._discard,                methods=["POST"],   summary="Discard pending changes and restore last applied state")
+
+        # diagnostics
+        add("/ping",                     self._ping,                   methods=["POST"],   summary="Ping a host")
+        add("/mtr",                      self._mtr,                    methods=["POST"],   summary="Run mtr traceroute to a host")
 
     # ── status ─────────────────────────────────────────────────────────
 
     def _status(self) -> dict:
+        pending = bool(_diff_state(self._last_applied or {}, self._desired_snapshot()))
         return {
             "plugin": self.meta["name"],
             "version": self.meta["version"],
@@ -309,6 +378,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
                 "routes": len(self._routes),
                 "sysctl": len(self._sysctl),
             },
+            "pending_changes": pending,
             "state_file": str(self._state_file.path),
         }
 
@@ -436,6 +506,8 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
         return {"routes": routes, "count": len(routes)}
 
     def _add_route(self, body: RouteCreate) -> dict:
+        if body.dev is not None and body.dev not in self._interfaces:
+            raise HTTPException(422, f"Interface {body.dev!r} is not in managed config")
         route = body.model_dump(exclude_none=True)
         route_id = hashlib.sha256(
             json.dumps(route, sort_keys=True).encode()
@@ -462,6 +534,51 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
             payload={"route_id": route_id, "to": route.get("to")},
         ))
         return {"deleted": route_id}
+
+    def _import_routes(self, body: ImportRoutesRequest) -> dict:
+        result = self._run_ifstate("show")
+        if result.returncode != 0:
+            raise HTTPException(500, f"ifstatecli show failed: {result.stderr.strip()}")
+        try:
+            data = yaml.safe_load(result.stdout) or {}
+        except Exception:
+            raise HTTPException(500, "Failed to parse ifstatecli show output")
+
+        running_routes: list[dict[str, Any]] = (data.get("routing", {}) or {}).get("routes", []) or []
+        if body.destinations is not None:
+            running_routes = [r for r in running_routes if r.get("to") in body.destinations]
+
+        not_found: list[str] = []
+        if body.destinations is not None:
+            found_destinations = {r.get("to") for r in running_routes}
+            not_found = [d for d in body.destinations if d not in found_destinations]
+
+        imported: list[str] = []
+        skipped: list[str] = []
+
+        for r in running_routes:
+            route: dict[str, Any] = {"to": r["to"]}
+            for key in ("via", "dev", "preference", "table"):
+                if r.get(key) is not None:
+                    route[key] = r[key]
+            route_id = hashlib.sha256(
+                json.dumps(route, sort_keys=True).encode()
+            ).hexdigest()[:16]
+            if route_id in self._routes and not body.overwrite:
+                skipped.append(route_id)
+                continue
+            self._routes[route_id] = route
+            imported.append(route_id)
+            bus.emit(Event(
+                name="networking.route.added",
+                source=self.plugin_id,
+                payload={"route_id": route_id, "to": route["to"]},
+            ))
+
+        if imported:
+            self._save_state()
+
+        return {"imported": imported, "skipped": skipped, "not_found": not_found}
 
     # ── managed config — sysctl ────────────────────────────────────────
 
@@ -500,14 +617,111 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
 
     # ── apply / check ──────────────────────────────────────────────────
 
-    def _apply(self) -> ActionResult:
-        result = self._run_ifstate_with_config("apply")
-        bus.emit(Event(
-            name="networking.applied",
-            source=self.plugin_id,
-            payload={"success": result["success"], "returncode": result["returncode"]},
-        ))
-        return ActionResult(**result)
+    def _apply(self) -> dict[str, Any]:
+        debug: bool = bool(self.config.get("debug", False))
+        desired = self._desired_snapshot()
+        changes = _diff_state(self._last_applied or {}, desired)
+        config_yaml = self._build_ifstate_yaml()
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
+                fh.write(config_yaml)
+                tmp = fh.name
+            uv = shutil.which("uv") or "uv"
+            cmd = f"sudo {uv} run ifstatecli -c {tmp} apply"
+            if debug:
+                self.logger.info("[debug] apply config: %s", tmp)
+                self.logger.info("[debug] cmd: %s", cmd)
+            result = self._run_ifstate("-c", tmp, "apply")
+            output = (result.stdout + result.stderr).strip()
+            errors = [ln for ln in output.splitlines() if "fail" in ln.lower() or "error" in ln.lower()]
+            if debug:
+                self.logger.info("[debug] returncode=%d", result.returncode)
+                self.logger.info("[debug] output=%r", output)
+            success = result.returncode == 0
+            if success:
+                self._last_applied = desired
+                self._save_state()
+            bus.emit(Event(
+                name="networking.applied",
+                source=self.plugin_id,
+                payload={"success": success, "returncode": result.returncode},
+            ))
+            resp: dict[str, Any] = {"success": success, "returncode": result.returncode, "changes": changes}
+            if errors:
+                resp["errors"] = errors
+            if debug:
+                resp["debug"] = {"config_file": tmp, "output": output}
+            return resp
+        finally:
+            if tmp:
+                if debug:
+                    self.logger.info("[debug] temp config retained at: %s", tmp)
+                else:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
 
-    def _check(self) -> ActionResult:
-        return ActionResult(**self._run_ifstate_with_config("check"))
+    def _discard(self) -> dict[str, Any]:
+        if self._last_applied is None:
+            raise HTTPException(409, "No applied snapshot to restore — apply first")
+        changes = _diff_state(self._desired_snapshot(), self._last_applied)
+        self._interfaces = dict(self._last_applied.get("interfaces", {}))
+        self._routes = dict(self._last_applied.get("routes", {}))
+        self._sysctl = dict(self._last_applied.get("sysctl", {}))
+        self._save_state()
+        return {"discarded": True, "changes": changes}
+
+    def _check(self) -> dict[str, Any]:
+        config_yaml = self._build_ifstate_yaml()
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
+                fh.write(config_yaml)
+                tmp = fh.name
+            result = self._run_ifstate("-c", tmp, "check")
+            try:
+                changes = yaml.safe_load(result.stdout) or {}
+            except Exception:
+                raise HTTPException(500, "Failed to parse ifstatecli check output")
+            route_diff = _diff_state(self._last_applied or {}, self._desired_snapshot()).get("routes")
+            if route_diff:
+                changes["routes"] = route_diff
+            return {"success": result.returncode == 0, "returncode": result.returncode, "changes": changes}
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    # ── diagnostics ────────────────────────────────────────────────────────
+
+    def _ping(self, body: PingRequest) -> dict[str, Any]:
+        result = subprocess.run(
+            ["ping", "-c", str(body.count), body.host],
+            capture_output=True, text=True, timeout=body.timeout,
+        )
+        lines = (result.stdout + result.stderr).strip().splitlines()
+        return {"host": body.host, "returncode": result.returncode, "output": lines}
+
+    def _mtr(self, body: MtrRequest) -> dict[str, Any]:
+        result = subprocess.run(
+            ["mtr", "--report", "--json", "--report-cycles", str(body.count), body.host],
+            capture_output=True, text=True, timeout=120,
+        )
+        try:
+            data = json.loads(result.stdout)
+            hubs = sorted(data.get("report", {}).get("hubs", []), key=lambda h: h["count"])
+            lines = [
+                f"{hub['count']:<4} {hub['host']:<40} {'timeout' if hub['host'] == '???' else 'ok':<8}"
+                f" {hub['Loss%']:>6}%  {hub['Snt']:>3}  {hub['Last']:>7.2f}"
+                f"  {hub['Avg']:>7.2f}  {hub['Best']:>7.2f}  {hub['Wrst']:>7.2f}  {hub['StDev']:>7.2f}"
+                for hub in hubs
+            ]
+            header = f"{'Hop':<4} {'Ip':<45} {'Status':<8} {'Loss%':>7}  {'Snt':>3}  {'Last':>7}  {'Avg':>7}  {'Best':>7}  {'Wrst':>7}  {'StDev':>7}"
+            output = [header] + lines
+        except (json.JSONDecodeError, KeyError):
+            output = (result.stdout + result.stderr).strip().splitlines()
+        return {"host": body.host, "returncode": result.returncode, "output": output}

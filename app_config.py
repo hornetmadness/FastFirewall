@@ -121,8 +121,8 @@ class AppConfig:
             ),
         )
         extra = {k.replace("-", "_"): v for k, v in server_raw.items() if k not in _SERVER_KNOWN_KEYS}
-        cfg._uvicorn_kwargs = {"host": cfg.server.host, "port": cfg.server.port, "reload": cfg.server.reload, **extra}
-        
+        cfg._uvicorn_kwargs = {"host": cfg.server.host, "port": cfg.server.port, "reload": cfg.server.reload, "log_config": None, **extra}
+
         logging.basicConfig(level=cfg.logging.level, format=cfg.logging.format)
         return cfg
 

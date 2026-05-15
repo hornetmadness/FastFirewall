@@ -96,8 +96,9 @@ def test_status_returns_plugin_metadata(client):
 
 
 def test_status_managed_counts_start_at_zero(client):
-    managed = client.get("/v1/networking/status").json()["ff_managed"]
-    assert managed == {"interfaces": 0, "routes": 0, "sysctl": 0}
+    data = client.get("/v1/networking/status").json()
+    assert data["ff_managed"] == {"interfaces": 0, "routes": 0, "sysctl": 0}
+    assert data["pending_changes"] is False
 
 
 def test_status_counts_reflect_additions(client):
@@ -367,6 +368,18 @@ def test_route_via_with_prefix_rejected(client):
     assert r.status_code == 422
 
 
+def test_route_dev_not_in_managed_config_rejected(client):
+    r = client.post("/v1/networking/config/routes", json={"to": "default", "dev": "bogus0"})
+    assert r.status_code == 422
+
+
+def test_route_dev_in_managed_config_accepted(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    r = client.post("/v1/networking/config/routes", json={"to": "default", "dev": "eth0"})
+    assert r.status_code == 201
+    assert r.json()["dev"] == "eth0"
+
+
 # ── config — routes ────────────────────────────────────────────────────────────
 
 def test_list_routes_empty(client):
@@ -384,6 +397,7 @@ def test_add_route_default_gateway(client):
 
 
 def test_add_route_with_dev_and_preference(client):
+    client.put("/v1/networking/config/interfaces/eth1", json={})
     r = client.post("/v1/networking/config/routes", json={"to": "10.0.0.0/8", "dev": "eth1", "preference": 100})
     assert r.status_code == 201
     assert r.json()["dev"] == "eth1"
@@ -536,7 +550,7 @@ def test_get_config_empty_state_is_valid_yaml(client):
 # ── apply & check ──────────────────────────────────────────────────────────────
 
 def test_apply_calls_ifstatecli_apply(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="applied")
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
     r = client.post("/v1/networking/apply")
     assert r.status_code == 200
     args = plugin._run_ifstate.call_args[0]
@@ -545,7 +559,7 @@ def test_apply_calls_ifstatecli_apply(plugin, client):
 
 
 def test_apply_returns_success_true_on_zero_exit(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="ok")
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
     r = client.post("/v1/networking/apply")
     assert r.json()["success"] is True
     assert r.json()["returncode"] == 0
@@ -557,6 +571,36 @@ def test_apply_returns_success_false_on_nonzero_exit(plugin, client):
     assert r.status_code == 200
     assert r.json()["success"] is False
     assert r.json()["returncode"] == 1
+
+
+def test_apply_changes_shows_added_interface(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    r = client.post("/v1/networking/apply")
+    assert r.json()["changes"]["interfaces"]["added"]["eth0"]["addresses"] == ["10.0.0.1/24"]
+
+
+def test_apply_changes_empty_when_nothing_pending(plugin, client):
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    client.post("/v1/networking/apply")
+    plugin._run_ifstate.reset_mock()
+    r = client.post("/v1/networking/apply")
+    assert r.json()["changes"] == {}
+
+
+def test_apply_updates_last_applied_on_success(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    client.post("/v1/networking/apply")
+    assert plugin._last_applied is not None
+    assert "eth0" in plugin._last_applied["interfaces"]
+
+
+def test_apply_does_not_update_last_applied_on_failure(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    plugin._run_ifstate.return_value = _ifstate_err()
+    client.post("/v1/networking/apply")
+    assert plugin._last_applied is None
 
 
 def test_apply_emits_event(plugin, client):
@@ -591,9 +635,24 @@ def test_check_returns_valid_false_on_failure(plugin, client):
     assert r.json()["success"] is False
 
 
+def test_check_shows_deleted_route_when_ifstatecli_has_no_routing_section(plugin, client):
+    # Add a route and apply it so last_applied captures it
+    r = client.post("/v1/networking/config/routes", json={"to": "default", "via": "10.0.0.1"})
+    route_id = r.json()["id"]
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    client.post("/v1/networking/apply")
+    # Now delete the route — routing section disappears from ifstate YAML
+    client.delete(f"/v1/networking/config/routes/{route_id}")
+    # /check should still surface the pending removal even though ifstatecli sees no routing section
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    r = client.post("/v1/networking/check")
+    assert r.status_code == 200
+    assert route_id in r.json()["changes"]["routes"]["removed"]
+
+
 def test_apply_passes_config_yaml_via_temp_file(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
-    plugin._run_ifstate.return_value = _ifstate_ok()
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
     plugin._run_ifstate.reset_mock()
     client.post("/v1/networking/apply")
     args = plugin._run_ifstate.call_args[0]
@@ -601,6 +660,74 @@ def test_apply_passes_config_yaml_via_temp_file(plugin, client):
     assert len(args) == 3
     assert args[0] == "-c"
     assert args[2] == "apply"
+
+
+# ── discard ────────────────────────────────────────────────────────────────────
+
+def test_discard_409_when_no_snapshot(client):
+    r = client.post("/v1/networking/discard")
+    assert r.status_code == 409
+
+
+def test_discard_restores_last_applied(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    client.post("/v1/networking/apply")
+    # add a pending change
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    assert client.get("/v1/networking/config/interfaces").json()["count"] == 2
+    client.post("/v1/networking/discard")
+    assert client.get("/v1/networking/config/interfaces").json()["count"] == 1
+    names = [i["name"] for i in client.get("/v1/networking/config/interfaces").json()["interfaces"]]
+    assert "eth1" not in names
+
+
+def test_discard_returns_diff_of_what_was_reverted(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    client.post("/v1/networking/apply")
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    r = client.post("/v1/networking/discard")
+    assert r.status_code == 200
+    assert r.json()["discarded"] is True
+    assert "eth1" in r.json()["changes"]["interfaces"]["removed"]
+
+
+def test_discard_empty_changes_when_nothing_pending(plugin, client):
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    client.post("/v1/networking/apply")
+    r = client.post("/v1/networking/discard")
+    assert r.json()["changes"] == {}
+
+
+# ── pending_changes in status ──────────────────────────────────────────────────
+
+def test_status_pending_false_initially(client):
+    assert client.get("/v1/networking/status").json()["pending_changes"] is False
+
+
+def test_status_pending_true_after_mutation_before_apply(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    client.post("/v1/networking/apply")
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    assert client.get("/v1/networking/status").json()["pending_changes"] is True
+
+
+def test_status_pending_false_after_apply(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    client.post("/v1/networking/apply")
+    assert client.get("/v1/networking/status").json()["pending_changes"] is False
+
+
+def test_status_pending_false_after_discard(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    client.post("/v1/networking/apply")
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    client.post("/v1/networking/discard")
+    assert client.get("/v1/networking/status").json()["pending_changes"] is False
 
 
 # ── state persistence ──────────────────────────────────────────────────────────
@@ -821,6 +948,36 @@ def test_apply_state_does_not_crash_on_ifstate_failure(tmp_path):
     plugin._run_ifstate = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr="permission denied"))
     plugin.setup()  # must not raise
     assert plugin._interfaces == {"eth0": {"addresses": ["10.0.0.1/24"]}}
+
+
+def test_boot_apply_sets_last_applied_on_success(tmp_path):
+    # State on disk with no last_applied (e.g. route added but never applied before restart)
+    _write_boot_state(tmp_path)
+    plugin = _make_plugin_raw(tmp_path)
+    assert plugin._last_applied is not None
+    assert plugin._last_applied["interfaces"] == _BOOT_STATE["interfaces"]
+
+
+def test_boot_apply_does_not_set_last_applied_on_failure(tmp_path):
+    _write_boot_state(tmp_path)
+    mod = _load_module()
+    plugin = mod.NetworkingPlugin()
+    plugin.plugin_id = "networking"
+    plugin.meta = {"name": "Networking Plugin", "version": "1.0.0"}
+    plugin.config = {}
+    plugin.plugin_dir = tmp_path
+    plugin.logger = logging.getLogger("test.networking")
+    plugin._run_ifstate = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr="failed"))
+    plugin.setup()
+    assert plugin._last_applied is None
+
+
+def test_boot_apply_clears_pending_changes(tmp_path):
+    # Simulates the reported bug: state exists, no last_applied, reboot should leave pending_changes=False
+    _write_boot_state(tmp_path)
+    plugin = _make_plugin_raw(tmp_path)
+    client = _make_client(plugin)
+    assert client.get("/v1/networking/status").json()["pending_changes"] is False
 
 
 # ── boot-time auto-import ──────────────────────────────────────────────────────
