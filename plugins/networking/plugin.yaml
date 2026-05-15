@@ -1,5 +1,5 @@
 name: Networking Plugin
-id: networking_plugin
+id: networking
 version: "1.0.0"
 description: >
   Manages network interfaces, routes, and kernel sysctl settings declaratively

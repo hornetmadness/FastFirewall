@@ -5,7 +5,7 @@ description: 'Installs and configures fluent-bit and rsyslog to collect system l
 
   '
 enabled: true
-id: syslog_plugin
+id: syslog
 name: Syslog Plugin
 version: 1.0.0
 os_requirements:

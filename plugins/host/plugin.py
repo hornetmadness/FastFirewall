@@ -47,7 +47,7 @@ from pyinfra.operations import systemd as systemd_ops
 
 from plugin_system.core import PluginBase, PluginStateFile, RoutedPlugin, Service
 from plugin_system.core.events import Event, bus
-from plugins.host_plugin._pkg_manager import (
+from plugins.host._pkg_manager import (
     PackageBody,
     PackageManager,
     RepoBody,

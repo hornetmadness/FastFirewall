@@ -18,14 +18,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 uv run python app.py
 
 # Run with only specific plugins loaded
-uv run python app.py --plugin firewall_plugin --plugin dns_plugin
+uv run python app.py --plugin firewall --plugin dns
 
 # List all plugins and their enabled state
 uv run python app.py --list-plugins
 
 # Enable or disable a plugin (edits plugin.yaml, then exits)
-uv run python app.py --enable-plugin syslog_plugin
-uv run python app.py --disable-plugin syslog_plugin
+uv run python app.py --enable-plugin syslog
+uv run python app.py --disable-plugin syslog
 
 # Show all CLI options
 uv run python app.py --help
@@ -40,7 +40,7 @@ uv run pytest tests/test_core/test_events.py
 uv run pytest tests/test_core/test_events.py::test_subscribe_and_emit
 
 # Run plugin-local tests (also collected automatically by pytest)
-uv run pytest plugins/firewall_plugin/test_firewall_api_routes.py
+uv run pytest plugins/firewall/test_firewall_api_routes.py
 
 # Run pyright type checking
 uv run --with pyright pyright
@@ -155,22 +155,22 @@ Beyond `load_plugin` / `unload_plugin`, `PluginLoader` exposes two read/write he
 
 ### Dependency installation
 
-Plugins can declare `py_requirements` (pip packages) and `os_requirements` (system packages) in `plugin.yaml`. The loader installs them at load time using **pyinfra** running against `@local`. If `PluginLoader` is constructed with `pipx_app="<name>"`, Python packages are injected into that pipx environment instead of the current one.
+Plugins can declare `py_requirements` (pip packages) and `os_requirements` (system packages) in `plugin.yaml`. The loader installs them at load time using **pyinfra** running against `@local`.
 
 ### Testing
 
 Tests live in two places and are both collected by pytest automatically (see `testpaths` in `pyproject.toml`):
 
 - `tests/` — core unit tests (`test_events`, `test_decorators`, `test_loader`) and integration tests (`test_api/test_routes.py`)
-- `plugins/<name>/test_*.py` — plugin-local route and behaviour tests (currently `firewall_plugin` and `host_plugin`)
+- `plugins/<name>/test_*.py` — plugin-local route and behaviour tests (currently `firewall` and `host`)
 
-**Plugin test pattern — direct load (firewall_plugin)**
+**Plugin test pattern — direct load (firewall)**
 
 Plugin route tests do *not* go through `PluginLoader`. They import the plugin module directly via `importlib`, instantiate the plugin class, set the loader-injected attributes (`plugin_id`, `meta`, `config`, `plugin_dir`, `logger`) by hand, call `setup()`, then mount `instance.router` onto a fresh `FastAPI()` and wrap it in `TestClient`. This sidesteps pyinfra dependency installation while still running real production code.
 
 ```python
 inst = mod.FirewallPlugin()
-inst.plugin_id = "firewall_plugin"
+inst.plugin_id = "firewall"
 inst.meta = {...}
 inst.config = {"rules_file": "rules.json", ...}
 inst.plugin_dir = tmp_path
@@ -183,7 +183,7 @@ client = TestClient(app)
 
 Use `tmp_path` for any file-backed state (e.g. `rules_file`, `state_file`) so tests are isolated. Plugins that persist state write into a `data/` subdirectory of `plugin_dir` (e.g. `tmp_path / "data" / "rules.json"`); the subdirectory is created automatically on first save.
 
-**Plugin test pattern — pyinfra mocking (host_plugin)**
+**Plugin test pattern — pyinfra mocking (host)**
 
 For plugins that call `_pyinfra_run`, replace it with `MagicMock` after instantiation and before `setup()`. Then assert on `call_args` to verify the correct pyinfra op and kwargs were used without touching the real system:
 

@@ -1,5 +1,5 @@
 name: SMTP Plugin
-id: smtp_plugin
+id: smtp
 version: "1.0.0"
 description: >
   Manages Postfix SMTP server configuration — relay settings, TLS, SASL — and

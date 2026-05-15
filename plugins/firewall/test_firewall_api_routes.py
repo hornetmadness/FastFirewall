@@ -27,7 +27,7 @@ PLUGIN_PY = Path(__file__).parent / "plugin.py"
 # ---------------------------------------------------------------------------
 
 def _load_module():
-    name = "_test_firewall_plugin"
+    name = "_test_firewall"
     sys.modules.pop(name, None)
     spec = importlib.util.spec_from_file_location(name, PLUGIN_PY)
     assert spec is not None
@@ -41,10 +41,10 @@ def _load_module():
 def _make_app(tmp_path):
     mod = _load_module()
     inst = mod.FirewallPlugin()
-    inst.plugin_id = "firewall_plugin"
+    inst.plugin_id = "firewall"
     inst.meta = {"name": "Firewall Plugin", "version": "1.0.0", "description": "", "author": ""}
     inst.plugin_dir = tmp_path
-    inst.logger = logging.getLogger("test.firewall_plugin")
+    inst.logger = logging.getLogger("test.firewall")
     inst.config = {
         "rules_file": "rules.json",
         "default_platform": "iptables",
@@ -337,10 +337,10 @@ def _make_inst(tmp_path, config=None):
     """Return a bare plugin instance with attributes set but setup() not called."""
     mod = _load_module()
     inst = mod.FirewallPlugin()
-    inst.plugin_id = "firewall_plugin"
+    inst.plugin_id = "firewall"
     inst.meta = {"name": "Firewall Plugin", "version": "1.0.0", "description": "", "author": ""}
     inst.plugin_dir = tmp_path
-    inst.logger = logging.getLogger("test.firewall_plugin")
+    inst.logger = logging.getLogger("test.firewall")
     inst.config = {
         "rules_file": "rules.json",
         "default_platform": "iptables",

@@ -54,7 +54,7 @@ _VALID_SYSLOG_MODES = {"udp", "tcp", "tcp+udp"}
 _VALID_UNIX_MODES = {"unix_udp", "unix_tcp"}
 
 _MINIMAL_MAIN_CONF = """\
-# Managed by FastFirewall syslog_plugin — do not edit by hand.
+# Managed by FastFirewall syslog — do not edit by hand.
 @INCLUDE conf.d/*.conf
 """
 
@@ -193,7 +193,7 @@ class SyslogPlugin(PluginBase, RoutedPlugin):
             new_content = _MINIMAL_MAIN_CONF
             self.logger.info("Creating fluent-bit main config at %s", self._fluent_bit_main_conf)
         else:
-            new_content = existing.rstrip() + "\n\n# Added by FastFirewall syslog_plugin\n@INCLUDE conf.d/*.conf\n"
+            new_content = existing.rstrip() + "\n\n# Added by FastFirewall syslog\n@INCLUDE conf.d/*.conf\n"
             self.logger.info("Adding conf.d include to %s", self._fluent_bit_main_conf)
 
         self._pyinfra_run(
@@ -577,7 +577,7 @@ def _build_logrotate_conf(
 
 
 def _build_fb_ini(sections: dict[str, dict | list]) -> str:
-    line="# Managed by FastFirewall syslog_plugin — do not edit by hand.\n\n"
+    line="# Managed by FastFirewall syslog — do not edit by hand.\n\n"
     for section, value in sections.items():
         if isinstance(value, dict):
             line += f"[{section.upper()}]\n"

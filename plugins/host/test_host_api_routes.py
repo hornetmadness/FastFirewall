@@ -40,11 +40,11 @@ def _load_plugin_module():
     if _REPO_ROOT not in sys.path:
         sys.path.insert(0, _REPO_ROOT)
     plugin_py = Path(__file__).parent / "plugin.py"
-    sys.modules.pop("_host_plugin_test", None)
-    spec = importlib.util.spec_from_file_location("_host_plugin_test", plugin_py)
+    sys.modules.pop("_host_test", None)
+    spec = importlib.util.spec_from_file_location("_host_test", plugin_py)
     assert spec is not None
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["_host_plugin_test"] = mod
+    sys.modules["_host_test"] = mod
     assert spec.loader is not None
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
     return mod
@@ -53,11 +53,11 @@ def _load_plugin_module():
 def _make_plugin(tmp_path, config=None, system_repos=None):
     mod = _load_plugin_module()
     plugin = mod.HostPlugin()
-    plugin.plugin_id = "host_plugin"
+    plugin.plugin_id = "host"
     plugin.meta = {"name": "Host Plugin", "version": "1.0.0"}
     plugin.config = config or {}
     plugin.plugin_dir = tmp_path
-    plugin.logger = logging.getLogger("test.host_plugin")
+    plugin.logger = logging.getLogger("test.host")
     plugin._pyinfra_run = MagicMock()
     plugin.setup()
     plugin._pkg_mgr.list_system_repos = MagicMock(return_value=system_repos or {})
@@ -464,11 +464,11 @@ def _init_plugin(tmp_path, init_cfg: dict, *, side_effect=None):
     """Build a HostPlugin with init config nested under 'init' key."""
     mod = _load_plugin_module()
     plugin = mod.HostPlugin()
-    plugin.plugin_id = "host_plugin"
+    plugin.plugin_id = "host"
     plugin.meta = {"name": "Host Plugin", "version": "1.0.0"}
     plugin.config = {"init": init_cfg}
     plugin.plugin_dir = tmp_path
-    plugin.logger = logging.getLogger("test.host_plugin")
+    plugin.logger = logging.getLogger("test.host")
     plugin._pyinfra_run = MagicMock(side_effect=side_effect)
     return plugin, mod
 
@@ -1435,11 +1435,11 @@ def _write_boot_state(tmp_path, state=None):
 def _make_inst(tmp_path, config=None):
     mod = _load_plugin_module()
     plugin = mod.HostPlugin()
-    plugin.plugin_id = "host_plugin"
+    plugin.plugin_id = "host"
     plugin.meta = {"name": "Host Plugin", "version": "1.0.0"}
     plugin.config = config or {}
     plugin.plugin_dir = tmp_path
-    plugin.logger = logging.getLogger("test.host_plugin")
+    plugin.logger = logging.getLogger("test.host")
     plugin._pyinfra_run = MagicMock()
     return plugin, mod
 

@@ -1,10 +1,10 @@
 name: Firewall Plugin
-id: firewall_plugin
+id: firewall
 version: "1.0.0"
 description: Manages firewall rules as a persistent JSON store and compiles them to platform-specific ACL configs via aerleon.
 author: hornetmadness@gmail.com
 enabled: true
-plugin_requirements: ["host_plugin", "networking_plugin"]
+plugin_requirements: ["host", "networking"]
 py_requirements:
   - aerleon
   - pyyaml

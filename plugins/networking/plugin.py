@@ -22,12 +22,13 @@ import hashlib
 import ipaddress
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from typing import Any, Literal, Optional
 
 import yaml
-from fastapi import HTTPException
+from fastapi import HTTPException, logger
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
@@ -96,13 +97,18 @@ class RouteCreate(BaseModel):
         return v
 
 
+class ImportInterfacesRequest(BaseModel):
+    names: Optional[list[str]] = None  # None means import all discovered interfaces
+    overwrite: bool = False             # if True, overwrite already-managed interfaces
+
+
 class SysctlValue(BaseModel):
     value: str
 
 
 class ActionResult(BaseModel):
     success: bool
-    output: str
+    output: list[str]
     returncode: int
 
 
@@ -123,7 +129,10 @@ class NetworkingPlugin(PluginBase, RoutedPlugin):
         self._sysctl: dict[str, str] = {}
         if not self.config.get("ignore_state_on_boot", False):
             self._load_state()
-            self._apply_state()
+            if not any([self._interfaces, self._routes, self._sysctl]):
+                self._import_state_from_system()
+            else:
+                self._apply_state()
         self.logger.info(
             "Networking plugin loaded: %d interface(s), %d route(s), %d sysctl(s)",
             len(self._interfaces), len(self._routes), len(self._sysctl),
@@ -151,13 +160,53 @@ class NetworkingPlugin(PluginBase, RoutedPlugin):
         if not any([self._interfaces, self._routes, self._sysctl]):
             return
         try:
+            self.logger.info("Applying networking config on boot: %d interface(s), %d route(s), %d sysctl(s)",
+                             len(self._interfaces), len(self._routes), len(self._sysctl))
             result = self._run_ifstate_with_config("apply")
             if result["success"]:
                 self.logger.info("Re-applied networking config on boot")
             else:
-                self.logger.warning("Boot-time networking apply returned non-zero: %s", result.get("output", ""))
+                self.logger.warning("Boot-time networking apply returned non-zero: %s", "\n".join(result.get("output", [])))
         except Exception as exc:
             self.logger.warning("Could not re-apply networking config on boot: %s", exc)
+
+    def _import_state_from_system(self) -> None:
+        """Populate interfaces and routes from the running kernel when state file is empty."""
+        result = self._run_ifstate("show")
+        if result.returncode != 0:
+            self.logger.warning("ifstatecli show failed during boot import: %s", result.stderr.strip())
+            return
+        try:
+            data = yaml.safe_load(result.stdout) or {}
+        except Exception as exc:
+            self.logger.warning("Boot-time import: failed to parse ifstatecli show output: %s", exc)
+            return
+
+        for name, iface_data in (data.get("interfaces", {}) or {}).items():
+            iface_data = iface_data or {}
+            entry: dict[str, Any] = {}
+            if iface_data.get("addresses"):
+                entry["addresses"] = iface_data["addresses"]
+            if iface_data.get("link"):
+                entry["link"] = iface_data["link"]
+            self._interfaces[name] = entry
+
+        for r in (data.get("routing", {}) or {}).get("routes", []) or []:
+            route: dict[str, Any] = {"to": r["to"]}
+            for key in ("via", "dev", "preference", "table"):
+                if r.get(key) is not None:
+                    route[key] = r[key]
+            route_id = hashlib.sha256(
+                json.dumps(route, sort_keys=True).encode()
+            ).hexdigest()[:16]
+            self._routes[route_id] = route
+
+        if self._interfaces or self._routes:
+            self._save_state()
+            self.logger.info(
+                "Boot-time import: %d interface(s), %d route(s)",
+                len(self._interfaces), len(self._routes),
+            )
 
     # ── ifstate YAML builder ───────────────────────────────────────────
 
@@ -193,8 +242,9 @@ class NetworkingPlugin(PluginBase, RoutedPlugin):
     # ── ifstate CLI wrapper ────────────────────────────────────────────
 
     def _run_ifstate(self, *args: str) -> subprocess.CompletedProcess[str]:
+        uv = shutil.which("uv") or "uv"
         return subprocess.run(
-            ["ifstatecli", *args],
+            ["sudo", uv, "run", "ifstatecli", *args],
             capture_output=True, text=True, timeout=30,
         )
 
@@ -206,7 +256,7 @@ class NetworkingPlugin(PluginBase, RoutedPlugin):
                 fh.write(config_yaml)
                 tmp = fh.name
             result = self._run_ifstate("-c", tmp, action)
-            output = (result.stdout + result.stderr).strip()
+            output = (result.stdout + result.stderr).strip().splitlines()
             return {"success": result.returncode == 0, "output": output, "returncode": result.returncode}
         finally:
             if tmp:
@@ -229,6 +279,7 @@ class NetworkingPlugin(PluginBase, RoutedPlugin):
 
         # managed desired-state — interfaces
         add("/config/interfaces",        self._list_config_interfaces, methods=["GET"],    summary="List configured interfaces")
+        add("/config/interfaces/import", self._import_interfaces,      methods=["POST"],   summary="Import existing interfaces from running state")
         add("/config/interfaces/{name}", self._get_config_interface,   methods=["GET"],    summary="Get one interface config")
         add("/config/interfaces/{name}", self._set_interface,          methods=["PUT"],    summary="Configure an interface")
         add("/config/interfaces/{name}", self._delete_interface,       methods=["DELETE"], summary="Remove interface from config")
@@ -254,7 +305,7 @@ class NetworkingPlugin(PluginBase, RoutedPlugin):
         return {
             "plugin": self.meta["name"],
             "version": self.meta["version"],
-            "managed": {
+            "ff_managed": {
                 "interfaces": len(self._interfaces),
                 "routes": len(self._routes),
                 "sysctl": len(self._sysctl),
@@ -272,7 +323,11 @@ class NetworkingPlugin(PluginBase, RoutedPlugin):
             data = yaml.safe_load(result.stdout) or {}
         except Exception:
             raise HTTPException(500, "Failed to parse ifstatecli show output")
-        return {"interfaces": data.get("interfaces", {}), "source": "running"}
+        interfaces = {
+            name: {**(iface or {}), "ff_managed": name in self._interfaces}
+            for name, iface in data.get("interfaces", {}).items()
+        }
+        return {"interfaces": interfaces, "source": "running"}
 
     def _show_interface(self, name: str) -> dict:
         result = self._run_ifstate("show")
@@ -285,13 +340,13 @@ class NetworkingPlugin(PluginBase, RoutedPlugin):
         interfaces = data.get("interfaces", {})
         if name not in interfaces:
             raise HTTPException(404, f"Interface {name!r} not found in running state")
-        return {"name": name, **interfaces[name]}
+        return {"name": name, **(interfaces[name] or {}), "ff_managed": name in self._interfaces}
 
     def _identify(self) -> dict:
         result = self._run_ifstate("identify")
         if result.returncode != 0:
             raise HTTPException(500, f"ifstatecli identify failed: {result.stderr.strip()}")
-        return {"output": result.stdout}
+        return yaml.safe_load(result.stdout) or {}
 
     # ── managed config — interfaces ────────────────────────────────────
 
@@ -332,6 +387,48 @@ class NetworkingPlugin(PluginBase, RoutedPlugin):
             payload={"name": name},
         ))
         return {"deleted": name}
+
+    def _import_interfaces(self, body: ImportInterfacesRequest) -> dict:
+        result = self._run_ifstate("show")
+        if result.returncode != 0:
+            raise HTTPException(500, f"ifstatecli show failed: {result.stderr.strip()}")
+        try:
+            data = yaml.safe_load(result.stdout) or {}
+        except Exception:
+            raise HTTPException(500, "Failed to parse ifstatecli show output")
+
+        running: dict[str, Any] = data.get("interfaces", {})
+        names_to_import = body.names if body.names is not None else list(running.keys())
+
+        imported: list[str] = []
+        skipped: list[str] = []
+        not_found: list[str] = []
+
+        for name in names_to_import:
+            if name not in running:
+                not_found.append(name)
+                continue
+            if name in self._interfaces and not body.overwrite:
+                skipped.append(name)
+                continue
+            iface_data: dict[str, Any] = running[name] or {}
+            entry: dict[str, Any] = {}
+            if iface_data.get("addresses"):
+                entry["addresses"] = iface_data["addresses"]
+            if iface_data.get("link"):
+                entry["link"] = iface_data["link"]
+            self._interfaces[name] = entry
+            imported.append(name)
+            bus.emit(Event(
+                name="networking.interface.configured",
+                source=self.plugin_id,
+                payload={"name": name, **entry},
+            ))
+
+        if imported:
+            self._save_state()
+
+        return {"imported": imported, "skipped": skipped, "not_found": not_found}
 
     # ── managed config — routes ────────────────────────────────────────
 

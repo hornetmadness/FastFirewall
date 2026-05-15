@@ -7,7 +7,7 @@ config:
   log_file: audit.log
 description: Records every event to an audit trail.
 enabled: true
-id: audit_plugin
+id: audit
 name: Audit Log Plugin
 os_requirements: []
 plugin_requirements: []

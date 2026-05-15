@@ -27,11 +27,11 @@ def _load_module():
     if _REPO_ROOT not in sys.path:
         sys.path.insert(0, _REPO_ROOT)
     plugin_py = Path(__file__).parent / "plugin.py"
-    sys.modules.pop("_test_syslog_plugin", None)
-    spec = importlib.util.spec_from_file_location("_test_syslog_plugin", plugin_py)
+    sys.modules.pop("_test_syslog", None)
+    spec = importlib.util.spec_from_file_location("_test_syslog", plugin_py)
     assert spec is not None
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["_test_syslog_plugin"] = mod
+    sys.modules["_test_syslog"] = mod
     assert spec.loader is not None
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
     return mod
@@ -40,7 +40,7 @@ def _load_module():
 def _make_plugin(tmp_path, config=None):
     mod = _load_module()
     plugin = mod.SyslogPlugin()
-    plugin.plugin_id = "syslog_plugin"
+    plugin.plugin_id = "syslog"
     plugin.meta = {"name": "Syslog Plugin", "version": "1.0.0"}
     default_conf = {
         "log_dir": str(tmp_path / "logs"),
@@ -49,7 +49,7 @@ def _make_plugin(tmp_path, config=None):
     }
     plugin.config = {**default_conf, **(config or {})}
     plugin.plugin_dir = tmp_path
-    plugin.logger = logging.getLogger("test.syslog_plugin")
+    plugin.logger = logging.getLogger("test.syslog")
     plugin._pyinfra_run = MagicMock()
     with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
         plugin.setup()

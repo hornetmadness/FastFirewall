@@ -44,7 +44,7 @@ _MAILQ_ONE = _proc(
 
 
 def _load_module():
-    name = "_test_smtp_plugin"
+    name = "_test_smtp"
     sys.modules.pop(name, None)
     spec = importlib.util.spec_from_file_location(name, PLUGIN_PY)
     assert spec is not None
@@ -58,10 +58,10 @@ def _load_module():
 def _make_inst(tmp_path, run_cmd_rv=None):
     mod = _load_module()
     inst = mod.SmtpPlugin()
-    inst.plugin_id = "smtp_plugin"
+    inst.plugin_id = "smtp"
     inst.meta = {"name": "SMTP Plugin", "version": "1.0.0", "description": "", "author": ""}
     inst.plugin_dir = tmp_path
-    inst.logger = logging.getLogger("test.smtp_plugin")
+    inst.logger = logging.getLogger("test.smtp")
     inst.config = {
         "state_file": "smtp_state.json",
         "smtp_host": "127.0.0.1",
@@ -560,7 +560,7 @@ def test_smtp_send_event_sends_email(tmp_path):
     inst = _make_inst(tmp_path)
     global_bus.subscribe("smtp.send", inst.on_smtp_send)
     try:
-        global_bus.emit(Event("smtp.send", source="host_plugin", payload={
+        global_bus.emit(Event("smtp.send", source="host", payload={
             "to": "ops@example.com",
             "subject": "Upgrade report",
             "body": "All good.",
@@ -576,7 +576,7 @@ def test_smtp_send_event_missing_to_is_a_noop(tmp_path):
     inst = _make_inst(tmp_path)
     global_bus.subscribe("smtp.send", inst.on_smtp_send)
     try:
-        global_bus.emit(Event("smtp.send", source="host_plugin", payload={"subject": "x", "body": "x"}))
+        global_bus.emit(Event("smtp.send", source="host", payload={"subject": "x", "body": "x"}))
         inst._smtp_send.assert_not_called()
     finally:
         global_bus.unsubscribe("smtp.send", inst.on_smtp_send)
@@ -587,7 +587,7 @@ def test_smtp_send_event_smtp_error_logged_not_raised(tmp_path):
     inst._smtp_send.side_effect = Exception("connection refused")
     global_bus.subscribe("smtp.send", inst.on_smtp_send)
     try:
-        global_bus.emit(Event("smtp.send", source="host_plugin", payload={
+        global_bus.emit(Event("smtp.send", source="host", payload={
             "to": "ops@example.com", "subject": "x", "body": "x",
         }))  # must not raise
     finally:

@@ -34,7 +34,7 @@ _REPO_ROOT = str(Path(__file__).parents[2])
 def _load_module():
     if _REPO_ROOT not in sys.path:
         sys.path.insert(0, _REPO_ROOT)
-    name = "_test_networking_plugin"
+    name = "_test_networking"
     sys.modules.pop(name, None)
     spec = importlib.util.spec_from_file_location(name, PLUGIN_PY)
     assert spec is not None
@@ -56,13 +56,14 @@ def _ifstate_err(stderr="error") -> MagicMock:
 def _make_plugin(tmp_path, config=None):
     mod = _load_module()
     plugin = mod.NetworkingPlugin()
-    plugin.plugin_id = "networking_plugin"
+    plugin.plugin_id = "networking"
     plugin.meta = {"name": "Networking Plugin", "version": "1.0.0"}
     plugin.config = config or {}
     plugin.plugin_dir = tmp_path
-    plugin.logger = logging.getLogger("test.networking_plugin")
+    plugin.logger = logging.getLogger("test.networking")
     plugin._run_ifstate = MagicMock(return_value=_ifstate_ok())
     plugin.setup()
+    plugin._run_ifstate.reset_mock()
     return plugin
 
 
@@ -95,7 +96,7 @@ def test_status_returns_plugin_metadata(client):
 
 
 def test_status_managed_counts_start_at_zero(client):
-    managed = client.get("/v1/networking/status").json()["managed"]
+    managed = client.get("/v1/networking/status").json()["ff_managed"]
     assert managed == {"interfaces": 0, "routes": 0, "sysctl": 0}
 
 
@@ -103,7 +104,7 @@ def test_status_counts_reflect_additions(client):
     client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
     client.post("/v1/networking/config/routes", json={"to": "default", "via": "192.168.1.1"})
     client.put("/v1/networking/config/sysctl/net.ipv4.ip_forward", json={"value": "1"})
-    managed = client.get("/v1/networking/status").json()["managed"]
+    managed = client.get("/v1/networking/status").json()["ff_managed"]
     assert managed == {"interfaces": 1, "routes": 1, "sysctl": 1}
 
 
@@ -116,6 +117,21 @@ def test_show_interfaces_parses_ifstate_output(plugin, client):
     assert r.status_code == 200
     assert "eth0" in r.json()["interfaces"]
     assert r.json()["source"] == "running"
+
+
+def test_show_interfaces_managed_false_when_not_in_config(plugin, client):
+    show_yaml = yaml.dump({"interfaces": {"eth0": {}}})
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout=show_yaml)
+    r = client.get("/v1/networking/interfaces")
+    assert r.json()["interfaces"]["eth0"]["ff_managed"] is False
+
+
+def test_show_interfaces_managed_true_when_in_config(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
+    show_yaml = yaml.dump({"interfaces": {"eth0": {}}})
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout=show_yaml)
+    r = client.get("/v1/networking/interfaces")
+    assert r.json()["interfaces"]["eth0"]["ff_managed"] is True
 
 
 def test_show_interfaces_calls_show_subcommand(plugin, client):
@@ -139,6 +155,19 @@ def test_show_single_interface_found(plugin, client):
     assert "addresses" in r.json()
 
 
+def test_show_single_interface_managed_false(plugin, client):
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout=yaml.dump({"interfaces": {"eth0": {}}}))
+    r = client.get("/v1/networking/interfaces/eth0")
+    assert r.json()["ff_managed"] is False
+
+
+def test_show_single_interface_managed_true(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout=yaml.dump({"interfaces": {"eth0": {}}}))
+    r = client.get("/v1/networking/interfaces/eth0")
+    assert r.json()["ff_managed"] is True
+
+
 def test_show_single_interface_404_when_not_present(plugin, client):
     plugin._run_ifstate.return_value = _ifstate_ok(stdout=yaml.dump({"interfaces": {}}))
     r = client.get("/v1/networking/interfaces/eth99")
@@ -149,7 +178,7 @@ def test_identify_returns_output(plugin, client):
     plugin._run_ifstate.return_value = _ifstate_ok(stdout="eth0:\n  perm_address: aa:bb:cc:dd:ee:ff\n")
     r = client.get("/v1/networking/identify")
     assert r.status_code == 200
-    assert "output" in r.json()
+    assert r.json() == {"eth0": {"perm_address": "aa:bb:cc:dd:ee:ff"}}
 
 
 def test_identify_calls_identify_subcommand(plugin, client):
@@ -613,6 +642,124 @@ def test_state_file_written_to_configured_path(tmp_path):
     assert (tmp_path / "data" / "custom_net_state.json").exists()
 
 
+# ── import interfaces ──────────────────────────────────────────────────────────
+
+def _show_yaml(interfaces: dict) -> str:
+    return yaml.dump({"interfaces": interfaces})
+
+
+def test_import_all_interfaces(plugin, client):
+    plugin._run_ifstate.return_value = _ifstate_ok(
+        stdout=_show_yaml({"eth0": {"addresses": ["10.0.0.1/24"]}, "eth1": {"link": {"state": "up"}}})
+    )
+    r = client.post("/v1/networking/config/interfaces/import", json={})
+    assert r.status_code == 200
+    data = r.json()
+    assert set(data["imported"]) == {"eth0", "eth1"}
+    assert data["skipped"] == []
+    assert data["not_found"] == []
+
+
+def test_import_specific_interfaces(plugin, client):
+    plugin._run_ifstate.return_value = _ifstate_ok(
+        stdout=_show_yaml({"eth0": {"addresses": ["10.0.0.1/24"]}, "eth1": {}, "eth2": {}})
+    )
+    r = client.post("/v1/networking/config/interfaces/import", json={"names": ["eth0", "eth2"]})
+    assert r.status_code == 200
+    data = r.json()
+    assert set(data["imported"]) == {"eth0", "eth2"}
+    assert "eth1" not in data["imported"]
+
+
+def test_import_not_found_interface(plugin, client):
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout=_show_yaml({"eth0": {}}))
+    r = client.post("/v1/networking/config/interfaces/import", json={"names": ["eth0", "eth99"]})
+    assert r.status_code == 200
+    data = r.json()
+    assert "eth0" in data["imported"]
+    assert "eth99" in data["not_found"]
+
+
+def test_import_skips_already_managed_without_overwrite(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["1.2.3.4/24"]})
+    plugin._run_ifstate.return_value = _ifstate_ok(
+        stdout=_show_yaml({"eth0": {"addresses": ["10.0.0.1/24"]}})
+    )
+    r = client.post("/v1/networking/config/interfaces/import", json={})
+    assert r.status_code == 200
+    data = r.json()
+    assert "eth0" in data["skipped"]
+    assert "eth0" not in data["imported"]
+    # original config untouched
+    cfg = client.get("/v1/networking/config/interfaces/eth0").json()
+    assert cfg["addresses"] == ["1.2.3.4/24"]
+
+
+def test_import_overwrites_managed_when_flag_set(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["1.2.3.4/24"]})
+    plugin._run_ifstate.return_value = _ifstate_ok(
+        stdout=_show_yaml({"eth0": {"addresses": ["10.0.0.1/24"]}})
+    )
+    r = client.post("/v1/networking/config/interfaces/import", json={"overwrite": True})
+    assert r.status_code == 200
+    assert "eth0" in r.json()["imported"]
+    cfg = client.get("/v1/networking/config/interfaces/eth0").json()
+    assert cfg["addresses"] == ["10.0.0.1/24"]
+
+
+def test_import_500_on_ifstate_failure(plugin, client):
+    plugin._run_ifstate.return_value = _ifstate_err(stderr="permission denied")
+    r = client.post("/v1/networking/config/interfaces/import", json={})
+    assert r.status_code == 500
+
+
+def test_import_calls_show_subcommand(plugin, client):
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout=_show_yaml({}))
+    plugin._run_ifstate.reset_mock()
+    client.post("/v1/networking/config/interfaces/import", json={})
+    plugin._run_ifstate.assert_called_once_with("show")
+
+
+def test_import_emits_event_per_interface(plugin, client):
+    plugin._run_ifstate.return_value = _ifstate_ok(
+        stdout=_show_yaml({"eth0": {"addresses": ["10.0.0.1/24"]}, "eth1": {}})
+    )
+    received = []
+    global_bus.subscribe("networking.interface.configured", received.append)
+    try:
+        client.post("/v1/networking/config/interfaces/import", json={})
+        names = [e.payload["name"] for e in received]
+        assert "eth0" in names
+        assert "eth1" in names
+    finally:
+        global_bus.unsubscribe("networking.interface.configured", received.append)
+
+
+def test_import_no_event_when_nothing_imported(plugin, client):
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout=_show_yaml({}))
+    received = []
+    global_bus.subscribe("networking.interface.configured", received.append)
+    try:
+        client.post("/v1/networking/config/interfaces/import", json={})
+        assert received == []
+    finally:
+        global_bus.unsubscribe("networking.interface.configured", received.append)
+
+
+def test_import_saves_state(plugin, client):
+    plugin._run_ifstate.return_value = _ifstate_ok(
+        stdout=_show_yaml({"eth0": {"addresses": ["10.0.0.1/24"]}})
+    )
+    client.post("/v1/networking/config/interfaces/import", json={})
+    assert (plugin.plugin_dir / "data" / "networking_state.json").exists()
+
+
+def test_import_does_not_save_state_when_nothing_imported(plugin, client):
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout=_show_yaml({}))
+    client.post("/v1/networking/config/interfaces/import", json={})
+    assert not (plugin.plugin_dir / "data" / "networking_state.json").exists()
+
+
 # ── boot-time state apply ──────────────────────────────────────────────────────
 
 _BOOT_STATE = {
@@ -627,23 +774,37 @@ def _write_boot_state(tmp_path, state=None):
     (tmp_path / "data" / "networking_state.json").write_text(json.dumps(state or _BOOT_STATE))
 
 
+def _make_plugin_raw(tmp_path, config=None):
+    """Create a plugin without resetting the mock — used for boot-sequence assertions."""
+    mod = _load_module()
+    plugin = mod.NetworkingPlugin()
+    plugin.plugin_id = "networking"
+    plugin.meta = {"name": "Networking Plugin", "version": "1.0.0"}
+    plugin.config = config or {}
+    plugin.plugin_dir = tmp_path
+    plugin.logger = logging.getLogger("test.networking")
+    plugin._run_ifstate = MagicMock(return_value=_ifstate_ok())
+    plugin.setup()
+    return plugin
+
+
 def test_ifstate_apply_called_on_boot_when_state_exists(tmp_path):
     _write_boot_state(tmp_path)
-    plugin = _make_plugin(tmp_path)
+    plugin = _make_plugin_raw(tmp_path)
     apply_calls = [c for c in plugin._run_ifstate.call_args_list if c[0][-1] == "apply"]
     assert len(apply_calls) == 1
 
 
 def test_ignore_state_on_boot_skips_load_and_apply(tmp_path):
     _write_boot_state(tmp_path)
-    plugin = _make_plugin(tmp_path, config={"ignore_state_on_boot": True})
+    plugin = _make_plugin_raw(tmp_path, config={"ignore_state_on_boot": True})
     apply_calls = [c for c in plugin._run_ifstate.call_args_list if c[0][-1] == "apply"]
     assert len(apply_calls) == 0
     assert plugin._interfaces == {}
 
 
 def test_apply_skipped_when_state_is_empty(tmp_path):
-    plugin = _make_plugin(tmp_path)  # no pre-existing state file
+    plugin = _make_plugin_raw(tmp_path)  # no pre-existing state file — boot import runs show, not apply
     apply_calls = [c for c in plugin._run_ifstate.call_args_list if c[0][-1] == "apply"]
     assert len(apply_calls) == 0
 
@@ -652,11 +813,105 @@ def test_apply_state_does_not_crash_on_ifstate_failure(tmp_path):
     _write_boot_state(tmp_path)
     mod = _load_module()
     plugin = mod.NetworkingPlugin()
-    plugin.plugin_id = "networking_plugin"
+    plugin.plugin_id = "networking"
     plugin.meta = {"name": "Networking Plugin", "version": "1.0.0"}
     plugin.config = {}
     plugin.plugin_dir = tmp_path
-    plugin.logger = logging.getLogger("test.networking_plugin")
+    plugin.logger = logging.getLogger("test.networking")
     plugin._run_ifstate = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr="permission denied"))
     plugin.setup()  # must not raise
     assert plugin._interfaces == {"eth0": {"addresses": ["10.0.0.1/24"]}}
+
+
+# ── boot-time auto-import ──────────────────────────────────────────────────────
+
+def _make_plugin_boot_import(tmp_path, show_stdout="", config=None):
+    """Create a plugin with a custom ifstatecli show response for boot-import tests."""
+    mod = _load_module()
+    plugin = mod.NetworkingPlugin()
+    plugin.plugin_id = "networking"
+    plugin.meta = {"name": "Networking Plugin", "version": "1.0.0"}
+    plugin.config = config or {}
+    plugin.plugin_dir = tmp_path
+    plugin.logger = logging.getLogger("test.networking")
+    plugin._run_ifstate = MagicMock(return_value=_ifstate_ok(stdout=show_stdout))
+    plugin.setup()
+    return plugin
+
+
+def test_boot_import_interfaces_when_state_empty(tmp_path):
+    show = yaml.dump({"interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}, "eth1": {"link": {"state": "up"}}}})
+    plugin = _make_plugin_boot_import(tmp_path, show_stdout=show)
+    assert "eth0" in plugin._interfaces
+    assert "eth1" in plugin._interfaces
+    assert plugin._interfaces["eth0"]["addresses"] == ["10.0.0.1/24"]
+
+
+def test_boot_import_routes_when_state_empty(tmp_path):
+    show = yaml.dump({
+        "interfaces": {},
+        "routing": {"routes": [
+            {"to": "default", "via": "192.168.1.1", "dev": "eth0"},
+            {"to": "10.0.0.0/8", "dev": "eth0"},
+        ]},
+    })
+    plugin = _make_plugin_boot_import(tmp_path, show_stdout=show)
+    destinations = {r["to"] for r in plugin._routes.values()}
+    assert "default" in destinations
+    assert "10.0.0.0/8" in destinations
+
+
+def test_boot_import_route_fields_preserved(tmp_path):
+    show = yaml.dump({
+        "interfaces": {},
+        "routing": {"routes": [{"to": "default", "via": "10.0.0.1", "dev": "eth0", "preference": 100}]},
+    })
+    plugin = _make_plugin_boot_import(tmp_path, show_stdout=show)
+    route = next(iter(plugin._routes.values()))
+    assert route["via"] == "10.0.0.1"
+    assert route["dev"] == "eth0"
+    assert route["preference"] == 100
+
+
+def test_boot_import_saves_state_file(tmp_path):
+    show = yaml.dump({"interfaces": {"eth0": {}}})
+    _make_plugin_boot_import(tmp_path, show_stdout=show)
+    assert (tmp_path / "data" / "networking_state.json").exists()
+
+
+def test_boot_import_does_not_save_when_nothing_found(tmp_path):
+    _make_plugin_boot_import(tmp_path, show_stdout="{}")
+    assert not (tmp_path / "data" / "networking_state.json").exists()
+
+
+def test_boot_import_skipped_when_state_has_data(tmp_path):
+    _write_boot_state(tmp_path)
+    plugin = _make_plugin(tmp_path)
+    show_calls = [c for c in plugin._run_ifstate.call_args_list if c[0] == ("show",)]
+    assert len(show_calls) == 0
+
+
+def test_boot_import_skipped_with_ignore_state_on_boot(tmp_path):
+    show = yaml.dump({"interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}}})
+    plugin = _make_plugin_boot_import(tmp_path, show_stdout=show, config={"ignore_state_on_boot": True})
+    assert plugin._interfaces == {}
+    plugin._run_ifstate.assert_not_called()
+
+
+def test_boot_import_calls_show_subcommand(tmp_path):
+    plugin = _make_plugin_boot_import(tmp_path, show_stdout="{}")
+    plugin._run_ifstate.assert_called_once_with("show")
+
+
+def test_boot_import_does_not_crash_on_ifstate_failure(tmp_path):
+    mod = _load_module()
+    plugin = mod.NetworkingPlugin()
+    plugin.plugin_id = "networking"
+    plugin.meta = {"name": "Networking Plugin", "version": "1.0.0"}
+    plugin.config = {}
+    plugin.plugin_dir = tmp_path
+    plugin.logger = logging.getLogger("test.networking")
+    plugin._run_ifstate = MagicMock(return_value=_ifstate_err(stderr="permission denied"))
+    plugin.setup()  # must not raise
+    assert plugin._interfaces == {}
+    assert plugin._routes == {}
