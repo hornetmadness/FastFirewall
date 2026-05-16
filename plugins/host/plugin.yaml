@@ -16,6 +16,16 @@ os_requirements: []
 service_ports:
   host:
     tcp: [-1]
+  users:
+    tcp: [-1]
+  groups:
+    tcp: [-1]
+  sysctl:
+    tcp: [-1]
+  cron:
+    tcp: [-1]
+  pkg_management:
+    tcp: [-1]
 
 # Events emitted:
 #   host.hostname.changed  – payload: {hostname}

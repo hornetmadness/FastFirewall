@@ -96,6 +96,30 @@ def test_status_counts_update_after_create(client):
     assert counts == {"total": 2, "enabled": 1, "disabled": 1}
 
 
+def test_status_pending_changes_true_after_create(tmp_path):
+    # Write a state that has both desired and current set (simulates a prior successful apply)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "rules.json").write_text(
+        json.dumps({"desired_state": _BOOT_RULE, "current_state": _BOOT_RULE})
+    )
+    client = TestClient(_make_app(tmp_path))
+    # Adding a rule diverges desired from the committed current
+    _create_rule(client, name="new-rule")
+    assert client.get("/v1/firewall/status").json()["pending_changes"] is True
+
+
+def test_status_pending_changes_false_after_boot_apply(tmp_path):
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "rules.json").write_text(json.dumps({"desired_state": _BOOT_RULE}))
+    inst, mod = _make_inst(tmp_path)
+    inst._execute_compiled_rules = MagicMock()
+    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+        inst.setup()
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    assert TestClient(app).get("/v1/firewall/status").json()["pending_changes"] is False
+
+
 # ---------------------------------------------------------------------------
 # List rules
 # ---------------------------------------------------------------------------
@@ -243,6 +267,101 @@ def test_list_platforms_returns_known_platforms(client):
 
 
 # ---------------------------------------------------------------------------
+# Apply
+# ---------------------------------------------------------------------------
+
+def test_apply_calls_execute_compiled_rules(tmp_path):
+    inst, mod = _make_inst(tmp_path)
+    inst._execute_compiled_rules = MagicMock()
+    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+        inst.setup()
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    _create_rule(TestClient(app), name="allow-ssh")
+    inst._execute_compiled_rules.reset_mock()
+    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+        r = TestClient(app).post("/v1/firewall/apply")
+    assert r.status_code == 200
+    inst._execute_compiled_rules.assert_called_once_with(_CLEAN_OUTPUT)
+
+
+def test_apply_commits_state(tmp_path):
+    inst, mod = _make_inst(tmp_path)
+    inst._execute_compiled_rules = MagicMock()
+    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+        inst.setup()
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    client = TestClient(app)
+    _create_rule(client, name="rule")
+    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+        client.post("/v1/firewall/apply")
+    assert client.get("/v1/firewall/status").json()["pending_changes"] is False
+
+
+def test_apply_returns_rule_count(tmp_path):
+    inst, mod = _make_inst(tmp_path)
+    inst._execute_compiled_rules = MagicMock()
+    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+        inst.setup()
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    client = TestClient(app)
+    _create_rule(client, name="r1", enabled=True)
+    _create_rule(client, name="r2", enabled=False)
+    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+        data = client.post("/v1/firewall/apply").json()
+    assert data["rule_count"] == 1
+    assert data["success"] is True
+
+
+def test_apply_returns_503_when_aerleon_unavailable(tmp_path):
+    inst, mod = _make_inst(tmp_path)
+    inst._execute_compiled_rules = MagicMock()
+    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+        inst.setup()
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    _create_rule(TestClient(app), name="r")
+    with patch.object(mod, "_compile_rules", return_value="# aerleon CLI not found"):
+        r = TestClient(app).post("/v1/firewall/apply")
+    assert r.status_code == 503
+
+
+def test_apply_returns_500_on_iptables_failure(tmp_path):
+    inst, mod = _make_inst(tmp_path)
+    inst._execute_compiled_rules = MagicMock(side_effect=RuntimeError("iptables-restore failed"))
+    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+        inst.setup()
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    _create_rule(TestClient(app), name="r")
+    inst._execute_compiled_rules.side_effect = RuntimeError("iptables-restore failed")
+    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+        r = TestClient(app).post("/v1/firewall/apply")
+    assert r.status_code == 500
+
+
+def test_apply_emits_event(tmp_path):
+    inst, mod = _make_inst(tmp_path)
+    inst._execute_compiled_rules = MagicMock()
+    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+        inst.setup()
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    _create_rule(TestClient(app), name="r")
+    received: list = []
+    global_bus.subscribe("firewall.applied", received.append)
+    try:
+        with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+            TestClient(app).post("/v1/firewall/apply")
+        assert len(received) == 1
+        assert received[0].payload["success"] is True
+    finally:
+        global_bus.unsubscribe("firewall.applied", received.append)
+
+
+# ---------------------------------------------------------------------------
 # Compile
 # ---------------------------------------------------------------------------
 
@@ -360,7 +479,7 @@ _CLEAN_OUTPUT = "*filter\n-P INPUT ACCEPT\nCOMMIT\n"
 
 def test_rules_applied_to_iptables_on_boot(tmp_path):
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "rules.json").write_text(json.dumps(_BOOT_RULE))
+    (tmp_path / "data" / "rules.json").write_text(json.dumps({"desired_state": _BOOT_RULE}))
     inst, mod = _make_inst(tmp_path)
     inst._execute_compiled_rules = MagicMock()
     with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
@@ -380,7 +499,7 @@ def test_ignore_state_on_boot_skips_load_and_apply(tmp_path):
 
 def test_apply_state_skips_when_aerleon_unavailable(tmp_path):
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "rules.json").write_text(json.dumps(_BOOT_RULE))
+    (tmp_path / "data" / "rules.json").write_text(json.dumps({"desired_state": _BOOT_RULE}))
     inst, _ = _make_inst(tmp_path)
     inst._execute_compiled_rules = MagicMock()
     inst.setup()  # aerleon not installed → _compile_rules returns "# ..." → skips apply
@@ -390,7 +509,7 @@ def test_apply_state_skips_when_aerleon_unavailable(tmp_path):
 
 def test_apply_state_does_not_crash_on_iptables_failure(tmp_path):
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "rules.json").write_text(json.dumps(_BOOT_RULE))
+    (tmp_path / "data" / "rules.json").write_text(json.dumps({"desired_state": _BOOT_RULE}))
     inst, mod = _make_inst(tmp_path)
     inst._execute_compiled_rules = MagicMock(side_effect=RuntimeError("iptables-restore failed: permission denied"))
     with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):

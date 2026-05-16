@@ -140,6 +140,13 @@ def test_status_managed_settings_starts_at_zero(client):
     assert client.get("/v1/smtp/status").json()["managed_settings"] == 0
 
 
+def test_status_pending_changes_false_after_update(ctx):
+    client, inst = ctx
+    inst._run_cmd.return_value = _proc(0)
+    client.put("/v1/smtp/config", json={"myhostname": "mail.example.com"})
+    assert client.get("/v1/smtp/status").json()["pending_changes"] is False
+
+
 # ── config GET ───────────────────────────────────────────────────────────────────
 
 def test_get_config_reads_live_postconf(ctx):

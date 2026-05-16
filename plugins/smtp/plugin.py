@@ -16,6 +16,7 @@ Events consumed:
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import smtplib
@@ -69,19 +70,26 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
 
     def setup(self) -> None:
         self._state_file = PluginStateFile.from_config(
-            self.plugin_dir, self.config, "state_file", "smtp_state.json", self.logger
+            self.plugin_dir, self.config, "state_file", "smtp_state.json", self.logger,
+            mutation_model="immediate",
         )
         self._smtp_host: str = self.config.get("smtp_host", "127.0.0.1")
         self._smtp_port: int = int(self.config.get("smtp_port", 25))
         self._default_from: str = self.config.get("default_from", "fastfirewall@localhost")
-        self._state: dict[str, Any] = self._state_file.load(default={"postfix_settings": {}})
+        self._state: dict[str, Any] = self._state_file.load_desired(default={"postfix_settings": {}})
         if not self.config.get("ignore_state_on_boot", False):
             self._apply_state()
         self._register_routes()
         self.logger.info("SMTP plugin loaded (postfix at %s:%d)", self._smtp_host, self._smtp_port)
 
     def teardown(self) -> None:
-        self._state_file.save(self._state)
+        self._save_state()
+
+    def _desired_snapshot(self) -> dict[str, Any]:
+        return json.loads(json.dumps(self._state))
+
+    def _save_state(self) -> None:
+        self._state_file.save_desired(self._desired_snapshot())
 
     def _apply_state(self) -> None:
         settings = self._state.get("postfix_settings", {})
@@ -220,6 +228,7 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
             "smtp_port": self._smtp_port,
             "default_from": self._default_from,
             "managed_settings": len(self._state.get("postfix_settings", {})),
+            "pending_changes": self._state_file.pending_changes,
         }
 
     def _get_config(self) -> dict:
@@ -248,7 +257,7 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
         before = self._postconf_get(list(updates.keys()))
         self._postconf_set(postconf_args)
         self._state.setdefault("postfix_settings", {}).update(updates)
-        self._state_file.save(self._state)
+        self._save_state()
         diff = {
             k: {"before": before.get(k, ""), "after": postconf_args[k]}
             for k in updates

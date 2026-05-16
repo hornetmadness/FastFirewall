@@ -76,13 +76,14 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
         self._fastfirewall_conf = Path(self.config.get("fastfirewall_conf", "/etc/fluent-bit/conf.d/fastfirewall")).with_suffix(".conf")
         self._fluent_bit_main_conf = Path(self.config.get("fluent_bit_main_conf", "/etc/fluent-bit/fluent-bit.conf"))
         self._state_file = PluginStateFile.from_config(
-            self.plugin_dir, self.config, "overrides_file", "syslog_overrides.json", self.logger
+            self.plugin_dir, self.config, "overrides_file", "syslog_overrides.json", self.logger,
+            mutation_model="immediate",
         )
 
         if self.config.get("ignore_state_on_boot", False):
             overrides: dict = {}
         else:
-            overrides = self._state_file.load(default={})
+            overrides = self._state_file.load_desired(default={})
         cfg = {**self.config, **overrides}
         self._syslog_port = int(cfg.get("syslog_port", 514))
         self._syslog_mode = cfg.get("syslog_mode", "udp")
@@ -207,7 +208,7 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
     # ── overrides persistence ──────────────────────────────────────────────────
 
     def _save_overrides(self) -> None:
-        self._state_file.save({
+        self._state_file.save_desired({
             "syslog_port": self._syslog_port,
             "syslog_mode": self._syslog_mode,
             "syslog_unix_path": self._syslog_unix_path,
@@ -302,6 +303,7 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
             "syslog_unix_path": self._syslog_unix_path,
             "syslog_unix_mode": self._syslog_unix_mode if self._syslog_unix_path else None,
             "services": {"fluent-bit": proc.stdout.strip() or "unknown"},
+            "pending_changes": self._state_file.pending_changes,
         }
 
     # ── config management ──────────────────────────────────────────────────────

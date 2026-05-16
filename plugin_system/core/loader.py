@@ -333,11 +333,11 @@ class PluginLoader:
                     for line in fh:
                         parts = line.split()
                         if len(parts) < 4 or parts[0] == "sl":
-                            continue
+                            continue  # skip header row and malformed lines
                         local_addr, state = parts[1], parts[3]
                         if proto == "tcp" and state != "0A":
-                            continue
-                        port_hex = local_addr.split(":")[1]
+                            continue  # 0A = TCP_LISTEN; ignore non-listening sockets
+                        port_hex = local_addr.split(":")[1]  # format: "0100007F:0050"
                         ports.add(int(port_hex, 16))
             except (FileNotFoundError, OSError):
                 pass
@@ -349,7 +349,7 @@ class PluginLoader:
         service_ports: int | dict[str, dict[str, list[int]]],
     ) -> None:
         """Raise PluginError if any declared port is already claimed by a loaded plugin."""
-        if service_ports == -1:
+        if not isinstance(service_ports, dict):
             return
         for svc_name, proto_map in service_ports.items():
             for proto, ports in proto_map.items():
@@ -369,7 +369,7 @@ class PluginLoader:
         service_ports: int | dict[str, dict[str, list[int]]],
     ) -> None:
         """Raise PluginError if any declared port is already in use by the OS."""
-        if service_ports == -1:
+        if not isinstance(service_ports, dict):
             return
         for svc_name, proto_map in service_ports.items():
             for proto, ports in proto_map.items():
@@ -384,7 +384,7 @@ class PluginLoader:
                         )
 
     def _register_ports(self, plugin_id: str, service_ports: int | dict[str, dict[str, list[int]]]) -> None:
-        if service_ports == -1:
+        if not isinstance(service_ports, dict):
             return
         for proto_map in service_ports.values():
             for proto, ports in proto_map.items():
@@ -393,7 +393,7 @@ class PluginLoader:
                         self._port_registry[(proto, port)] = plugin_id
 
     def _release_ports(self, service_ports: int | dict[str, dict[str, list[int]]]) -> None:
-        if service_ports == -1:
+        if not isinstance(service_ports, dict):
             return
         for proto_map in service_ports.values():
             for proto, ports in proto_map.items():
@@ -542,12 +542,30 @@ class PluginLoader:
 
         # ── 7. Load in resolved order ──────────────────────────────────────
         loaded: list[str] = []
+        errored: list[tuple[str, str]] = []
         for pid in load_order:
             try:
                 loaded_id = self.load_plugin(active[pid]["path"])
                 loaded.append(loaded_id)
-            except Exception:
+            except Exception as exc:
                 self.logger.exception("Failed to load plugin from %s", active[pid]["path"])
+                errored.append((pid, str(exc)))
+
+        total = len(loaded) + len(errored) + len(disabled)
+        self.logger.info(
+            "Plugin loading complete: %d/%d loaded, %d errored, %d disabled",
+            len(loaded), total, len(errored), len(disabled),
+        )
+        if loaded:
+            self.logger.info("  Loaded:   %s", ", ".join(loaded))
+        if errored:
+            self.logger.warning(
+                "  Errored:  %s",
+                ", ".join(f"{pid} ({msg})" for pid, msg in errored),
+            )
+        if disabled:
+            self.logger.info("  Disabled: %s", ", ".join(sorted(disabled)))
+
         return loaded
 
     def load_plugin(self, path: str | Path) -> str:
@@ -831,7 +849,7 @@ class PluginLoader:
             return brew_ops.packages, {"packages": packages}
 
         if system == "Linux":
-            if shutil.which("apt-get"):
+            if shutil.which("apt"):
                 return apt_ops.packages, {"packages": packages, "update": True, "_sudo": True}
             if shutil.which("dnf"):
                 return dnf_ops.packages, {"packages": packages, "_sudo": True}

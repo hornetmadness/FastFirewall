@@ -9,6 +9,7 @@ Events emitted:
   firewall.rule.updated  – payload: {rule_id, changes}
   firewall.rule.deleted  – payload: {rule_id, name}
   firewall.compiled      – payload: {platform, rule_count}
+  firewall.applied       – payload: {platform, rule_count, success}
 
 Events consumed:
   firewall.compile       – payload: {platform?, filter_name?}
@@ -226,7 +227,8 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     def setup(self) -> None:
         self._state_file = PluginStateFile.from_config(
-            self.plugin_dir, self.config, "rules_file", "firewall_rules.json", self.logger
+            self.plugin_dir, self.config, "rules_file", "firewall_rules.json", self.logger,
+            mutation_model="deferred",
         )
         self._default_platform = self.config.get("default_platform", "iptables")
         self._default_filter = self.config.get("default_filter_name", "fastfirewall")
@@ -244,7 +246,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
     # ── persistence ────────────────────────────────────────────────────
 
     def _load_rules(self) -> None:
-        raw = self._state_file.load(default=[])
+        raw = self._state_file.load_desired(default=[])
         try:
             self._rules = {r["id"]: FirewallRule(**r) for r in raw}
         except Exception:
@@ -252,7 +254,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             self._rules = {}
 
     def _save_rules(self) -> None:
-        self._state_file.save([r.model_dump() for r in self._rules.values()])
+        self._state_file.save_desired([r.model_dump() for r in self._rules.values()])
 
     def _apply_state(self) -> None:
         enabled = [r for r in self._rules.values() if r.enabled]
@@ -264,6 +266,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
                 self.logger.warning("Skipping boot-time rule apply — aerleon did not produce clean output")
                 return
             self._execute_compiled_rules(output)
+            self._state_file.commit()
             self.logger.info("Re-applied %d rules to %s on boot", len(enabled), self._default_platform)
         except Exception as exc:
             self.logger.warning("Could not re-apply rules on boot: %s", exc)
@@ -289,7 +292,8 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         add("/rules/{rule_id}", self._get_rule,       methods=["GET"],    summary="Get a firewall rule")
         add("/rules/{rule_id}", self._update_rule,    methods=["PUT"],    summary="Update a firewall rule")
         add("/rules/{rule_id}", self._delete_rule,    methods=["DELETE"], summary="Delete a firewall rule")
-        add("/compile",         self._compile,        methods=["POST"],   summary="Compile rules with aerleon")
+        add("/apply",           self._apply,          methods=["POST"],   summary="Compile and apply rules to iptables")
+        add("/compile",         self._compile,        methods=["POST"],   summary="Compile rules with aerleon (preview only)")
         add("/policy",          self._get_policy,      methods=["GET"],   summary="Show raw aerleon policy")
         add("/platforms",       self._list_platforms, methods=["GET"],    summary="List supported platforms")
         add("/status",          self._status,         methods=["GET"],    summary="Plugin status")
@@ -346,7 +350,29 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         ))
         return {"deleted": True, "rule_id": rule_id}
 
-    # ── aerleon endpoints ──────────────────────────────────────────────
+    # ── apply / aerleon endpoints ──────────────────────────────────────
+
+    def _apply(self) -> dict:
+        enabled = [r for r in self._rules.values() if r.enabled]
+        output = _compile_rules(enabled, self._default_filter, self._default_platform)
+        if output.startswith("#"):
+            raise HTTPException(503, f"Compile failed — aerleon did not produce clean output: {output.splitlines()[0]}")
+        try:
+            self._execute_compiled_rules(output)
+        except RuntimeError as exc:
+            raise HTTPException(500, str(exc)) from exc
+        self._state_file.commit()
+        bus.emit(Event(
+            name="firewall.applied",
+            source=self.plugin_id,
+            payload={"platform": self._default_platform, "rule_count": len(enabled), "success": True},
+        ))
+        return {
+            "success": True,
+            "platform": self._default_platform,
+            "rule_count": len(enabled),
+            "pending_changes": self._state_file.pending_changes,
+        }
 
     def _compile(self, body: CompileRequest) -> CompileResult:
         enabled = [r for r in self._rules.values() if r.enabled]
@@ -386,6 +412,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             "rules_file": self._state_file.path,
             "default_platform": self._default_platform,
             "default_filter": self._default_filter,
+            "pending_changes": self._state_file.pending_changes,
         }
 
     # ── event handlers ─────────────────────────────────────────────────

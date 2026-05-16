@@ -207,7 +207,8 @@ def test_patch_config_persists_to_overrides(plugin, client):
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(stdout="", returncode=0)
         client.patch("/v1/syslog/config", json={"syslog_port": 5140, "syslog_mode": "tcp"})
-    overrides = json.loads(plugin._state_file.path.read_text())
+    envelope = json.loads(plugin._state_file.path.read_text())
+    overrides = envelope["desired_state"]
     assert overrides["syslog_port"] == 5140
     assert overrides["syslog_mode"] == "tcp"
 
@@ -457,6 +458,16 @@ def test_status_returns_expected_keys(client):
     assert "services" in body
     assert "fluent-bit" in body["services"]
     assert "rsyslog" not in body["services"]
+
+
+def test_status_pending_changes_false_after_patch(plugin, client):
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(stdout="", returncode=0)
+        client.patch("/v1/syslog/config", json={"syslog_port": 5140})
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(stdout="active\n", returncode=0)
+        body = client.get("/v1/syslog/status").json()
+    assert body["pending_changes"] is False
 
 
 # ── file listing ───────────────────────────────────────────────────────────────
