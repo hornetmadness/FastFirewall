@@ -1,0 +1,53 @@
+name: DNSMasq
+id: dnsmasq
+version: "1.0.0"
+description: >
+  DNS forwarding/caching, DHCP, TFTP, PXE boot, and mDNS via dnsmasq.
+  Manages /etc/dnsmasq.d/ff-managed.conf and /etc/dnsmasq.d/ff-blocklist.conf.
+  Desired state is stored locally; call POST /apply to write config and restart dnsmasq.
+author: hornetmadness@gmail.com
+
+enabled: true
+plugin_requirements: ["host", "networking"]
+py_requirements:
+  - pyyaml
+os_requirements:
+  - dnsmasq
+
+# set skip_host_os_port_check: true if dnsmasq is already bound on this host
+skip_host_os_port_check: false
+
+service_ports:
+  dns:
+    tcp: [53]
+    udp: [53]
+  dhcp:
+    udp: [67]
+  tftp:
+    udp: [69]
+  pxe:
+    tcp: [-1]
+  mdns:
+    udp: [5353]
+
+# Events emitted:
+#   dnsmasq.dns.updated       – payload: {config}
+#   dnsmasq.record.added      – payload: {record_id, type, name}
+#   dnsmasq.record.removed    – payload: {record_id}
+#   dnsmasq.dhcp.updated      – payload: {enabled}
+#   dnsmasq.range.added       – payload: {range_id}
+#   dnsmasq.range.removed     – payload: {range_id}
+#   dnsmasq.lease.added       – payload: {lease_id, mac, ip}
+#   dnsmasq.lease.removed     – payload: {lease_id}
+#   dnsmasq.tftp.updated      – payload: {enabled}
+#   dnsmasq.pxe.updated       – payload: {enabled}
+#   dnsmasq.mdns.updated      – payload: {enabled}
+#   dnsmasq.blocklist.added   – payload: {blocklist_id, name, domain_count}
+#   dnsmasq.blocklist.removed – payload: {blocklist_id}
+#   dnsmasq.applied           – payload: {success, returncode}
+
+config:
+  state_file: dnsmasq_state.json
+  config_path: /etc/dnsmasq.d/ff-managed.conf
+  blocklist_path: /etc/dnsmasq.d/ff-blocklist.conf
+  lease_file: /var/lib/dnsmasq/dnsmasq.leases

@@ -32,6 +32,7 @@ class Service(str, Enum):
     LDAP = "ldap"
     SMTP = "smtp"
     TFTP = "tftp"
+    PXE = "pxe"
     MDNS = "mdns"
     BGP = "bgp"
     OSPF = "ospf"
