@@ -105,7 +105,7 @@ The loader mounts `self.router` at `/v1/<plugin_id>/`. Add routes to `self.route
 
 ### Service exclusivity
 
-`Service` (`plugin_system/core/services.py`) is a `str` enum of well-known network-appliance services (`FIREWALL`, `DNS`, `DHCP`, etc.). Only one plugin may claim a given `Service` at a time; the loader raises `PluginError` if a second plugin tries to claim an already-owned service.
+`Service` (`plugin_system/core/services.py`) is a `str` enum of well-known network-appliance services (`FIREWALL`, `DNS`, `DHCP`, `HOST`, `NETWORKING`, `PKG_MANAGEMENT`, `MONITORING`, etc.). Only one plugin may claim a given `Service` at a time; the loader raises `PluginError` if a second plugin tries to claim an already-owned service.
 
 ### Event bus
 
@@ -219,24 +219,45 @@ Async tests are automatically discovered because `asyncio_mode = auto` is set; n
 
 ### Plugin state files
 
-`PluginStateFile` (`plugin_system/core/state_manager.py`) is a shared primitive for JSON-backed state. Plugins should use it instead of writing their own load/save boilerplate.
+`PluginStateFile` (`infra/state_manager.py`) is a shared primitive for JSON-backed state with built-in `desired_state` / `current_state` envelope and `pending_changes` tracking. Plugins should use it instead of writing their own load/save boilerplate.
+
+Two mutation models control when `current_state` is updated:
+
+- `"immediate"` — `save_desired()` auto-commits `current = desired` on every write (no separate apply step; used by the host plugin)
+- `"deferred"` — `save_desired()` only writes `desired`; call `commit()` explicitly after a successful external apply (used by the networking plugin)
 
 ```python
-from plugin_system.core.state_manager import PluginStateFile
+from infra.state_manager import PluginStateFile
 
 # In setup():
 self._state_file = PluginStateFile.from_config(
-    self.plugin_dir, self.config, "state_file", "my_state.json", self.logger
+    self.plugin_dir, self.config, "state_file", "my_state.json", self.logger,
+    mutation_model="immediate",   # or "deferred"
 )
-self._state = self._state_file.load(default={"key": {}})
+desired = self._state_file.load_desired(default={"key": {}})
+# current_snapshot is automatically restored from disk — pending_changes is accurate immediately
 
-# In teardown() or on mutation:
-self._state_file.save(self._state)
+# On every mutation (immediate model):
+self._state_file.save_desired(snapshot)
+
+# After a successful external apply (deferred model):
+self._state_file.commit(snapshot)          # snapshot defaults to current desired if omitted
+
+# When importing live state (desired == current):
+self._state_file.save_and_commit(snapshot)
 ```
 
-`from_config` resolves `plugin_dir / "data" / config.get(key, default_filename)`.  
-`load(default)` returns `default` if the file is missing; logs and returns `default` on any parse error.  
-`save(data)` creates the `data/` directory if needed, writes indented JSON, and returns `bool` success.
+**Envelope API:**
+- `load_desired(default)` — reads `desired_state` from disk, restores `current_snapshot` from `current_state`, returns `desired_state` (or `default` if missing).
+- `save_desired(snapshot)` — writes `snapshot` as `desired_state`. For `"immediate"` model, also sets `current = snapshot`.
+- `commit(snapshot=None)` — sets `current_state` to `snapshot` (or current desired if omitted) and flushes to disk. Use in deferred plugins after a successful apply.
+- `save_and_commit(snapshot)` — writes `snapshot` as both `desired_state` and `current_state` in one disk write. Use for import endpoints where desired and current are identical.
+- `pending_changes` (property) — `True` when `desired != current`. Returns `False` if `current` was never set (fresh install).
+- `current_snapshot` (property) — the last committed `current_state`, or `None`.
+
+The raw `load(default)` / `save(data)` methods are still available for backward compatibility but plugins should prefer the envelope API.
+
+`from_config` resolves `plugin_dir / "data" / config.get(key, default_filename)`.
 
 **Backups** — when `state.backup.enabled` is `true` in `app_config.yaml`, `save()` snapshots the existing file to `state.backup.directory` (default `/var/tmp/ff-backups/states`) before overwriting. Backup filenames include a timestamp: `<stem>_<YYYYMMDD_HHMMSS>.json`. The backup path is global (not inside the plugin's own `data/` dir) so backups survive plugin removal.
 
@@ -250,6 +271,71 @@ state:
 `configure_state()` is called once at startup in `app.py` to apply the `app_config.yaml` settings before any plugin `setup()` runs.
 
 **Testing** — in plugin tests, `state_manager._backup_enabled` is `False` by default (module default), so no backup directory is created. If a test exercises the backup path, patch `plugin_system.core.state_manager._backup_enabled` and `_backup_directory` directly.
+
+### Plugin resource conventions
+
+Plugins that manage system resources (users, packages, services, etc.) follow three conventions:
+
+**`ff_managed` flag on list endpoints**
+
+`GET /{resource}` must return *all* system entries, not only FF-managed ones. Each entry includes `ff_managed: bool` to distinguish managed from unmanaged resources. The pattern is to read the live system state, then overlay the managed dict:
+
+```python
+def _list_services(self) -> list[dict[str, Any]]:
+    system = _read_system_services()          # live OS read
+    managed = self._state.get("services", {})
+    merged: dict[str, Any] = {}
+    for name, info in system.items():
+        merged[name] = {**info, "ff_managed": False}
+    for name, cfg in managed.items():
+        merged[name] = {**cfg, "ff_managed": True}
+    return list(merged.values())
+```
+
+**Import endpoints**
+
+`POST /{resource}/{id}/import` lets an admin claim an existing system resource into FF management without running pyinfra. The handler reads the current system state for that entry, writes it into `self._state`, calls `_save_state()`, and returns 201. No pyinfra call is made.
+
+```python
+@router.post("/services/{name}/import", status_code=201)
+def _import_service(self, name: str) -> dict[str, Any]:
+    system = _read_system_services()
+    if name not in system:
+        raise HTTPException(404, detail="Service not found")
+    self._state["services"][name] = system[name]
+    self._save_state()
+    return {**self._state["services"][name], "ff_managed": True}
+```
+
+**`current_state` / `pending_changes` tracking**
+
+`PluginStateFile` handles this automatically via its envelope API. Plugins don't need to manage a `_current_state` field directly.
+
+Key plugin-side helpers (see `plugins/host/plugin.py` for the canonical immediate-model implementation):
+
+- `_desired_snapshot()` — `json.loads(json.dumps(self._state))`: normalized deep copy of current desired state, used as the argument to `save_desired()` and `commit()`.
+- `_save_state()` — calls `self._state_file.save_desired(self._desired_snapshot())`. In the immediate model, this also auto-commits current.
+- In `_apply_state()` (boot-time re-apply for deferred plugins), track per-resource success and call `self._state_file.commit(applied_snapshot)` at the end.
+- `pending_changes` in status: use `self._state_file.pending_changes` — no manual comparison needed.
+
+The state file on disk has two top-level keys — `desired_state` (the resource dicts) and `current_state` (the snapshot taken at the last successful apply):
+
+```json
+{
+  "desired_state": {
+    "services": {},
+    "sysctl": { "vm.swappiness": { "value": "10", "persist": true } },
+    "users": {}, "groups": {}, "cron": {}, "packages": {}, "repos": {}
+  },
+  "current_state": {
+    "services": {},
+    "sysctl": { "vm.swappiness": { "value": "10", "persist": true } },
+    "users": {}, "groups": {}, "cron": {}, "packages": {}, "repos": {}
+  }
+}
+```
+
+When adding `current_state` to an existing state file, set it to a copy of `desired_state` so the plugin boots with `pending_changes: false`.
 
 ### Authentication
 

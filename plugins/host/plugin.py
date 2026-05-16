@@ -27,9 +27,13 @@ Events emitted:
 from __future__ import annotations
 
 import configparser
+import grp
+import hashlib
 import io
+import json
 import os
 import pickle
+import pwd
 import shutil
 import socket
 import subprocess
@@ -96,10 +100,19 @@ class UpgradeBody(BaseModel):
     email: str
 
 
+class CronImportBody(BaseModel):
+    source_key: str
+
+
+class RepoImportBody(BaseModel):
+    id: str
+    alias: str
+
+
 # ── Plugin ─────────────────────────────────────────────────────────────────────
 
 class HostPlugin(PluginBase, ApiRouterPlugin):
-    services = [Service.HOST]
+    services = [Service.HOST, Service.PKG_MANAGEMENT, Service.SYSCTL, Service.CRON, Service.USERS, Service.GROUPS]
 
     _EMPTY_STATE: dict[str, Any] = {
         "services": {},
@@ -115,7 +128,8 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
 
     def setup(self) -> None:
         self._state_file = PluginStateFile.from_config(
-            self.plugin_dir, self.config, "state_file", "host_state.json", self.logger
+            self.plugin_dir, self.config, "state_file", "host_state.json", self.logger,
+            mutation_model="immediate",
         )
         self._bg_tasks: dict[str, dict[str, Any]] = {}
         self._pkg_mgr = PackageManager(
@@ -139,16 +153,22 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
     # ── persistence ────────────────────────────────────────────────────────────
 
     def _load_state(self) -> dict[str, Any]:
+        desired = self._state_file.load_desired(default={})
         state = {k: {} for k in self._EMPTY_STATE}
-        state.update(self._state_file.load(default={}))
+        state.update({k: v for k, v in desired.items() if k in self._EMPTY_STATE})
         return state
 
     def _save_state(self) -> None:
-        self._state_file.save(self._state)
+        self._state_file.save_desired(self._desired_snapshot())
+
+    def _desired_snapshot(self) -> dict[str, Any]:
+        return json.loads(json.dumps(self._state))
 
     def _apply_state(self) -> None:
         if not any(self._state.get(k) for k in self._EMPTY_STATE):
             return
+
+        applied: dict[str, Any] = {k: {} for k in self._EMPTY_STATE}
 
         for svc_name, v in self._state.get("services", {}).items():
             try:
@@ -159,6 +179,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
                     running=v["running"],
                     enabled=v["enabled"],
                 )
+                applied["services"][svc_name] = v
             except Exception as exc:
                 self.logger.warning("Boot-time restore failed for service %r: %s", svc_name, exc)
 
@@ -171,6 +192,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
                     value=v["value"],
                     persist=v["persist"],
                 )
+                applied["sysctl"][sysctl_key] = v
             except Exception as exc:
                 self.logger.warning("Boot-time restore failed for sysctl %r: %s", sysctl_key, exc)
 
@@ -187,6 +209,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
                 if v.get("comment"):
                     user_kw["comment"] = v["comment"]
                 self._pyinfra_run(server_ops.user, **user_kw)
+                applied["users"][user_name] = v
             except Exception as exc:
                 self.logger.warning("Boot-time restore failed for user %r: %s", user_name, exc)
 
@@ -200,6 +223,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
                 if v.get("gid") is not None:
                     group_kw["gid"] = v["gid"]
                 self._pyinfra_run(server_ops.group, **group_kw)
+                applied["groups"][group_name] = v
             except Exception as exc:
                 self.logger.warning("Boot-time restore failed for group %r: %s", group_name, exc)
 
@@ -216,21 +240,25 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
                     day_of_week=v["day_of_week"],
                     user=v["user"],
                 )
+                applied["cron"][cron_name] = v
             except Exception as exc:
                 self.logger.warning("Boot-time restore failed for cron %r: %s", cron_name, exc)
 
         for pkg_name, v in self._state.get("packages", {}).items():
             try:
                 self._pkg_mgr.install(pkg_name, PackageBody(**v))
+                applied["packages"][pkg_name] = v
             except Exception as exc:
                 self.logger.warning("Boot-time restore failed for package %r: %s", pkg_name, exc)
 
         for repo_name, v in self._state.get("repos", {}).items():
             try:
                 self._pkg_mgr.apply_repo(repo_name, RepoBody(**v))
+                applied["repos"][repo_name] = v
             except Exception as exc:
                 self.logger.warning("Boot-time restore failed for repo %r: %s", repo_name, exc)
 
+        self._state_file.commit(applied)
         self.logger.info("Re-applied host state on boot")
 
     # ── pyinfra helper ─────────────────────────────────────────────────────────
@@ -415,37 +443,44 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         add("/hostname",            self._get_hostname,     methods=["GET"],    summary="Get current hostname")
         add("/hostname",            self._set_hostname,     methods=["PUT"],    summary="Set system hostname")
 
-        add("/services",            self._list_services,    methods=["GET"],    summary="List managed services")
-        add("/services/{service}",  self._set_service,      methods=["PUT"],    summary="Start/stop/enable/disable a service")
-        add("/services/{service}",  self._delete_service,   methods=["DELETE"], summary="Stop managing a service")
+        add("/services",                   self._list_services,    methods=["GET"],    summary="List all services with ff_managed flag")
+        add("/services/{service}",         self._set_service,      methods=["PUT"],    summary="Start/stop/enable/disable a service")
+        add("/services/{service}",         self._delete_service,   methods=["DELETE"], summary="Stop managing a service")
+        add("/services/{service}/import",  self._import_service,   methods=["POST"],   summary="Import an existing system service into FF management", status_code=201)
 
-        add("/sysctl",              self._list_sysctl,      methods=["GET"],    summary="List managed sysctl parameters")
-        add("/sysctl-all",              self._list_all_sysctl,      methods=["GET"],    summary="List all sysctl parameters")
-        add("/sysctl/{key}",        self._set_sysctl,       methods=["PUT"],    summary="Set a sysctl kernel parameter")
-        add("/sysctl/{key}",        self._delete_sysctl,    methods=["DELETE"], summary="Stop managing a sysctl parameter")
+        add("/sysctl",                     self._list_sysctl,      methods=["GET"],    summary="List all sysctl parameters with ff_managed flag")
+        add("/sysctl-all",                 self._list_all_sysctl,  methods=["GET"],    summary="List all sysctl parameters")
+        add("/sysctl/{key}",               self._set_sysctl,       methods=["PUT"],    summary="Set a sysctl kernel parameter")
+        add("/sysctl/{key}",               self._delete_sysctl,    methods=["DELETE"], summary="Stop managing a sysctl parameter")
+        add("/sysctl/{key}/import",        self._import_sysctl,    methods=["POST"],   summary="Import an existing sysctl key into FF management", status_code=201)
 
-        add("/users",               self._list_users,       methods=["GET"],    summary="List managed users")
-        add("/users/{name}",        self._set_user,         methods=["POST"],   summary="Create or reconfigure a system user",   status_code=201)
-        add("/users/{name}",        self._delete_user,      methods=["DELETE"], summary="Remove a system user")
+        add("/users",                      self._list_users,       methods=["GET"],    summary="List all users with ff_managed flag")
+        add("/users/{name}",               self._set_user,         methods=["POST"],   summary="Create or reconfigure a system user",   status_code=201)
+        add("/users/{name}",               self._delete_user,      methods=["DELETE"], summary="Remove a system user")
+        add("/users/{name}/import",        self._import_user,      methods=["POST"],   summary="Import an existing system user into FF management", status_code=201)
 
-        add("/groups",              self._list_groups,      methods=["GET"],    summary="List managed groups")
-        add("/groups/{name}",       self._set_group,        methods=["POST"],   summary="Create or reconfigure a system group",  status_code=201)
-        add("/groups/{name}",       self._delete_group,     methods=["DELETE"], summary="Remove a system group")
+        add("/groups",                     self._list_groups,      methods=["GET"],    summary="List all groups with ff_managed flag")
+        add("/groups/{name}",              self._set_group,        methods=["POST"],   summary="Create or reconfigure a system group",  status_code=201)
+        add("/groups/{name}",              self._delete_group,     methods=["DELETE"], summary="Remove a system group")
+        add("/groups/{name}/import",       self._import_group,     methods=["POST"],   summary="Import an existing system group into FF management", status_code=201)
 
-        add("/cron",                self._list_cron,        methods=["GET"],    summary="List managed cron entries")
-        add("/cron/{name}",         self._set_cron,         methods=["POST"],   summary="Create or update a cron entry",         status_code=201)
-        add("/cron/{name}",         self._delete_cron,      methods=["DELETE"], summary="Remove a cron entry")
+        add("/cron",                       self._list_cron,        methods=["GET"],    summary="List all cron entries with ff_managed flag")
+        add("/cron/{name}",                self._set_cron,         methods=["POST"],   summary="Create or update a cron entry",         status_code=201)
+        add("/cron/{name}",                self._delete_cron,      methods=["DELETE"], summary="Remove a cron entry")
+        add("/cron/{name}/import",         self._import_cron,      methods=["POST"],   summary="Import an existing system cron entry into FF management", status_code=201)
 
-        add("/packages",            self._list_packages,    methods=["GET"],    summary="List managed packages")
-        add("/packages/search",     self._search_packages,  methods=["GET"],    summary="Search available packages")
+        add("/packages",                   self._list_packages,    methods=["GET"],    summary="List managed packages")
+        add("/packages/search",            self._search_packages,  methods=["GET"],    summary="Search available packages")
         add("/packages/upgrade-system",    self._upgrade_system,   methods=["POST"],   summary="Run a full unattended system upgrade and email the output")
-        add("/packages/{name}",     self._install_package,  methods=["POST"],   summary="Install or ensure a package",           status_code=201)
-        add("/packages/{name}",     self._update_package,   methods=["PUT"],    summary="Update a package to latest")
-        add("/packages/{name}",     self._remove_package,   methods=["DELETE"], summary="Remove a package")
+        add("/packages/{name}",            self._install_package,  methods=["POST"],   summary="Install or ensure a package",           status_code=201)
+        add("/packages/{name}",            self._update_package,   methods=["PUT"],    summary="Update a package to latest")
+        add("/packages/{name}",            self._remove_package,   methods=["DELETE"], summary="Remove a package")
+        add("/packages/{name}/import",     self._import_package,   methods=["POST"],   summary="Import an installed package into FF management", status_code=201)
 
-        add("/repos",               self._list_repos,       methods=["GET"],    summary="List managed repos")
-        add("/repos/{name}",        self._add_repo,         methods=["POST"],   summary="Add or update a package repository",    status_code=201)
-        add("/repos/{name}",        self._remove_repo,      methods=["DELETE"], summary="Remove a package repository")
+        add("/repos",                      self._list_repos,       methods=["GET"],    summary="List all repos with ff_managed flag")
+        add("/repos/import",               self._import_repo,      methods=["POST"],   summary="Import an existing system repo into FF management", status_code=201)
+        add("/repos/{name}",               self._add_repo,         methods=["POST"],   summary="Add or update a package repository",    status_code=201)
+        add("/repos/{name}",               self._remove_repo,      methods=["DELETE"], summary="Remove a package repository")
 
     # ── status ─────────────────────────────────────────────────────────────────
 
@@ -464,6 +499,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
                 "packages": len(self._state["packages"]),
                 "repos":    len(self._state["repos"]),
             },
+            "pending_changes": self._state_file.pending_changes,
         }
 
     def _list_bg_tasks(self, task_id: Optional[str] = None) -> dict:
@@ -491,8 +527,81 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
 
     # ── services ───────────────────────────────────────────────────────────────
 
+    def _read_system_services(self) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        init_system = self._detect_init_system()
+
+        if init_system == "systemd":
+            try:
+                proc = subprocess.run(
+                    ["systemctl", "list-units", "--type=service", "--all",
+                     "--no-pager", "--plain", "--no-legend"],
+                    capture_output=True, text=True,
+                )
+                for line in proc.stdout.splitlines():
+                    parts = line.split()
+                    if len(parts) < 4:
+                        continue
+                    name = parts[0].removesuffix(".service")
+                    result[name] = {
+                        "running": parts[2] == "active" and parts[3] == "running",
+                        "enabled": False,
+                    }
+            except OSError:
+                pass
+
+            try:
+                proc = subprocess.run(
+                    ["systemctl", "list-unit-files", "--type=service",
+                     "--no-pager", "--no-legend"],
+                    capture_output=True, text=True,
+                )
+                for line in proc.stdout.splitlines():
+                    parts = line.split()
+                    if len(parts) < 2:
+                        continue
+                    name = parts[0].removesuffix(".service")
+                    enabled = parts[1] in ("enabled", "static", "generated")
+                    if name in result:
+                        result[name]["enabled"] = enabled
+                    else:
+                        result[name] = {"running": False, "enabled": enabled}
+            except OSError:
+                pass
+
+        elif init_system == "upstart":
+            try:
+                proc = subprocess.run(["initctl", "list"], capture_output=True, text=True)
+                for line in proc.stdout.splitlines():
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    result[parts[0]] = {"running": "running" in line, "enabled": True}
+            except OSError:
+                pass
+
+        else:  # sysvinit
+            try:
+                for f in sorted(Path("/etc/init.d").iterdir()):
+                    if f.is_file() and not f.name.startswith(".") and f.name not in ("README", "skeleton"):
+                        result[f.name] = {"running": False, "enabled": True}
+            except OSError:
+                pass
+
+        return result
+
     def _list_services(self) -> dict:
-        return {"services": self._state["services"]}
+        managed = self._state["services"]
+        result: dict[str, Any] = {
+            name: {**attrs, "ff_managed": False}
+            for name, attrs in self._read_system_services().items()
+        }
+        for name, attrs in managed.items():
+            if name in result:
+                result[name] = {**result[name], **attrs, "ff_managed": True}
+            else:
+                result[name] = {**attrs, "ff_managed": True}
+        return {"services": result}
 
     def _set_service(self, service: str, body: ServiceBody) -> dict:
         self._pyinfra_run(
@@ -515,14 +624,40 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         self._emit("host.service.deleted", {"service": service})
         return {"deleted": service}
 
+    def _import_service(self, service: str) -> dict:
+        system = self._read_system_services()
+        if service not in system:
+            raise HTTPException(404, f"Service {service!r} not found on system")
+        state = {"running": system[service]["running"], "enabled": system[service]["enabled"]}
+        self._state["services"][service] = state
+        self._save_state()
+        self._emit("host.service.changed", {"service": service, **state})
+        return {"service": service, **state, "ff_managed": True}
+
     # ── sysctl ─────────────────────────────────────────────────────────────────
 
     def _list_sysctl(self) -> dict:
-        return {"sysctl": self._state["sysctl"]}
+        managed = self._state["sysctl"]
+        result: dict[str, Any] = {}
+        sysctl_bin = shutil.which("sysctl") or "/usr/sbin/sysctl"
+        try:
+            proc = subprocess.run([sysctl_bin, "-a"], capture_output=True, text=True)
+            for line in proc.stdout.splitlines():
+                if " = " in line:
+                    key, value = line.split(" = ", 1)
+                    result[key.strip()] = {"value": value.strip(), "ff_managed": False}
+        except OSError:
+            pass
+        for key, attrs in managed.items():
+            if key in result:
+                result[key] = {**result[key], **attrs, "ff_managed": True}
+            else:
+                result[key] = {**attrs, "ff_managed": True}
+        return {"sysctl": result}
 
     def _list_all_sysctl(self) -> dict:
-        # helper for testing/debugging to list all sysctl values, not just managed ones
-        proc = subprocess.run(["sysctl", "-a"], capture_output=True, text=True)
+        sysctl_bin = shutil.which("sysctl") or "/usr/sbin/sysctl"
+        proc = subprocess.run([sysctl_bin, "-a"], capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError(f"Failed to list sysctl parameters: {proc.stderr}")
         result = {}
@@ -553,10 +688,41 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         self._emit("host.sysctl.deleted", {"key": key})
         return {"deleted": key}
 
+    def _import_sysctl(self, key: str) -> dict:
+        sysctl_bin = shutil.which("sysctl") or "/usr/sbin/sysctl"
+        try:
+            proc = subprocess.run([sysctl_bin, "-n", key], capture_output=True, text=True)
+        except OSError:
+            raise HTTPException(503, "sysctl binary not available")
+        if proc.returncode != 0:
+            raise HTTPException(404, f"Sysctl key {key!r} not found on system")
+        state = {"value": proc.stdout.strip(), "persist": True}
+        self._state["sysctl"][key] = state
+        self._save_state()
+        self._emit("host.sysctl.changed", {"key": key, **state})
+        return {"key": key, **state, "ff_managed": True}
+
     # ── users ──────────────────────────────────────────────────────────────────
 
     def _list_users(self) -> dict:
-        return {"users": self._state["users"]}
+        managed = self._state["users"]
+        result: dict[str, Any] = {
+            entry.pw_name: {
+                "uid": entry.pw_uid,
+                "gid": entry.pw_gid,
+                "shell": entry.pw_shell,
+                "home_dir": entry.pw_dir,
+                "comment": entry.pw_gecos,
+                "ff_managed": False,
+            }
+            for entry in pwd.getpwall()
+        }
+        for name, attrs in managed.items():
+            if name in result:
+                result[name] = {**result[name], **attrs, "ff_managed": True}
+            else:
+                result[name] = {**attrs, "ff_managed": True}
+        return {"users": result}
 
     def _set_user(self, name: str, body: UserBody) -> dict:
         kwargs: dict[str, Any] = {
@@ -589,10 +755,40 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         self._emit("host.user.deleted", {"user": name})
         return {"deleted": name}
 
+    def _import_user(self, name: str) -> dict:
+        try:
+            entry = pwd.getpwnam(name)
+        except KeyError:
+            raise HTTPException(404, f"User {name!r} not found on system")
+        state: dict[str, Any] = {
+            "shell": entry.pw_shell,
+            "home_dir": entry.pw_dir,
+            "system": entry.pw_uid < 1000,
+            "comment": entry.pw_gecos or None,
+        }
+        self._state["users"][name] = state
+        self._save_state()
+        self._emit("host.user.changed", {"user": name, **state})
+        return {"user": name, **state, "ff_managed": True}
+
     # ── groups ─────────────────────────────────────────────────────────────────
 
     def _list_groups(self) -> dict:
-        return {"groups": self._state["groups"]}
+        managed = self._state["groups"]
+        result: dict[str, Any] = {
+            entry.gr_name: {
+                "gid": entry.gr_gid,
+                "members": entry.gr_mem,
+                "ff_managed": False,
+            }
+            for entry in grp.getgrall()
+        }
+        for name, attrs in managed.items():
+            if name in result:
+                result[name] = {**result[name], **attrs, "ff_managed": True}
+            else:
+                result[name] = {**attrs, "ff_managed": True}
+        return {"groups": result}
 
     def _set_group(self, name: str, body: GroupBody) -> dict:
         kwargs: dict[str, Any] = {
@@ -622,10 +818,114 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         self._emit("host.group.deleted", {"group": name})
         return {"deleted": name}
 
+    def _import_group(self, name: str) -> dict:
+        try:
+            entry = grp.getgrnam(name)
+        except KeyError:
+            raise HTTPException(404, f"Group {name!r} not found on system")
+        state: dict[str, Any] = {
+            "system": entry.gr_gid < 1000,
+            "gid": entry.gr_gid,
+        }
+        self._state["groups"][name] = state
+        self._save_state()
+        self._emit("host.group.changed", {"group": name, **state})
+        return {"group": name, **state, "ff_managed": True}
+
     # ── cron ───────────────────────────────────────────────────────────────────
 
+    def _read_system_cron(self) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        sources: list[tuple[Path, bool, str]] = []
+
+        p = Path("/etc/crontab")
+        if p.exists():
+            sources.append((p, True, "system"))
+
+        cron_d = Path("/etc/cron.d")
+        if cron_d.is_dir():
+            try:
+                for f in sorted(cron_d.iterdir()):
+                    if f.is_file() and not f.name.startswith("."):
+                        sources.append((f, True, f"cron.d/{f.name}"))
+            except OSError:
+                pass
+
+        # TODO: run as root so we can read /var/spool/cron/crontabs
+        spool = Path("/var/spool/cron/crontabs")
+        if spool.is_dir():
+            try:
+                for f in sorted(spool.iterdir()):
+                    if f.is_file():
+                        sources.append((f, False, f"user/{f.name}"))
+            except OSError:
+                pass
+
+        for filepath, has_user, prefix in sources:
+            try:
+                lines = filepath.read_text().splitlines()
+            except OSError:
+                continue
+            idx = 0
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                parts = stripped.split()
+                if not parts or "=" in parts[0] or parts[0].startswith("@"):
+                    continue
+                if len(parts) < (6 if has_user else 5):
+                    continue
+                minute, hour, dom, month, dow = parts[0], parts[1], parts[2], parts[3], parts[4]
+                if has_user:
+                    user = parts[5]
+                    command = " ".join(parts[6:])
+                else:
+                    user = filepath.name
+                    command = " ".join(parts[5:])
+                result[f"{prefix}/{idx}"] = {
+                    "command": command,
+                    "minute": minute,
+                    "hour": hour,
+                    "day_of_month": dom,
+                    "month": month,
+                    "day_of_week": dow,
+                    "user": user,
+                    "source": str(filepath),
+                }
+                idx += 1
+
+        for period in ("hourly", "daily", "weekly", "monthly"):
+            d = Path(f"/etc/cron.{period}")
+            if d.is_dir():
+                for f in sorted(d.iterdir()):
+                    if f.is_file() and not f.name.startswith("."):
+                        result[f"cron.{period}/{f.name}"] = {
+                            "command": str(f),
+                            "minute": None,
+                            "hour": None,
+                            "day_of_month": None,
+                            "month": None,
+                            "day_of_week": None,
+                            "user": "root",
+                            "source": str(d),
+                            "period": period,
+                        }
+
+        return result
+
     def _list_cron(self) -> dict:
-        return {"cron": self._state["cron"]}
+        managed = self._state["cron"]
+        result: dict[str, Any] = {
+            key: {**attrs, "ff_managed": False}
+            for key, attrs in self._read_system_cron().items()
+        }
+        for name, attrs in managed.items():
+            if name in result:
+                result[name] = {**result[name], **attrs, "ff_managed": True}
+            else:
+                result[name] = {**attrs, "ff_managed": True}
+        return {"cron": result}
 
     def _set_cron(self, name: str, body: CronBody) -> dict:
         self._pyinfra_run(
@@ -660,6 +960,25 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         self._emit("host.cron.deleted", {"name": name})
         return {"deleted": name}
 
+    def _import_cron(self, name: str, body: CronImportBody) -> dict:
+        system = self._read_system_cron()
+        if body.source_key not in system:
+            raise HTTPException(404, f"Cron entry {body.source_key!r} not found")
+        entry = system[body.source_key]
+        state: dict[str, Any] = {
+            "command": entry["command"],
+            "minute":       entry.get("minute")       or "*",
+            "hour":         entry.get("hour")         or "*",
+            "day_of_month": entry.get("day_of_month") or "*",
+            "month":        entry.get("month")        or "*",
+            "day_of_week":  entry.get("day_of_week")  or "*",
+            "user":         entry.get("user")         or "root",
+        }
+        self._state["cron"][name] = state
+        self._save_state()
+        self._emit("host.cron.changed", {"name": name, **state})
+        return {"name": name, **state, "ff_managed": True}
+
     # ── packages ───────────────────────────────────────────────────────────────
 
     def _list_packages(self, mode: str = "installed") -> dict:
@@ -674,14 +993,16 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
             }
         elif mode == "installed":
             pool = {name: {"version": info["version"], "installed": True} for name, info in system.items()}
-        else:  # managed
+        elif mode == "managed":
             pool = {
                 name: {"version": system[name]["version"] if name in system else None, "installed": name in system}
                 for name in managed
             }
+        else:
+            pool = {}
         result: dict[str, Any] = {}
         for name, base in pool.items():
-            result[name] = {**base, "managed": name in managed}
+            result[name] = {**base, "ff_managed": name in managed}
             if name in managed:
                 result[name].update(managed[name])
         return {"packages": result, "platform": self._pkg_mgr.platform, "mode": mode}
@@ -717,6 +1038,17 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         self._save_state()
         self._emit("host.package.deleted", {"package": name, "platform": self._pkg_mgr.platform})
         return {"deleted": name}
+
+    def _import_package(self, name: str) -> dict:
+        self._pkg_mgr.assert_supported()
+        system = self._pkg_mgr.list_system_packages()
+        if name not in system:
+            raise HTTPException(404, f"Package {name!r} is not installed on this system")
+        state = {"present": True, "latest": False}
+        self._state["packages"][name] = state
+        self._save_state()
+        self._emit("host.package.changed", {"package": name, **state, "platform": self._pkg_mgr.platform})
+        return {"package": name, **state, "platform": self._pkg_mgr.platform, "ff_managed": True}
 
     def _upgrade_system(self, body: UpgradeBody, background_tasks: BackgroundTasks) -> dict:
         self._pkg_mgr.assert_supported()
@@ -767,19 +1099,23 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
 
     # ── repos ──────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _repo_id(sys_key: str) -> str:
+        return hashlib.sha256(sys_key.encode()).hexdigest()[:8]
+
     def _list_repos(self) -> dict:
         system = self._pkg_mgr.list_system_repos()
         managed = self._state["repos"]
 
         result: dict[str, Any] = {}
-        for sys_id, attrs in system.items():
-            result[sys_id] = {**attrs, "managed": False}
+        for sys_key, attrs in system.items():
+            result[sys_key] = {**attrs, "id": self._repo_id(sys_key), "ff_managed": False}
         for name, attrs in managed.items():
-            sys_id = self._pkg_mgr.repo_system_id(name, attrs)
-            if sys_id is not None and sys_id in result:
-                result[sys_id] = {**result[sys_id], **attrs, "managed": True}
+            sys_key = self._pkg_mgr.repo_system_id(name, attrs)
+            if sys_key is not None and sys_key in result:
+                result[sys_key] = {**result[sys_key], **attrs, "id": self._repo_id(sys_key), "name": name, "ff_managed": True}
             else:
-                result[name] = {**attrs, "managed": True}
+                result[name] = {**attrs, "id": self._repo_id(name), "name": name, "ff_managed": True}
 
         return {"repos": result, "platform": self._pkg_mgr.platform}
 
@@ -801,3 +1137,16 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         self._save_state()
         self._emit("host.repo.deleted", {"repo": name, "platform": self._pkg_mgr.platform})
         return {"deleted": name}
+
+    def _import_repo(self, body: RepoImportBody) -> dict:
+        self._pkg_mgr.assert_supported()
+        system = self._pkg_mgr.list_system_repos()
+        # Resolve by hashing each system key at request time — no stored mapping needed.
+        match = next((k for k in system if self._repo_id(k) == body.id), None)
+        if match is None:
+            raise HTTPException(404, f"Repo with id {body.id!r} not found on system")
+        state = system[match]
+        self._state["repos"][body.alias] = state
+        self._save_state()
+        self._emit("host.repo.changed", {"repo": body.alias, **state, "platform": self._pkg_mgr.platform})
+        return {"repo": body.alias, **state, "platform": self._pkg_mgr.platform, "ff_managed": True}

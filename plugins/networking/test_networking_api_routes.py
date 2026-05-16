@@ -588,19 +588,19 @@ def test_apply_changes_empty_when_nothing_pending(plugin, client):
     assert r.json()["changes"] == {}
 
 
-def test_apply_updates_last_applied_on_success(plugin, client):
+def test_apply_updates_current_state_on_success(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={})
     plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
     client.post("/v1/networking/apply")
-    assert plugin._last_applied is not None
-    assert "eth0" in plugin._last_applied["interfaces"]
+    assert plugin._state_file.current_snapshot is not None
+    assert "eth0" in plugin._state_file.current_snapshot["interfaces"]
 
 
-def test_apply_does_not_update_last_applied_on_failure(plugin, client):
+def test_apply_does_not_update_current_state_on_failure(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={})
     plugin._run_ifstate.return_value = _ifstate_err()
     client.post("/v1/networking/apply")
-    assert plugin._last_applied is None
+    assert plugin._state_file.current_snapshot is None
 
 
 def test_apply_emits_event(plugin, client):
@@ -636,7 +636,7 @@ def test_check_returns_valid_false_on_failure(plugin, client):
 
 
 def test_check_shows_deleted_route_when_ifstatecli_has_no_routing_section(plugin, client):
-    # Add a route and apply it so last_applied captures it
+    # Add a route and apply it so current_state captures it
     r = client.post("/v1/networking/config/routes", json={"to": "default", "via": "10.0.0.1"})
     route_id = r.json()["id"]
     plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
@@ -669,7 +669,7 @@ def test_discard_409_when_no_snapshot(client):
     assert r.status_code == 409
 
 
-def test_discard_restores_last_applied(plugin, client):
+def test_discard_restores_current_state(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={})
     plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
     client.post("/v1/networking/apply")
@@ -890,9 +890,11 @@ def test_import_does_not_save_state_when_nothing_imported(plugin, client):
 # ── boot-time state apply ──────────────────────────────────────────────────────
 
 _BOOT_STATE = {
-    "interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}},
-    "routes": {},
-    "sysctl": {},
+    "desired_state": {
+        "interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}},
+        "routes": {},
+        "sysctl": {},
+    },
 }
 
 
@@ -950,15 +952,15 @@ def test_apply_state_does_not_crash_on_ifstate_failure(tmp_path):
     assert plugin._interfaces == {"eth0": {"addresses": ["10.0.0.1/24"]}}
 
 
-def test_boot_apply_sets_last_applied_on_success(tmp_path):
-    # State on disk with no last_applied (e.g. route added but never applied before restart)
+def test_boot_apply_sets_current_state_on_success(tmp_path):
+    # State on disk with no current_state (e.g. route added but never applied before restart)
     _write_boot_state(tmp_path)
     plugin = _make_plugin_raw(tmp_path)
-    assert plugin._last_applied is not None
-    assert plugin._last_applied["interfaces"] == _BOOT_STATE["interfaces"]
+    assert plugin._state_file.current_snapshot is not None
+    assert plugin._state_file.current_snapshot["interfaces"] == _BOOT_STATE["desired_state"]["interfaces"]
 
 
-def test_boot_apply_does_not_set_last_applied_on_failure(tmp_path):
+def test_boot_apply_does_not_set_current_state_on_failure(tmp_path):
     _write_boot_state(tmp_path)
     mod = _load_module()
     plugin = mod.NetworkingPlugin()
@@ -969,11 +971,11 @@ def test_boot_apply_does_not_set_last_applied_on_failure(tmp_path):
     plugin.logger = logging.getLogger("test.networking")
     plugin._run_ifstate = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr="failed"))
     plugin.setup()
-    assert plugin._last_applied is None
+    assert plugin._state_file.current_snapshot is None
 
 
 def test_boot_apply_clears_pending_changes(tmp_path):
-    # Simulates the reported bug: state exists, no last_applied, reboot should leave pending_changes=False
+    # Simulates the reported bug: state exists, no current_state, reboot should leave pending_changes=False
     _write_boot_state(tmp_path)
     plugin = _make_plugin_raw(tmp_path)
     client = _make_client(plugin)

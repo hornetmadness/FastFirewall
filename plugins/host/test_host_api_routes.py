@@ -5,6 +5,7 @@ pyinfra calls are mocked via _pyinfra_run so no actual system changes are made.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import logging
@@ -109,6 +110,32 @@ def test_status_counts_update_after_additions(client):
     assert managed["sysctl"] == 1
 
 
+def test_status_pending_changes_false_after_mutation(client):
+    client.put("/v1/host/services/nginx", json={"running": True, "enabled": True})
+    assert client.get("/v1/host/status").json()["pending_changes"] is False
+
+
+def test_status_pending_changes_false_after_import(client):
+    client.post("/v1/host/users/root/import")
+    assert client.get("/v1/host/status").json()["pending_changes"] is False
+
+
+def test_status_pending_changes_false_when_nothing_managed(client):
+    assert client.get("/v1/host/status").json()["pending_changes"] is False
+
+
+def test_current_state_persists_across_restart(tmp_path):
+    p1 = _make_plugin(tmp_path)
+    c1 = _make_client(p1)
+    c1.put("/v1/host/services/nginx", json={"running": True, "enabled": True})
+    assert c1.get("/v1/host/status").json()["pending_changes"] is False
+    p1.teardown()
+
+    p2 = _make_plugin(tmp_path)
+    c2 = _make_client(p2)
+    assert c2.get("/v1/host/status").json()["pending_changes"] is False
+
+
 # ── hostname ───────────────────────────────────────────────────────────────────
 
 def test_get_hostname_returns_string(client):
@@ -138,7 +165,9 @@ def test_set_hostname_uses_server_hostname_op(client, plugin):
 def test_list_services_empty(client):
     r = client.get("/v1/host/services")
     assert r.status_code == 200
-    assert r.json() == {"services": {}}
+    data = r.json()
+    assert "services" in data
+    assert all(not s["ff_managed"] for s in data["services"].values())
 
 
 def test_set_service_running_and_enabled(client, plugin):
@@ -168,8 +197,9 @@ def test_set_service_uses_server_service_op(client, plugin):
 
 def test_list_services_shows_added_entry(client):
     client.put("/v1/host/services/nginx", json={"running": True, "enabled": True})
-    r = client.get("/v1/host/services")
-    assert "nginx" in r.json()["services"]
+    services = client.get("/v1/host/services").json()["services"]
+    assert "nginx" in services
+    assert services["nginx"]["ff_managed"] is True
 
 
 def test_delete_service_removes_entry(client):
@@ -185,12 +215,33 @@ def test_delete_service_not_managed_returns_404(client):
     assert r.status_code == 404
 
 
+def test_import_service_reads_state_from_system(client, plugin):
+    plugin._read_system_services = MagicMock(return_value={
+        "ssh": {"running": True, "enabled": True}
+    })
+    r = client.post("/v1/host/services/ssh/import")
+    assert r.status_code == 201
+    data = r.json()
+    assert data["service"] == "ssh"
+    assert data["running"] is True
+    assert data["enabled"] is True
+    assert data["ff_managed"] is True
+    assert client.get("/v1/host/services").json()["services"]["ssh"]["ff_managed"] is True
+
+
+def test_import_service_not_on_system_returns_404(client, plugin):
+    plugin._read_system_services = MagicMock(return_value={})
+    assert client.post("/v1/host/services/ghost/import").status_code == 404
+
+
 # ── sysctl ─────────────────────────────────────────────────────────────────────
 
 def test_list_sysctl_empty(client):
     r = client.get("/v1/host/sysctl")
     assert r.status_code == 200
-    assert r.json() == {"sysctl": {}}
+    data = r.json()
+    assert "sysctl" in data
+    assert all(not e["ff_managed"] for e in data["sysctl"].values())
 
 
 def test_set_sysctl_calls_pyinfra(client, plugin):
@@ -226,8 +277,9 @@ def test_set_sysctl_dotted_key(client):
 
 def test_list_sysctl_shows_added_key(client):
     client.put("/v1/host/sysctl/vm.swappiness", json={"value": "10"})
-    r = client.get("/v1/host/sysctl")
-    assert "vm.swappiness" in r.json()["sysctl"]
+    sysctl = client.get("/v1/host/sysctl").json()["sysctl"]
+    assert "vm.swappiness" in sysctl
+    assert sysctl["vm.swappiness"]["ff_managed"] is True
 
 
 def test_delete_sysctl_removes_key(client):
@@ -235,7 +287,9 @@ def test_delete_sysctl_removes_key(client):
     r = client.delete("/v1/host/sysctl/vm.swappiness")
     assert r.status_code == 200
     assert r.json() == {"deleted": "vm.swappiness"}
-    assert "vm.swappiness" not in client.get("/v1/host/sysctl").json()["sysctl"]
+    sysctl = client.get("/v1/host/sysctl").json()["sysctl"]
+    entry = sysctl.get("vm.swappiness")
+    assert entry is None or entry["ff_managed"] is False
 
 
 def test_delete_sysctl_not_managed_returns_404(client):
@@ -243,10 +297,34 @@ def test_delete_sysctl_not_managed_returns_404(client):
     assert r.status_code == 404
 
 
+def test_import_sysctl_reads_current_value(client):
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.stdout = "60\n"
+    with patch("subprocess.run", return_value=mock_proc):
+        r = client.post("/v1/host/sysctl/vm.swappiness/import")
+    assert r.status_code == 201
+    data = r.json()
+    assert data["key"] == "vm.swappiness"
+    assert data["value"] == "60"
+    assert data["persist"] is True
+    assert data["ff_managed"] is True
+
+
+def test_import_sysctl_missing_key_returns_404(client):
+    mock_proc = MagicMock()
+    mock_proc.returncode = 1
+    mock_proc.stdout = ""
+    with patch("subprocess.run", return_value=mock_proc):
+        assert client.post("/v1/host/sysctl/no.such.key/import").status_code == 404
+
+
 # ── users ──────────────────────────────────────────────────────────────────────
 
 def test_list_users_empty(client):
-    assert client.get("/v1/host/users").json() == {"users": {}}
+    data = client.get("/v1/host/users").json()
+    assert "users" in data
+    assert all(not u["ff_managed"] for u in data["users"].values())
 
 
 def test_set_user_creates_entry(client, plugin):
@@ -287,7 +365,9 @@ def test_set_user_system_flag(client, plugin):
 
 def test_list_users_shows_added(client):
     client.post("/v1/host/users/deploy", json={})
-    assert "deploy" in client.get("/v1/host/users").json()["users"]
+    users = client.get("/v1/host/users").json()["users"]
+    assert "deploy" in users
+    assert users["deploy"]["ff_managed"] is True
 
 
 def test_delete_user_removes_entry(client, plugin):
@@ -307,10 +387,27 @@ def test_delete_user_not_managed_returns_404(client):
     assert client.delete("/v1/host/users/ghost").status_code == 404
 
 
+def test_import_user_reads_from_passwd(client):
+    r = client.post("/v1/host/users/root/import")
+    assert r.status_code == 201
+    data = r.json()
+    assert data["user"] == "root"
+    assert data["ff_managed"] is True
+    assert "shell" in data
+    assert "home_dir" in data
+    assert client.get("/v1/host/users").json()["users"]["root"]["ff_managed"] is True
+
+
+def test_import_user_not_found_returns_404(client):
+    assert client.post("/v1/host/users/no_such_user_xyz/import").status_code == 404
+
+
 # ── groups ─────────────────────────────────────────────────────────────────────
 
 def test_list_groups_empty(client):
-    assert client.get("/v1/host/groups").json() == {"groups": {}}
+    data = client.get("/v1/host/groups").json()
+    assert "groups" in data
+    assert all(not g["ff_managed"] for g in data["groups"].values())
 
 
 def test_set_group_creates_entry(client, plugin):
@@ -343,7 +440,9 @@ def test_set_group_system_flag(client, plugin):
 
 def test_list_groups_shows_added(client):
     client.post("/v1/host/groups/deploy", json={})
-    assert "deploy" in client.get("/v1/host/groups").json()["groups"]
+    groups = client.get("/v1/host/groups").json()["groups"]
+    assert "deploy" in groups
+    assert groups["deploy"]["ff_managed"] is True
 
 
 def test_delete_group_removes_entry(client, plugin):
@@ -362,10 +461,26 @@ def test_delete_group_not_managed_returns_404(client):
     assert client.delete("/v1/host/groups/ghost").status_code == 404
 
 
+def test_import_group_reads_from_grp(client):
+    r = client.post("/v1/host/groups/root/import")
+    assert r.status_code == 201
+    data = r.json()
+    assert data["group"] == "root"
+    assert data["ff_managed"] is True
+    assert "gid" in data
+    assert client.get("/v1/host/groups").json()["groups"]["root"]["ff_managed"] is True
+
+
+def test_import_group_not_found_returns_404(client):
+    assert client.post("/v1/host/groups/no_such_group_xyz/import").status_code == 404
+
+
 # ── cron ───────────────────────────────────────────────────────────────────────
 
 def test_list_cron_empty(client):
-    assert client.get("/v1/host/cron").json() == {"cron": {}}
+    data = client.get("/v1/host/cron").json()
+    assert "cron" in data
+    assert all(not e["ff_managed"] for e in data["cron"].values())
 
 
 def test_set_cron_creates_entry(client, plugin):
@@ -402,7 +517,9 @@ def test_set_cron_passes_user(client, plugin):
 
 def test_list_cron_shows_added(client):
     client.post("/v1/host/cron/backup", json={"command": "/usr/bin/backup.sh"})
-    assert "backup" in client.get("/v1/host/cron").json()["cron"]
+    cron = client.get("/v1/host/cron").json()["cron"]
+    assert "backup" in cron
+    assert cron["backup"]["ff_managed"] is True
 
 
 def test_delete_cron_removes_entry(client, plugin):
@@ -419,6 +536,30 @@ def test_delete_cron_removes_entry(client, plugin):
 
 def test_delete_cron_not_managed_returns_404(client):
     assert client.delete("/v1/host/cron/ghost").status_code == 404
+
+
+def test_import_cron_copies_system_entry(client, plugin):
+    plugin._read_system_cron = MagicMock(return_value={
+        "cron.d/anacron/0": {
+            "command": "run-parts /etc/cron.daily",
+            "minute": "25", "hour": "6",
+            "day_of_month": "*", "month": "*", "day_of_week": "*",
+            "user": "root", "source": "/etc/cron.d/anacron",
+        }
+    })
+    r = client.post("/v1/host/cron/daily/import", json={"source_key": "cron.d/anacron/0"})
+    assert r.status_code == 201
+    data = r.json()
+    assert data["name"] == "daily"
+    assert data["command"] == "run-parts /etc/cron.daily"
+    assert data["hour"] == "6"
+    assert data["ff_managed"] is True
+    assert client.get("/v1/host/cron").json()["cron"]["daily"]["ff_managed"] is True
+
+
+def test_import_cron_missing_source_key_returns_404(client, plugin):
+    plugin._read_system_cron = MagicMock(return_value={})
+    assert client.post("/v1/host/cron/myjob/import", json={"source_key": "nonexistent/0"}).status_code == 404
 
 
 # ── state persistence ──────────────────────────────────────────────────────────
@@ -839,7 +980,7 @@ def test_list_packages_installed_shows_system_packages(tmp_path):
     client = _make_client(plugin)
     entry = client.get("/v1/host/packages").json()["packages"]["bash"]
     assert entry["installed"] is True
-    assert entry["managed"] is False
+    assert entry["ff_managed"] is False
 
 
 def test_list_packages_installed_marks_managed(tmp_path):
@@ -850,7 +991,7 @@ def test_list_packages_installed_marks_managed(tmp_path):
     client.post("/v1/host/packages/curl", json={"present": True, "latest": False})
     entry = client.get("/v1/host/packages").json()["packages"]["curl"]
     assert entry["installed"] is True
-    assert entry["managed"] is True
+    assert entry["ff_managed"] is True
     assert entry["version"] == "7.88"
 
 
@@ -863,7 +1004,7 @@ def test_list_packages_managed_mode_only_shows_managed(tmp_path):
     data = client.get("/v1/host/packages?mode=managed").json()
     assert "curl" in data["packages"]
     assert "bash" not in data["packages"]
-    assert data["packages"]["curl"]["managed"] is True
+    assert data["packages"]["curl"]["ff_managed"] is True
 
 
 def test_list_packages_managed_mode_annotates_installed_status(tmp_path):
@@ -884,7 +1025,7 @@ def test_list_packages_managed_mode_not_installed(tmp_path):
     client.post("/v1/host/packages/vim", json={})
     entry = client.get("/v1/host/packages?mode=managed").json()["packages"]["vim"]
     assert entry["installed"] is False
-    assert entry["managed"] is True
+    assert entry["ff_managed"] is True
 
 
 def test_list_packages_available_mode_shows_repo_packages(tmp_path):
@@ -907,8 +1048,8 @@ def test_list_packages_available_mode_marks_managed(tmp_path):
     client = _make_client(plugin)
     client.post("/v1/host/packages/curl", json={})
     data = client.get("/v1/host/packages?mode=available").json()["packages"]
-    assert data["curl"]["managed"] is True
-    assert data["vim"]["managed"] is False
+    assert data["curl"]["ff_managed"] is True
+    assert data["vim"]["ff_managed"] is False
 
 
 def test_list_packages_invalid_mode_returns_400(client):
@@ -954,7 +1095,7 @@ def test_install_package_appears_in_managed_list(tmp_path):
     client = _make_client(plugin)
     client.post("/v1/host/packages/curl", json={})
     entry = client.get("/v1/host/packages?mode=managed").json()["packages"]["curl"]
-    assert entry["managed"] is True
+    assert entry["ff_managed"] is True
 
 
 def test_update_package_calls_pyinfra(tmp_path):
@@ -1004,6 +1145,28 @@ def test_remove_package_not_managed_returns_404(tmp_path):
     assert client.delete("/v1/host/packages/ghost").status_code == 404
 
 
+def test_import_package_marks_installed_package_as_managed(tmp_path):
+    with patch("shutil.which", side_effect=lambda b: "/usr/bin/apt-get" if b == "apt-get" else None):
+        plugin = _make_plugin(tmp_path)
+    plugin._pkg_mgr.list_system_packages = MagicMock(return_value={"curl": {"version": "7.88", "installed": True}})
+    client = _make_client(plugin)
+    r = client.post("/v1/host/packages/curl/import")
+    assert r.status_code == 201
+    data = r.json()
+    assert data["package"] == "curl"
+    assert data["present"] is True
+    assert data["ff_managed"] is True
+    assert client.get("/v1/host/packages?mode=managed").json()["packages"]["curl"]["ff_managed"] is True
+
+
+def test_import_package_not_installed_returns_404(tmp_path):
+    with patch("shutil.which", side_effect=lambda b: "/usr/bin/apt-get" if b == "apt-get" else None):
+        plugin = _make_plugin(tmp_path)
+    plugin._pkg_mgr.list_system_packages = MagicMock(return_value={})
+    client = _make_client(plugin)
+    assert client.post("/v1/host/packages/curl/import").status_code == 404
+
+
 def test_package_endpoints_503_when_no_pkg_manager(tmp_path):
     with patch("shutil.which", return_value=None):
         plugin = _make_plugin(tmp_path)
@@ -1036,14 +1199,16 @@ def test_list_repos_empty(tmp_path):
 
 
 def test_list_repos_shows_system_repos_as_unmanaged(tmp_path):
-    system = {"deb https://packages.example.com/apt focal main": {"src": "deb https://packages.example.com/apt focal main"}}
+    sys_key = "deb https://packages.example.com/apt focal main"
+    system = {sys_key: {"src": sys_key}}
     with patch("shutil.which", side_effect=lambda b: "/usr/bin/apt-get" if b == "apt-get" else None):
         plugin = _make_plugin(tmp_path, system_repos=system)
     client = _make_client(plugin)
     r = client.get("/v1/host/repos")
     assert r.status_code == 200
-    entry = r.json()["repos"]["deb https://packages.example.com/apt focal main"]
-    assert entry["managed"] is False
+    entry = r.json()["repos"][sys_key]
+    assert entry["ff_managed"] is False
+    assert entry["id"] == hashlib.sha256(sys_key.encode()).hexdigest()[:8]
 
 
 def test_list_repos_marks_managed_repo(tmp_path):
@@ -1056,7 +1221,9 @@ def test_list_repos_marks_managed_repo(tmp_path):
     r = client.get("/v1/host/repos")
     assert r.status_code == 200
     entry = r.json()["repos"][src]
-    assert entry["managed"] is True
+    assert entry["ff_managed"] is True
+    assert entry["id"] == hashlib.sha256(src.encode()).hexdigest()[:8]
+    assert entry["name"] == "myrepo"
 
 
 def test_list_repos_managed_but_not_in_system_uses_name_as_key(tmp_path):
@@ -1066,8 +1233,10 @@ def test_list_repos_managed_but_not_in_system_uses_name_as_key(tmp_path):
     client.post("/v1/host/repos/myrepo", json={"src": "deb https://example.com/apt focal main"})
     r = client.get("/v1/host/repos")
     assert r.status_code == 200
-    assert "myrepo" in r.json()["repos"]
-    assert r.json()["repos"]["myrepo"]["managed"] is True
+    entry = r.json()["repos"]["myrepo"]
+    assert entry["ff_managed"] is True
+    assert entry["id"] == hashlib.sha256(b"myrepo").hexdigest()[:8]
+    assert entry["name"] == "myrepo"
 
 
 def test_add_apt_repo_calls_pyinfra(tmp_path):
@@ -1198,6 +1367,28 @@ def test_remove_repo_not_managed_returns_404(tmp_path):
     assert client.delete("/v1/host/repos/ghost").status_code == 404
 
 
+def test_import_repo_copies_system_repo(tmp_path):
+    src = "deb https://packages.example.com/apt focal main"
+    src_id = hashlib.sha256(src.encode()).hexdigest()[:8]
+    system = {src: {"src": src}}
+    with patch("shutil.which", side_effect=lambda b: "/usr/bin/apt-get" if b == "apt-get" else None):
+        plugin = _make_plugin(tmp_path, system_repos=system)
+    client = _make_client(plugin)
+    r = client.post("/v1/host/repos/import", json={"id": src_id, "alias": "myrepo"})
+    assert r.status_code == 201
+    data = r.json()
+    assert data["repo"] == "myrepo"
+    assert data["ff_managed"] is True
+    assert client.get("/v1/host/repos").json()["repos"][src]["ff_managed"] is True
+
+
+def test_import_repo_missing_id_returns_404(tmp_path):
+    with patch("shutil.which", side_effect=lambda b: "/usr/bin/apt-get" if b == "apt-get" else None):
+        plugin = _make_plugin(tmp_path)
+    client = _make_client(plugin)
+    assert client.post("/v1/host/repos/import", json={"id": "deadbeef", "alias": "myrepo"}).status_code == 404
+
+
 def test_repo_endpoints_503_when_no_pkg_manager(tmp_path):
     with patch("shutil.which", return_value=None):
         plugin = _make_plugin(tmp_path)
@@ -1262,7 +1453,7 @@ def test_package_state_persists_across_restart(tmp_path):
     c2 = _make_client(p2)
     packages = c2.get("/v1/host/packages?mode=managed").json()["packages"]
     assert "curl" in packages
-    assert packages["curl"]["managed"] is True
+    assert packages["curl"]["ff_managed"] is True
 
 
 def test_repo_state_persists_across_restart(tmp_path):
@@ -1281,7 +1472,7 @@ def test_repo_state_persists_across_restart(tmp_path):
 def test_old_state_file_without_packages_loads_cleanly(tmp_path):
     state_path = tmp_path / "data" / "host_state.json"
     state_path.parent.mkdir(parents=True)
-    state_path.write_text(json.dumps({"services": {"nginx": {"running": True, "enabled": True}}, "sysctl": {}, "users": {}, "groups": {}, "cron": {}}))
+    state_path.write_text(json.dumps({"desired_state": {"services": {"nginx": {"running": True, "enabled": True}}, "sysctl": {}, "users": {}, "groups": {}, "cron": {}}}))
 
     with patch("shutil.which", return_value=None):
         plugin = _make_plugin(tmp_path)
@@ -1416,13 +1607,15 @@ def test_upgrade_system_pacman_uses_syu(tmp_path):
 # ── boot-time state apply ──────────────────────────────────────────────────────
 
 _BOOT_STATE = {
-    "services": {"nginx": {"running": True, "enabled": True}},
-    "sysctl": {"vm.swappiness": {"value": "10", "persist": True}},
-    "users": {"deploy": {"shell": "/bin/bash", "home_dir": None, "system": False, "comment": None}},
-    "groups": {"ops": {"system": False, "gid": None}},
-    "cron": {"backup": {"command": "/usr/bin/backup.sh", "minute": "0", "hour": "2", "day_of_month": "*", "month": "*", "day_of_week": "*", "user": "root"}},
-    "packages": {},
-    "repos": {},
+    "desired_state": {
+        "services": {"nginx": {"running": True, "enabled": True}},
+        "sysctl": {"vm.swappiness": {"value": "10", "persist": True}},
+        "users": {"deploy": {"shell": "/bin/bash", "home_dir": None, "system": False, "comment": None}},
+        "groups": {"ops": {"system": False, "gid": None}},
+        "cron": {"backup": {"command": "/usr/bin/backup.sh", "minute": "0", "hour": "2", "day_of_month": "*", "month": "*", "day_of_week": "*", "user": "root"}},
+        "packages": {},
+        "repos": {},
+    },
 }
 
 

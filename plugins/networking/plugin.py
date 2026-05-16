@@ -29,7 +29,7 @@ import tempfile
 from typing import Any, Literal, Optional
 
 import yaml
-from fastapi import HTTPException, logger
+from fastapi import HTTPException  # TODO: add structured logging throughout this plugin (currently uses self.logger only at boot)
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
@@ -174,12 +174,12 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
 
     def setup(self) -> None:
         self._state_file = PluginStateFile.from_config(
-            self.plugin_dir, self.config, "state_file", "networking_state.json", self.logger
+            self.plugin_dir, self.config, "state_file", "networking_state.json", self.logger,
+            mutation_model="deferred",
         )
         self._interfaces: dict[str, dict[str, Any]] = {}
         self._routes: dict[str, dict[str, Any]] = {}   # {uuid: route_dict}
         self._sysctl: dict[str, str] = {}
-        self._last_applied: dict[str, Any] | None = None
         if not self.config.get("ignore_state_on_boot", False):
             self._load_state()
             if not any([self._interfaces, self._routes, self._sysctl]):
@@ -199,21 +199,13 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
     # ── state persistence ──────────────────────────────────────────────
 
     def _load_state(self) -> None:
-        data = self._state_file.load(default={})
-        self._interfaces = data.get("interfaces", {})
-        self._routes = data.get("routes", {})
-        self._sysctl = data.get("sysctl", {})
-        self._last_applied = data.get("last_applied")
+        desired = self._state_file.load_desired(default={})
+        self._interfaces = desired.get("interfaces", {})
+        self._routes = desired.get("routes", {})
+        self._sysctl = desired.get("sysctl", {})
 
     def _save_state(self) -> None:
-        data: dict[str, Any] = {
-            "interfaces": self._interfaces,
-            "routes": self._routes,
-            "sysctl": self._sysctl,
-        }
-        if self._last_applied is not None:
-            data["last_applied"] = self._last_applied
-        self._state_file.save(data)
+        self._state_file.save_desired(self._desired_snapshot())
 
     def _desired_snapshot(self) -> dict[str, Any]:
         return json.loads(json.dumps({
@@ -239,8 +231,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
                 except OSError:
                     pass
             if result.returncode == 0:
-                self._last_applied = self._desired_snapshot()
-                self._save_state()
+                self._state_file.commit(self._desired_snapshot())
                 self.logger.info("Re-applied networking config on boot")
             else:
                 self.logger.warning("Boot-time networking apply returned non-zero: %s", result.stderr.strip())
@@ -279,8 +270,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
             self._routes[route_id] = route
 
         if self._interfaces or self._routes:
-            self._last_applied = self._desired_snapshot()
-            self._save_state()
+            self._state_file.save_and_commit(self._desired_snapshot())
             self.logger.info(
                 "Boot-time import: %d interface(s), %d route(s)",
                 len(self._interfaces), len(self._routes),
@@ -369,7 +359,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
     # ── status ─────────────────────────────────────────────────────────
 
     def _status(self) -> dict:
-        pending = bool(_diff_state(self._last_applied or {}, self._desired_snapshot()))
         return {
             "plugin": self.meta["name"],
             "version": self.meta["version"],
@@ -378,7 +367,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
                 "routes": len(self._routes),
                 "sysctl": len(self._sysctl),
             },
-            "pending_changes": pending,
+            "pending_changes": self._state_file.pending_changes,
             "state_file": str(self._state_file.path),
         }
 
@@ -620,7 +609,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
     def _apply(self) -> dict[str, Any]:
         debug: bool = bool(self.config.get("debug", False))
         desired = self._desired_snapshot()
-        changes = _diff_state(self._last_applied or {}, desired)
+        changes = _diff_state(self._state_file.current_snapshot or {}, desired)
         config_yaml = self._build_ifstate_yaml()
         tmp = None
         try:
@@ -640,8 +629,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
                 self.logger.info("[debug] output=%r", output)
             success = result.returncode == 0
             if success:
-                self._last_applied = desired
-                self._save_state()
+                self._state_file.commit(desired)
             bus.emit(Event(
                 name="networking.applied",
                 source=self.plugin_id,
@@ -664,12 +652,13 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
                         pass
 
     def _discard(self) -> dict[str, Any]:
-        if self._last_applied is None:
+        current = self._state_file.current_snapshot
+        if current is None:
             raise HTTPException(409, "No applied snapshot to restore — apply first")
-        changes = _diff_state(self._desired_snapshot(), self._last_applied)
-        self._interfaces = dict(self._last_applied.get("interfaces", {}))
-        self._routes = dict(self._last_applied.get("routes", {}))
-        self._sysctl = dict(self._last_applied.get("sysctl", {}))
+        changes = _diff_state(self._desired_snapshot(), current)
+        self._interfaces = dict(current.get("interfaces", {}))
+        self._routes = dict(current.get("routes", {}))
+        self._sysctl = dict(current.get("sysctl", {}))
         self._save_state()
         return {"discarded": True, "changes": changes}
 
@@ -685,7 +674,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
                 changes = yaml.safe_load(result.stdout) or {}
             except Exception:
                 raise HTTPException(500, "Failed to parse ifstatecli check output")
-            route_diff = _diff_state(self._last_applied or {}, self._desired_snapshot()).get("routes")
+            route_diff = _diff_state(self._state_file.current_snapshot or {}, self._desired_snapshot()).get("routes")
             if route_diff:
                 changes["routes"] = route_diff
             return {"success": result.returncode == 0, "returncode": result.returncode, "changes": changes}

@@ -19,11 +19,27 @@ def configure(*, backup_enabled: bool = False, backup_directory: str = "/var/tmp
 
 
 class PluginStateFile:
-    """JSON-backed state file with logged load/save primitives."""
+    """JSON-backed state file with desired/current envelope and mutation-model awareness.
 
-    def __init__(self, path: Path, logger: logging.Logger | None = None) -> None:
+    Two mutation models:
+      "immediate" — save_desired() auto-commits current = desired (host-style: apply on every mutation)
+      "deferred"  — save_desired() only writes desired; call commit() after a successful external apply
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        logger: logging.Logger | None = None,
+        *,
+        mutation_model: str = "deferred",
+    ) -> None:
+        if mutation_model not in ("immediate", "deferred"):
+            raise ValueError(f"mutation_model must be 'immediate' or 'deferred', got {mutation_model!r}")
         self._path = path
         self._log = logger or _log
+        self._mutation_model = mutation_model
+        self._desired: Any = None
+        self._current: Any = None
 
     @classmethod
     def from_config(
@@ -33,13 +49,81 @@ class PluginStateFile:
         key: str,
         default_filename: str,
         logger: logging.Logger | None = None,
+        *,
+        mutation_model: str = "deferred",
     ) -> "PluginStateFile":
         """Resolve plugin_dir/data/<config[key] or default_filename> and return a PluginStateFile."""
-        return cls(plugin_dir / "data" / config.get(key, default_filename), logger)
+        return cls(plugin_dir / "data" / config.get(key, default_filename), logger, mutation_model=mutation_model)
 
     @property
     def path(self) -> Path:
         return self._path
+
+    @property
+    def current_snapshot(self) -> Any:
+        """The last committed current_state snapshot, or None if never committed."""
+        return self._current
+
+    @property
+    def pending_changes(self) -> bool:
+        """True when desired state differs from the last committed current state."""
+        if self._desired is None:
+            return False
+        return self._desired != (self._current or self._desired)
+
+    # ── envelope API ────────────────────────────────────────────────────────────
+
+    def load_desired(self, default: Any = None) -> Any:
+        """Load desired_state from the on-disk envelope.
+
+        Also restores current_snapshot from current_state so pending_changes is
+        immediately accurate after load. Returns the desired_state value, or
+        *default* if the file is missing or has no desired_state key.
+        """
+        raw = self.load(default={})
+        self._current = raw.get("current_state")
+        desired = raw.get("desired_state", default)
+        self._desired = desired
+        return desired
+
+    def save_desired(self, snapshot: Any) -> bool:
+        """Persist *snapshot* as desired_state.
+
+        For 'immediate' model, also auto-commits current = snapshot so
+        pending_changes stays False after every mutation.
+        Returns True on success.
+        """
+        self._desired = snapshot
+        if self._mutation_model == "immediate":
+            self._current = snapshot
+        return self._flush()
+
+    def commit(self, snapshot: Any = None) -> bool:
+        """Set current_state to *snapshot* (defaults to current desired) and write to disk.
+
+        Call this after a successful external apply in deferred plugins.
+        Returns True on success.
+        """
+        self._current = snapshot if snapshot is not None else self._desired
+        return self._flush()
+
+    def save_and_commit(self, snapshot: Any) -> bool:
+        """Save *snapshot* as both desired_state and current_state in one disk write.
+
+        Use when importing live system state — desired and current should be identical.
+        Returns True on success.
+        """
+        self._desired = snapshot
+        self._current = snapshot
+        return self._flush()
+
+    def _flush(self) -> bool:
+        data: dict[str, Any] = {"desired_state": self._desired}
+        if self._current is not None:
+            data["current_state"] = self._current
+        return self.save(data)
+
+    # ── raw API (kept for backwards compatibility) ───────────────────────────────
 
     def load(self, default: Any = None) -> Any:
         """Return parsed JSON from the state file, or *default* if it doesn't exist yet."""
@@ -69,11 +153,10 @@ class PluginStateFile:
         backup_dir = Path(_backup_directory)
         if not backup_dir.exists():
             return []
-        files = sorted(
+        return sorted(
             backup_dir.glob(f"{self._path.stem}_*{self._path.suffix}"),
             reverse=True,
         )
-        return files
 
     def restore(self, backup: Path) -> bool:
         """Overwrite the live state file with *backup*. Returns True on success, False on error."""
