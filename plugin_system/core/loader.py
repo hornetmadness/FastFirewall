@@ -849,7 +849,7 @@ class PluginLoader:
             return brew_ops.packages, {"packages": packages}
 
         if system == "Linux":
-            if shutil.which("apt"):
+            if shutil.which("apt-get"):
                 return apt_ops.packages, {"packages": packages, "update": True, "_sudo": True}
             if shutil.which("dnf"):
                 return dnf_ops.packages, {"packages": packages, "_sudo": True}
