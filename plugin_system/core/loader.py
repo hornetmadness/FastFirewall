@@ -566,6 +566,25 @@ class PluginLoader:
         if disabled:
             self.logger.info("  Disabled: %s", ", ".join(sorted(disabled)))
 
+        # Build a full service_ports map across all successfully loaded plugins
+        # so subscribers (e.g. the firewall macro resolver) get a consistent
+        # snapshot of what actually loaded rather than having to reassemble it
+        # from per-plugin events that may have fired in an inconvenient order.
+        all_service_ports: dict[str, dict[str, list[int]]] = {}
+        for pid in loaded:
+            lp = self._plugins.get(pid)
+            if lp is not None and isinstance(lp.service_ports, dict):
+                for svc_name, proto_map in lp.service_ports.items():
+                    all_service_ports[svc_name] = {
+                        proto: [p for p in ports if p != -1]
+                        for proto, ports in proto_map.items()
+                    }
+        self._bus.emit(Event(
+            "plugins.all_loaded",
+            source="plugin_loader",
+            payload={"service_ports": all_service_ports, "loaded": loaded},
+        ))
+
         return loaded
 
     def load_plugin(self, path: str | Path) -> str:
@@ -748,6 +767,7 @@ class PluginLoader:
                 "plugin_id": plugin_id,
                 "version": meta["version"],
                 "services": svc_values,
+                "service_ports": service_ports if isinstance(service_ports, dict) else {},
             },
         ))
 

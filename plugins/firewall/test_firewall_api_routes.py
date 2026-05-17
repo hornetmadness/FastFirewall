@@ -17,7 +17,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from plugin_system.core.events import bus as global_bus
+from plugin_system.core.events import Event, bus as global_bus
 
 PLUGIN_PY = Path(__file__).parent / "plugin.py"
 
@@ -564,3 +564,202 @@ def test_delete_rule_emits_deleted_event(tmp_path):
         assert received[0].payload["rule_id"] == rule["id"]
     finally:
         global_bus.unsubscribe("firewall.rule.deleted", received.append)
+
+
+# ---------------------------------------------------------------------------
+# Macros
+# ---------------------------------------------------------------------------
+
+def test_create_rule_integer_port_still_accepted(client):
+    data = _create_rule(client, name="ssh", dst_port=22)
+    assert data["dst_port"] == 22
+
+
+def test_create_rule_macro_dst_port_stored_verbatim(client):
+    data = _create_rule(client, name="allow-dns", protocol="udp", dst_port="$service_port.dns.udp")
+    assert data["dst_port"] == "$service_port.dns.udp"
+
+
+def test_create_rule_macro_src_port_stored_verbatim(client):
+    data = _create_rule(client, name="allow-dns-src", protocol="udp", src_port="$service_port.dns.udp")
+    assert data["src_port"] == "$service_port.dns.udp"
+
+
+def test_create_rule_rejects_macro_without_segment(client):
+    r = client.post("/v1/firewall/rules", json={"name": "bad", "dst_port": "$service_port"})
+    assert r.status_code == 422
+
+
+def test_create_rule_rejects_malformed_macro(client):
+    r = client.post("/v1/firewall/rules", json={"name": "bad", "dst_port": "$"})
+    assert r.status_code == 422
+
+
+def test_update_rule_accepts_macro_port(client):
+    rule = _create_rule(client, name="upgrade-to-macro", dst_port=22)
+    data = client.put(f"/v1/firewall/rules/{rule['id']}", json={"dst_port": "$service_port.smtp.tcp"}).json()
+    assert data["dst_port"] == "$service_port.smtp.tcp"
+
+
+def test_update_rule_rejects_malformed_macro(client):
+    rule = _create_rule(client, name="bad-update")
+    r = client.put(f"/v1/firewall/rules/{rule['id']}", json={"dst_port": "$bad"})
+    assert r.status_code == 422
+
+
+def test_macro_resolved_to_port_in_policy():
+    mod = _load_module()
+    registry = {"service_port": {"dns": {"udp": [53]}}}
+    rule = mod.FirewallRule(name="allow-dns", action="accept", protocol="udp", dst_port="$service_port.dns.udp")
+    policy = mod._build_policy([rule], "test", "iptables", registry, logging.getLogger("test"))
+    term = next(t for t in policy["filters"][0]["terms"] if t["name"] == "allow-dns")
+    assert term["destination-port"] == ["DNS"]
+
+
+def test_macro_multi_port_all_appear_in_policy():
+    mod = _load_module()
+    registry = {"service_port": {"smtp": {"tcp": [25, 587, 465]}}}
+    rule = mod.FirewallRule(name="allow-smtp", action="accept", protocol="tcp", dst_port="$service_port.smtp.tcp")
+    policy = mod._build_policy([rule], "test", "iptables", registry, logging.getLogger("test"))
+    term = next(t for t in policy["filters"][0]["terms"] if t["name"] == "allow-smtp")
+    assert len(term["destination-port"]) == 3
+
+
+def test_macro_rule_skipped_when_registry_empty():
+    mod = _load_module()
+    rule = mod.FirewallRule(name="needs-dns", action="accept", dst_port="$service_port.dns.udp")
+    policy = mod._build_policy([rule], "test", "iptables", {}, logging.getLogger("test"))
+    term_names = [t["name"] for t in policy["filters"][0]["terms"]]
+    assert "needs-dns" not in term_names
+    assert "default-deny" in term_names
+
+
+def test_on_all_loaded_seeds_macro_registry(tmp_path):
+    inst, _ = _make_inst(tmp_path)
+    inst.setup()
+    event = Event("plugins.all_loaded", source="plugin_loader", payload={
+        "service_ports": {"dns": {"udp": [53], "tcp": [53]}, "dhcp": {"udp": [67]}},
+        "loaded": ["dnsmasq"],
+    })
+    inst.on_all_loaded(event)
+    assert inst._macro_registry == {
+        "service_port": {"dns": {"udp": [53], "tcp": [53]}, "dhcp": {"udp": [67]}}
+    }
+
+
+def test_on_plugin_loaded_merges_into_existing_registry(tmp_path):
+    inst, _ = _make_inst(tmp_path)
+    inst.setup()
+    inst._macro_registry = {"service_port": {"dns": {"udp": [53]}}}
+    event = Event("plugin.loaded", source="plugin_loader", payload={
+        "plugin_id": "smtp",
+        "version": "1.0",
+        "services": ["smtp"],
+        "service_ports": {"smtp": {"tcp": [25, 587, 465]}},
+    })
+    inst.on_plugin_loaded(event)
+    assert inst._macro_registry["service_port"]["smtp"] == {"tcp": [25, 587, 465]}
+    assert inst._macro_registry["service_port"]["dns"] == {"udp": [53]}
+
+
+def test_on_plugin_loaded_ignores_empty_service_ports(tmp_path):
+    inst, _ = _make_inst(tmp_path)
+    inst.setup()
+    inst._macro_registry = {"service_port": {"dns": {"udp": [53]}}}
+    event = Event("plugin.loaded", source="plugin_loader", payload={
+        "plugin_id": "firewall",
+        "version": "1.0",
+        "services": ["firewall"],
+        "service_ports": {},
+    })
+    inst.on_plugin_loaded(event)
+    assert inst._macro_registry == {"service_port": {"dns": {"udp": [53]}}}
+
+
+def test_status_includes_macros(tmp_path):
+    inst, _ = _make_inst(tmp_path)
+    inst.setup()
+    inst._macro_registry = {"service_port": {"dns": {"udp": [53]}, "dhcp": {"udp": [67]}}}
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    status = TestClient(app).get("/v1/firewall/status").json()
+    assert set(status["macros"]["service_port"]) == {"dns", "dhcp"}
+
+
+def test_macro_rule_survives_reload(tmp_path):
+    rule = _create_rule(TestClient(_make_app(tmp_path)), name="persistent-macro", dst_port="$service_port.dns.udp")
+    r = TestClient(_make_app(tmp_path)).get(f"/v1/firewall/rules/{rule['id']}")
+    assert r.status_code == 200
+    assert r.json()["dst_port"] == "$service_port.dns.udp"
+
+
+# ---------------------------------------------------------------------------
+# Interface alias macros
+# ---------------------------------------------------------------------------
+
+def test_create_rule_uppercase_alias_macro_accepted(client):
+    data = _create_rule(client, name="alias-rule", dst_port="$service_port.dns.udp")
+    assert data["dst_port"] == "$service_port.dns.udp"
+
+
+def test_interface_macro_syntax_accepted(client):
+    # $interface.LAN1 is valid macro syntax (uppercase segment allowed)
+    from plugin_system.core.macros import is_macro, validate_macro_syntax
+    assert is_macro("$interface.LAN1")
+    assert is_macro("$interface.WAN")
+    assert validate_macro_syntax("$interface.LAN1") == "$interface.LAN1"
+
+
+def test_on_networking_aliases_updated_populates_registry(tmp_path):
+    inst, _ = _make_inst(tmp_path)
+    inst.setup()
+    event = Event("networking.aliases_updated", source="networking", payload={
+        "aliases": {"LAN1": "eth0", "WAN": "eth1"},
+    })
+    inst.on_networking_aliases_updated(event)
+    assert inst._macro_registry.get("interface") == {"LAN1": "eth0", "WAN": "eth1"}
+
+
+def test_on_networking_aliases_updated_replaces_existing(tmp_path):
+    inst, _ = _make_inst(tmp_path)
+    inst.setup()
+    inst._macro_registry["interface"] = {"LAN1": "eth0"}
+    event = Event("networking.aliases_updated", source="networking", payload={
+        "aliases": {"WAN": "eth1"},
+    })
+    inst.on_networking_aliases_updated(event)
+    assert inst._macro_registry.get("interface") == {"WAN": "eth1"}
+
+
+def test_on_networking_aliases_updated_empty_clears_registry(tmp_path):
+    inst, _ = _make_inst(tmp_path)
+    inst.setup()
+    inst._macro_registry["interface"] = {"LAN1": "eth0"}
+    event = Event("networking.aliases_updated", source="networking", payload={"aliases": {}})
+    inst.on_networking_aliases_updated(event)
+    assert inst._macro_registry.get("interface") == {}
+
+
+def test_status_includes_interface_macro_namespace(tmp_path):
+    inst, _ = _make_inst(tmp_path)
+    inst.setup()
+    inst._macro_registry["interface"] = {"LAN1": "eth0", "WAN": "eth1"}
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    status = TestClient(app).get("/v1/firewall/status").json()
+    assert "interface" in status["macros"]
+    assert set(status["macros"]["interface"]) == {"LAN1", "WAN"}
+
+
+def test_interface_macro_resolve_string():
+    from plugin_system.core.macros import resolve_string_macro
+    registry = {"interface": {"LAN1": "eth0", "WAN": "eth1"}}
+    assert resolve_string_macro("$interface.LAN1", registry) == "eth0"
+    assert resolve_string_macro("$interface.WAN", registry) == "eth1"
+    assert resolve_string_macro("$interface.MISSING", registry) is None
+    assert resolve_string_macro("$service_port.dns.udp", registry) is None
+
+
+def test_interface_macro_unknown_namespace_returns_none():
+    from plugin_system.core.macros import resolve_string_macro
+    assert resolve_string_macro("$unknown.FOO", {}) is None

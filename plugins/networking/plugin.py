@@ -14,6 +14,7 @@ Events emitted:
   networking.route.removed        – payload: {route_id, to}
   networking.sysctl.changed       – payload: {key, value}
   networking.sysctl.removed       – payload: {key}
+  networking.aliases_updated      – payload: {aliases: {alias: iface, ...}}
   networking.applied              – payload: {success, returncode}
 """
 from __future__ import annotations
@@ -108,6 +109,23 @@ class ImportRoutesRequest(BaseModel):
     overwrite: bool = False                    # if True, overwrite already-managed routes
 
 
+class AliasCreate(BaseModel):
+    interface: str  # OS interface name this alias maps to (e.g. "eth0")
+
+    @field_validator("interface")
+    @classmethod
+    def validate_interface(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("interface must not be empty")
+        if not re.match(r'^[a-zA-Z][a-zA-Z0-9_:.@-]*$', v):
+            raise ValueError(f"{v!r} is not a valid interface name")
+        return v
+
+
+_ALIAS_NAME_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]*$')
+
+
 def _validate_host(value: str) -> str:
     value = value.strip()
     if not value:
@@ -180,6 +198,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
         self._interfaces: dict[str, dict[str, Any]] = {}
         self._routes: dict[str, dict[str, Any]] = {}   # {uuid: route_dict}
         self._sysctl: dict[str, str] = {}
+        self._aliases: dict[str, str] = {}  # {alias_name: interface_name}
         if not self.config.get("ignore_state_on_boot", False):
             self._load_state()
             if not any([self._interfaces, self._routes, self._sysctl]):
@@ -187,9 +206,15 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
             else:
                 self._apply_state()
         self.logger.info(
-            "Networking plugin loaded: %d interface(s), %d route(s), %d sysctl(s)",
-            len(self._interfaces), len(self._routes), len(self._sysctl),
+            "Networking plugin loaded: %d interface(s), %d route(s), %d sysctl(s), %d alias(es)",
+            len(self._interfaces), len(self._routes), len(self._sysctl), len(self._aliases),
         )
+        if self._aliases:
+            bus.emit(Event(
+                name="networking.aliases_updated",
+                source=self.plugin_id,
+                payload={"aliases": dict(self._aliases)},
+            ))
         self._register_routes()
 
     def teardown(self) -> None:
@@ -203,6 +228,13 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
         self._interfaces = desired.get("interfaces", {})
         self._routes = desired.get("routes", {})
         self._sysctl = desired.get("sysctl", {})
+        self._aliases = desired.get("aliases", {})
+        self._ensure_default_aliases()
+
+    def _ensure_default_aliases(self) -> None:
+        """Add identity alias (name → name) for every managed interface not yet in _aliases."""
+        for name in self._interfaces:
+            self._aliases.setdefault(name, name)
 
     def _save_state(self) -> None:
         self._state_file.save_desired(self._desired_snapshot())
@@ -212,6 +244,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
             "interfaces": self._interfaces,
             "routes": self._routes,
             "sysctl": self._sysctl,
+            "aliases": self._aliases,
         }))
 
     def _apply_state(self) -> None:
@@ -231,7 +264,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
                 except OSError:
                     pass
             if result.returncode == 0:
-                self._state_file.commit(self._desired_snapshot())
                 self.logger.info("Re-applied networking config on boot")
             else:
                 self.logger.warning("Boot-time networking apply returned non-zero: %s", result.stderr.strip())
@@ -270,10 +302,11 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
             self._routes[route_id] = route
 
         if self._interfaces or self._routes:
+            self._ensure_default_aliases()
             self._state_file.save_and_commit(self._desired_snapshot())
             self.logger.info(
-                "Boot-time import: %d interface(s), %d route(s)",
-                len(self._interfaces), len(self._routes),
+                "Boot-time import: %d interface(s), %d route(s), %d alias(es)",
+                len(self._interfaces), len(self._routes), len(self._aliases),
             )
 
     # ── ifstate YAML builder ───────────────────────────────────────────
@@ -352,6 +385,11 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
         add("/check",                    self._check,                  methods=["POST"],   summary="Dry-run via ifstatecli check")
         add("/discard",                  self._discard,                methods=["POST"],   summary="Discard pending changes and restore last applied state")
 
+        # interface aliases ($interface.NAME macros)
+        add("/config/aliases",           self._list_aliases,           methods=["GET"],    summary="List interface aliases")
+        add("/config/aliases/{name}",    self._set_alias,              methods=["PUT"],    summary="Set an interface alias", status_code=200)
+        add("/config/aliases/{name}",    self._delete_alias,           methods=["DELETE"], summary="Delete an interface alias")
+
         # diagnostics
         add("/ping",                     self._ping,                   methods=["POST"],   summary="Ping a host")
         add("/mtr",                      self._mtr,                    methods=["POST"],   summary="Run mtr traceroute to a host")
@@ -366,6 +404,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
                 "interfaces": len(self._interfaces),
                 "routes": len(self._routes),
                 "sysctl": len(self._sysctl),
+                "aliases": len(self._aliases),
             },
             "pending_changes": self._state_file.pending_changes,
             "state_file": str(self._state_file.path),
@@ -426,6 +465,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
             updates["link"] = {k: v for k, v in updates["link"].items() if v is not None}
         existing.update(updates)
         self._interfaces[name] = existing
+        self._aliases.setdefault(name, name)
         self._save_state()
         bus.emit(Event(
             name="networking.interface.configured",
@@ -476,6 +516,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
             if iface_data.get("link"):
                 entry["link"] = iface_data["link"]
             self._interfaces[name] = entry
+            self._aliases.setdefault(name, name)
             imported.append(name)
             bus.emit(Event(
                 name="networking.interface.configured",
@@ -622,8 +663,8 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
                 self.logger.info("[debug] apply config: %s", tmp)
                 self.logger.info("[debug] cmd: %s", cmd)
             result = self._run_ifstate("-c", tmp, "apply")
-            output = (result.stdout + result.stderr).strip()
-            errors = [ln for ln in output.splitlines() if "fail" in ln.lower() or "error" in ln.lower()]
+            output = (result.stdout + result.stderr).strip().splitlines()
+            errors = [ln for ln in output if "fail" in ln.lower() or "error" in ln.lower()]
             if debug:
                 self.logger.info("[debug] returncode=%d", result.returncode)
                 self.logger.info("[debug] output=%r", output)
@@ -635,7 +676,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
                 source=self.plugin_id,
                 payload={"success": success, "returncode": result.returncode},
             ))
-            resp: dict[str, Any] = {"success": success, "returncode": result.returncode, "changes": changes}
+            resp: dict[str, Any] = {"success": success, "returncode": result.returncode, "changes": changes, "output": output}
             if errors:
                 resp["errors"] = errors
             if debug:
@@ -659,6 +700,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
         self._interfaces = dict(current.get("interfaces", {}))
         self._routes = dict(current.get("routes", {}))
         self._sysctl = dict(current.get("sysctl", {}))
+        self._aliases = dict(current.get("aliases", {}))
         self._save_state()
         return {"discarded": True, "changes": changes}
 
@@ -684,6 +726,39 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
                     os.unlink(tmp)
                 except OSError:
                     pass
+
+    # ── interface aliases ──────────────────────────────────────────────────
+
+    def _list_aliases(self) -> dict:
+        return {"aliases": dict(self._aliases), "count": len(self._aliases)}
+
+    def _set_alias(self, name: str, body: AliasCreate) -> dict:
+        if not _ALIAS_NAME_RE.match(name):
+            raise HTTPException(
+                422,
+                f"Alias name {name!r} must start with a letter and contain only "
+                "letters, digits, and underscores",
+            )
+        self._aliases[name] = body.interface
+        self._save_state()
+        bus.emit(Event(
+            name="networking.aliases_updated",
+            source=self.plugin_id,
+            payload={"aliases": dict(self._aliases)},
+        ))
+        return {"name": name, "interface": body.interface}
+
+    def _delete_alias(self, name: str) -> dict:
+        if name not in self._aliases:
+            raise HTTPException(404, f"Alias {name!r} not found")
+        del self._aliases[name]
+        self._save_state()
+        bus.emit(Event(
+            name="networking.aliases_updated",
+            source=self.plugin_id,
+            payload={"aliases": dict(self._aliases)},
+        ))
+        return {"deleted": name}
 
     # ── diagnostics ────────────────────────────────────────────────────────
 
