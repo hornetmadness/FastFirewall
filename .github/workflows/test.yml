@@ -9,7 +9,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read
+      checks: write  # Necessary for test-reporter to create check runs
+      pull-requests: write # Required if you want to add comments or annotations
+    
     steps:
       - uses: actions/checkout@v4
 
