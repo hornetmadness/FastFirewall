@@ -90,6 +90,7 @@ def test_get_dns_defaults(client):
     assert r.status_code == 200
     data = r.json()
     assert data["port"] == 53
+    assert data["interface"] == "*"
     assert "8.8.8.8" in data["upstream"]
     assert data["rebind_protection"] is True
 
@@ -464,6 +465,18 @@ def test_config_contains_dns_settings(plugin):
     assert "log-queries" in cfg
 
 
+def test_config_interface_wildcard_emitted(plugin):
+    plugin._dns["interface"] = "*"
+    cfg = plugin._build_config()
+    assert "interface=*" in cfg
+
+
+def test_config_interface_specific_emitted(plugin):
+    plugin._dns["interface"] = "eth0"
+    cfg = plugin._build_config()
+    assert "interface=eth0" in cfg
+
+
 def test_config_contains_a_record(plugin):
     plugin._records["r1"] = {"type": "A", "name": "host.local", "value": "10.0.0.1"}
     cfg = plugin._build_config()
@@ -513,9 +526,11 @@ def test_get_config_endpoint(client):
     r = client.get("/v1/dnsmasq/config")
     assert r.status_code == 200
     data = r.json()
-    assert "config" in data
-    assert "blocklist_config" in data
-    assert "port=53" in data["config"]
+    assert data["dns"]["port"] == 53
+    assert data["dns"]["interface"] == "*"
+    assert "records" in data
+    assert "dhcp" in data
+    assert "blocklists" in data
 
 
 # ── apply ──────────────────────────────────────────────────────────────────────
@@ -598,6 +613,38 @@ def test_discard_reverts_to_applied_state(plugin):
     r = client.post("/v1/dnsmasq/discard")
     assert r.status_code == 200
     assert "8.8.8.8" in plugin._dns["upstream"]
+
+
+# ── boot-time apply ────────────────────────────────────────────────────────────
+
+def test_apply_state_restarts_when_on_disk_config_differs(tmp_path):
+    p = _make_plugin(tmp_path)
+    p._run_dnsmasq_test = MagicMock(return_value=_ok())
+    p._write_file_sudo = MagicMock()
+    p._run_systemctl = MagicMock(return_value=_ok(stdout=""))
+    # on-disk config doesn't exist → differs from desired → should restart
+    p._read_on_disk = MagicMock(return_value=None)
+    p.setup()
+    p._run_systemctl.assert_called_once_with("restart")
+
+
+def test_apply_state_skipped_when_on_disk_config_matches(tmp_path):
+    p = _make_plugin(tmp_path)
+    p._run_dnsmasq_test = MagicMock(return_value=_ok())
+    p._write_file_sudo = MagicMock()
+    p._run_systemctl = MagicMock(return_value=_ok(stdout=""))
+    # Simulate on-disk config matching desired exactly
+    p._read_on_disk = MagicMock(side_effect=lambda path: p._build_config() if "ff-managed" in path else p._build_blocklist_config())
+    p.setup()
+    p._run_systemctl.assert_not_called()
+
+
+def test_ignore_state_on_boot_skips_apply(tmp_path):
+    p = _make_plugin(tmp_path, config={"ignore_state_on_boot": True})
+    p._run_systemctl = MagicMock()
+    p._read_on_disk = MagicMock(return_value=None)
+    p.setup()
+    p._run_systemctl.assert_not_called()
 
 
 # ── state persistence across restarts ─────────────────────────────────────────

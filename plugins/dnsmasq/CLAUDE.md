@@ -33,7 +33,7 @@ Additional routes: `GET /status`, `GET /dhcp/leases`, `GET /config`, `POST /appl
 ```json
 {
   "desired_state": {
-    "dns": { "port": 53, "listen_addresses": ["0.0.0.0"], "upstream": ["8.8.8.8", "1.1.1.1"], ... },
+    "dns": { "port": 53, "listen_addresses": ["0.0.0.0"], "interface": "*", "upstream": ["8.8.8.8", "1.1.1.1"], ... },
     "records": {},
     "dhcp": { "enabled": false, "authoritative": true, "options": {} },
     "dhcp_ranges": {},
@@ -48,7 +48,7 @@ Additional routes: `GET /status`, `GET /dhcp/leases`, `GET /config`, `POST /appl
 }
 ```
 
-`desired_state` holds what FF should enforce. `current_state` is committed only after a successful `POST /apply`. `GET /status` reports `pending_changes: self._state_file.pending_changes`.
+`desired_state` holds what FF should enforce. `current_state` is committed only after a successful `POST /apply` or boot-time apply. `GET /status` reports `pending_changes: self._state_file.pending_changes`.
 
 ## In-memory state
 
@@ -71,13 +71,17 @@ Ten dicts/lists are kept in memory, populated from the state file by `_load_stat
 
 **`_load_state()`** — calls `self._state_file.load_desired(default={})`, merges with per-subsystem defaults (`_default_dns()`, etc.), then calls `_save_state()` if no prior state exists on disk so that `_desired` is immediately accurate.
 
-**`_save_state()`** — calls `self._state_file.save_desired(self._desired_snapshot())`. Does **not** update `current_state` — that only happens via `commit()` in `_apply()`.
+**`_apply_state()`** — called on every boot (unless `ignore_state_on_boot` is true). Reads the on-disk config files via `_read_on_disk()` and compares them to the generated desired config. If both files match exactly, logs and returns without touching the system. If either differs (or is missing), validates with `dnsmasq --test`, writes both config files via `_write_file_sudo`, then restarts dnsmasq via `systemctl`. Calls `commit()` on success; logs a warning and returns on any failure (does not raise).
 
-**`_desired_snapshot()`** — returns `json.loads(json.dumps({dns, records, dhcp, ...}))`: a normalized deep copy used as the argument to `save_desired()` and `commit()`.
+**`_read_on_disk(path)`** — reads a system config file and returns its contents as a string, or `None` if the file is missing or unreadable (no exception raised).
 
-**`_build_config()`** — serializes all in-memory state into a dnsmasq config string written to `config_path`. Covers DNS (server/local/address/aaaa/cname/txt-record/mx-host/srv-host/ptr-record), DHCP (dhcp-range/dhcp-host/dhcp-option), TFTP (enable-tftp/tftp-root/tftp-secure/tftp-no-fail), PXE (pxe-service/pxe-prompt), and mDNS (enable-ra/interface).
+**`_save_state()`** — calls `self._state_file.save_desired(self._desired_snapshot())`. Does **not** update `current_state` — that only happens via `commit()`.
 
-**`_build_blocklist_config()`** — iterates `_blocklists`, emitting one `address=/{domain}/#` line per blocked domain into `blocklist_path`.
+**`_desired_snapshot()`** — returns `json.loads(json.dumps({dns, records, dhcp, ...}))`: a normalized deep copy used as the argument to `save_desired()` and `commit()`. Also the response body of `GET /config`.
+
+**`_build_config()`** — serializes all in-memory state into a dnsmasq config string. DNS section emits `interface=` for every non-empty value (including `"*"`), `listen-address=`, upstream `server=`, per-domain `server=/domain/ns`, `local=/domain/`, `cache-size=`, `dnssec`, `log-queries`, `domain=`, `local-ttl=`, `neg-ttl=`, `strict-order`, `stop-dns-rebind`, `rebind-localhost-ok`. Record directives: `address=/name/ip`, `aaaa=/name/ip`, `cname=`, `txt-record=`, `mx-host=`, `srv-host=`, `ptr-record=`. DHCP section (when enabled): `dhcp-authoritative`, `dhcp-leasefile=`, `dhcp-range=`, `dhcp-host=`, `dhcp-option=`. TFTP: `enable-tftp`, `tftp-root=`, `tftp-secure`, `tftp-no-fail`. PXE: `pxe-service=`, `pxe-prompt=`. mDNS: `enable-ra`, `interface=`.
+
+**`_build_blocklist_config()`** — iterates `_blocklists`, emitting one `address=/{domain}/#` line per blocked domain.
 
 **`_fetch_blocklist_domains(url, fmt)`** — downloads a blocklist via `urllib.request.urlopen`. Supports two formats:
 - `"hosts"` — parses lines like `0.0.0.0 domain.com` or `127.0.0.1 domain.com`; skips `localhost`, `broadcasthost`, and `0.0.0.0` itself
@@ -85,11 +89,21 @@ Ten dicts/lists are kept in memory, populated from the state file by `_load_stat
 
 Deduplicates while preserving order via `dict.fromkeys`.
 
+## DNS `interface` field
+
+`_default_dns()` sets `"interface": "*"`. The value is always emitted as `interface=<value>` in the generated config — `"*"` is emitted literally as `interface=*`. Set to a specific interface name (e.g. `"eth0"`) to restrict dnsmasq to that interface; clear it (empty string) to omit the directive.
+
+## `GET /config`
+
+Returns `_desired_snapshot()` as a JSON object — the full structured desired state across all ten subsections. This is the canonical view of what will be written to disk on the next `POST /apply`.
+
 ## `POST /apply` flow
 
+When `debug: true` is set in plugin config, the temp file path, `dnsmasq --test` output, and `systemctl` output are logged and included in the response under a `"debug"` key. The temp file is also retained on disk for inspection.
+
 1. `_desired_snapshot()` captured
-2. `_build_config()` written to a temp file
-3. `_run_dnsmasq_test(tmp)` — runs `sudo dnsmasq --test --conf-file=<tmp>` (returncode non-zero → return failure immediately, no file written)
+2. `_build_config()` + `_build_blocklist_config()` written to a temp file
+3. `_run_dnsmasq_test(tmp)` — `sudo dnsmasq --test --conf-file=<tmp>` (non-zero → return failure, no file written)
 4. `_write_file_sudo(config_path, content)` — `sudo tee <path>` for main config
 5. `_write_file_sudo(blocklist_path, content)` — `sudo tee <path>` for blocklist
 6. `_run_systemctl("restart")` — `sudo systemctl restart dnsmasq`
@@ -155,7 +169,7 @@ When enabled, the plugin emits `enable-ra` plus one `interface=` line per entry 
 | `_run_systemctl(action)` | `sudo systemctl <action> dnsmasq` |
 | `_write_file_sudo(path, content)` | `sudo tee <path>` (stdin = content) |
 
-In tests, replace these with `MagicMock` on the instantiated plugin before calling any route handler.
+In tests, replace these with `MagicMock` on the instantiated plugin before calling any route handler. Also mock `_read_on_disk` to control what the boot-time diff check sees.
 
 ## Config options (`plugin.yaml`)
 
@@ -165,6 +179,8 @@ In tests, replace these with `MagicMock` on the instantiated plugin before calli
 | `config_path` | `/etc/dnsmasq.d/ff-managed.conf` | main dnsmasq config written on apply |
 | `blocklist_path` | `/etc/dnsmasq.d/ff-blocklist.conf` | blocklist config written on apply |
 | `lease_file` | `/var/lib/dnsmasq/dnsmasq.leases` | path read by `GET /dhcp/leases` |
+| `ignore_state_on_boot` | `false` | skip `_apply_state()` on startup |
+| `debug` | `false` | log temp config path and dnsmasq/systemctl output; include `debug` key in `POST /apply` response |
 
 ## Events emitted
 
@@ -197,4 +213,5 @@ Key mock targets:
 - `plugin._run_dnsmasq_test` — controls `dnsmasq --test` exit code
 - `plugin._write_file_sudo` — prevents actual file writes
 - `plugin._run_systemctl` — controls `systemctl restart` exit code
+- `plugin._read_on_disk` — controls what the boot-time diff sees (return `None` to simulate missing file, or return the exact desired config string to simulate no change needed)
 - `plugin._fetch_blocklist_domains` — returns a list of domains without network I/O

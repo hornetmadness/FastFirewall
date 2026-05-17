@@ -8,14 +8,14 @@ description: >
 author: hornetmadness@gmail.com
 
 enabled: true
-plugin_requirements: ["host", "networking"]
+plugin_requirements: ["networking"]
 py_requirements:
   - pyyaml
 os_requirements:
   - dnsmasq
 
 # set skip_host_os_port_check: true if dnsmasq is already bound on this host
-skip_host_os_port_check: false
+skip_host_os_port_check: true
 
 service_ports:
   dns:
@@ -51,3 +51,5 @@ config:
   config_path: /etc/dnsmasq.d/ff-managed.conf
   blocklist_path: /etc/dnsmasq.d/ff-blocklist.conf
   lease_file: /var/lib/dnsmasq/dnsmasq.leases
+  ignore_state_on_boot: false
+  debug: false

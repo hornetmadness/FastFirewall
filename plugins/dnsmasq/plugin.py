@@ -32,6 +32,7 @@ def _default_dns() -> dict[str, Any]:
     return {
         "port": 53,
         "listen_addresses": ["0.0.0.0"],
+        "interface": "*",
         "upstream": ["8.8.8.8", "1.1.1.1"],
         "cache_size": 1000,
         "no_resolv": False,
@@ -72,6 +73,7 @@ _MAC_RE = re.compile(r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$")
 class DnsUpdate(BaseModel):
     port: Optional[int] = Field(default=None, ge=1, le=65535)
     listen_addresses: Optional[list[str]] = None
+    interface: Optional[str] = None
     upstream: Optional[list[str]] = None
     cache_size: Optional[int] = Field(default=None, ge=0)
     no_resolv: Optional[bool] = None
@@ -208,6 +210,8 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin):
         self._mdns: dict[str, Any] = {}
         self._blocklists: dict[str, dict[str, Any]] = {}
         self._load_state()
+        if not self.config.get("ignore_state_on_boot", False):
+            self._apply_state()
         self._register_routes()
         self.logger.info(
             "DNSMasq plugin loaded: %d DNS record(s), %d DHCP range(s), %d blocklist(s)",
@@ -254,15 +258,70 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin):
             "blocklists": self._blocklists,
         }))
 
+    def _read_on_disk(self, path: str) -> Optional[str]:
+        """Return the contents of a system config file, or None if unreadable."""
+        try:
+            with open(path) as fh:
+                return fh.read()
+        except (FileNotFoundError, PermissionError):
+            return None
+
+    def _apply_state(self) -> None:
+        """On boot, write desired config and restart dnsmasq if on-disk config differs."""
+        config_path = self.config.get("config_path", "/etc/dnsmasq.d/ff-managed.conf")
+        blocklist_path = self.config.get("blocklist_path", "/etc/dnsmasq.d/ff-blocklist.conf")
+        config_content = self._build_config()
+        blocklist_content = self._build_blocklist_config()
+
+        if (self._read_on_disk(config_path) == config_content
+                and self._read_on_disk(blocklist_path) == blocklist_content):
+            self.logger.info("Boot-time config check: on-disk config matches desired, skipping restart")
+            return
+
+        tmp_conf = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".conf", delete=False) as fh:
+                fh.write(config_content)
+                tmp_conf = fh.name
+            test_result = self._run_dnsmasq_test(tmp_conf)
+            if test_result.returncode != 0:
+                self.logger.warning(
+                    "Boot-time config validation failed: %s",
+                    (test_result.stdout + test_result.stderr).strip(),
+                )
+                return
+            self._write_file_sudo(config_path, config_content)
+            self._write_file_sudo(blocklist_path, blocklist_content)
+            result = self._run_systemctl("restart")
+            if result.returncode == 0:
+                self._state_file.commit(self._desired_snapshot())
+                self.logger.info("Boot-time config updated and dnsmasq restarted")
+            else:
+                self.logger.warning(
+                    "Boot-time dnsmasq restart failed: %s",
+                    (result.stdout + result.stderr).strip(),
+                )
+        except Exception as exc:
+            self.logger.warning("Could not re-apply dnsmasq config on boot: %s", exc)
+        finally:
+            if tmp_conf:
+                try:
+                    os.unlink(tmp_conf)
+                except OSError:
+                    pass
+
     # ── config builders ────────────────────────────────────────────────
 
     def _build_config(self) -> str:
         lines: list[str] = []
         dns = self._dns
 
-        lines.append(f"port={dns.get('port', 53)}")
+        lines.append(f"port={dns.get('port', self.config.get('service_ports', {}).get('dns', {}).get('udp', [53])[0])}")
         for addr in dns.get("listen_addresses") or ["0.0.0.0"]:
             lines.append(f"listen-address={addr}")
+        iface = dns.get("interface")
+        if iface:
+            lines.append(f"interface={iface}")
         if dns.get("no_resolv"):
             lines.append("no-resolv")
         for upstream in dns.get("upstream") or []:
@@ -746,14 +805,12 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin):
     # ── config view ────────────────────────────────────────────────────
 
     def _get_config(self) -> dict[str, Any]:
-        return {
-            "config": self._build_config(),
-            "blocklist_config": self._build_blocklist_config(),
-        }
+        return self._desired_snapshot()
 
     # ── apply / check / discard ────────────────────────────────────────
 
     def _apply(self) -> dict[str, Any]:
+        debug: bool = bool(self.config.get("debug", False))
         desired = self._desired_snapshot()
         config_content = self._build_config()
         blocklist_content = self._build_blocklist_config()
@@ -762,12 +819,17 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin):
             with tempfile.NamedTemporaryFile(mode="w", suffix=".conf", delete=False) as fh:
                 fh.write(config_content)
                 tmp_conf = fh.name
+            if debug:
+                self.logger.info("[debug] apply config: %s", tmp_conf)
             test_result = self._run_dnsmasq_test(tmp_conf)
+            test_output = (test_result.stdout + test_result.stderr).strip()
+            if debug:
+                self.logger.info("[debug] dnsmasq --test returncode=%d output=%r", test_result.returncode, test_output)
             if test_result.returncode != 0:
                 return {
                     "success": False,
                     "error": "Config validation failed",
-                    "details": (test_result.stdout + test_result.stderr).strip(),
+                    "details": test_output,
                 }
             config_path = self.config.get("config_path", "/etc/dnsmasq.d/ff-managed.conf")
             blocklist_path = self.config.get("blocklist_path", "/etc/dnsmasq.d/ff-blocklist.conf")
@@ -777,24 +839,33 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin):
             except RuntimeError as exc:
                 return {"success": False, "error": str(exc)}
             restart_result = self._run_systemctl("restart")
+            output = (restart_result.stdout + restart_result.stderr).strip()
+            if debug:
+                self.logger.info("[debug] systemctl restart returncode=%d output=%r", restart_result.returncode, output)
             success = restart_result.returncode == 0
             if success:
                 self._state_file.commit(desired)
             bus.emit(Event("dnsmasq.applied", source=self.plugin_id,
                            payload={"success": success, "returncode": restart_result.returncode}))
-            return {
+            resp: dict[str, Any] = {
                 "success": success,
                 "returncode": restart_result.returncode,
                 "config_path": config_path,
                 "blocklist_path": blocklist_path,
-                "output": (restart_result.stdout + restart_result.stderr).strip() or None,
+                "output": output or None,
             }
+            if debug:
+                resp["debug"] = {"config_file": tmp_conf, "test_output": test_output}
+            return resp
         finally:
             if tmp_conf:
-                try:
-                    os.unlink(tmp_conf)
-                except OSError:
-                    pass
+                if debug:
+                    self.logger.info("[debug] temp config retained at: %s", tmp_conf)
+                else:
+                    try:
+                        os.unlink(tmp_conf)
+                    except OSError:
+                        pass
 
     def _check(self) -> dict[str, Any]:
         tmp_conf = None
