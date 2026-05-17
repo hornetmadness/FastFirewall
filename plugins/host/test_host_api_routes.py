@@ -202,7 +202,8 @@ def test_list_services_shows_added_entry(client):
     assert services["nginx"]["ff_managed"] is True
 
 
-def test_delete_service_removes_entry(client):
+def test_delete_service_removes_entry(client, plugin):
+    plugin._read_system_services = MagicMock(return_value={})
     client.put("/v1/host/services/nginx", json={"running": True, "enabled": True})
     r = client.delete("/v1/host/services/nginx")
     assert r.status_code == 200
@@ -581,12 +582,14 @@ def test_state_persists_across_plugin_restart(tmp_path):
 
 def test_deleted_entries_absent_after_restart(tmp_path):
     p1 = _make_plugin(tmp_path)
+    p1._read_system_services = MagicMock(return_value={})
     c1 = _make_client(p1)
     c1.put("/v1/host/services/nginx", json={"running": True, "enabled": True})
     c1.delete("/v1/host/services/nginx")
     p1.teardown()
 
     p2 = _make_plugin(tmp_path)
+    p2._read_system_services = MagicMock(return_value={})
     c2 = _make_client(p2)
     assert "nginx" not in c2.get("/v1/host/services").json()["services"]
 
@@ -864,10 +867,11 @@ def test_refresh_cache_skipped_when_fresh():
 
 
 def test_refresh_cache_runs_when_stale():
+    import time
     pm = _load_pkg_manager_module()
     runner = MagicMock()
     mgr = pm.PackageManager(runner, "apt", cache_ttl=300)
-    mgr._cache_refreshed_at = 0.0  # epoch — always stale
+    mgr._cache_refreshed_at = time.monotonic() - 301  # definitely past the 300s TTL
     mgr.refresh_cache()
     runner.assert_called_once()
 

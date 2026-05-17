@@ -215,7 +215,8 @@ def test_service_ports_dict_stored_on_loaded_plugin(tmp_path, loader):
         class HasPorts(PluginBase):
             services = [Service.DNS]
     """))
-    loader.load_plugin(d)
+    with patch.object(loader, "_get_os_listening_ports", return_value=set()):
+        loader.load_plugin(d)
     sp = loader.plugins["has_ports"].service_ports
     assert sp == {"dns": {"tcp": [8080, 443], "udp": [53]}}
 
@@ -398,7 +399,8 @@ def test_service_registered_after_load(tmp_path, bus):
         class DNSPlugin(PluginBase):
             services = [Service.DNS]
     """)
-    loader.load_plugin(tmp_path / "dns_plugin")
+    with patch.object(loader, "_get_os_listening_ports", return_value=set()):
+        loader.load_plugin(tmp_path / "dns_plugin")
     assert loader.service_registry[Service.DNS] == "dns_plugin"
 
 
@@ -416,9 +418,10 @@ def test_service_conflict_raises(tmp_path, bus):
         class PluginB(PluginBase):
             services = [Service.DNS]
     """)
-    loader.load_plugin(tmp_path / "plugin_a")
-    with pytest.raises(PluginError, match="already owned"):
-        loader.load_plugin(tmp_path / "plugin_b")
+    with patch.object(loader, "_get_os_listening_ports", return_value=set()):
+        loader.load_plugin(tmp_path / "plugin_a")
+        with pytest.raises(PluginError, match="already owned"):
+            loader.load_plugin(tmp_path / "plugin_b")
 
 
 def test_service_registry_snapshot(tmp_path, bus):
@@ -556,9 +559,10 @@ def test_unload_releases_service_for_reuse(tmp_path, bus):
         class SvcB(PluginBase):
             services = [Service.DNS]
     """)
-    loader.load_plugin(tmp_path / "svc_a")
-    loader.unload_plugin("svc_a")
-    loader.load_plugin(tmp_path / "svc_b")
+    with patch.object(loader, "_get_os_listening_ports", return_value=set()):
+        loader.load_plugin(tmp_path / "svc_a")
+        loader.unload_plugin("svc_a")
+        loader.load_plugin(tmp_path / "svc_b")
     assert "svc_b" in loader.plugins
 
 
