@@ -21,15 +21,22 @@ import os
 import subprocess
 import tempfile
 import uuid
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
 import yaml
 from fastapi import HTTPException
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service, on
 from plugin_system.core.events import Event, bus
+from plugin_system.core.macros import (
+    is_macro,
+    merge_interface_aliases,
+    merge_service_ports,
+    resolve_macro,
+    validate_macro_syntax,
+)
 
 
 # ── aerleon constants ──────────────────────────────────────────────────────────
@@ -55,6 +62,12 @@ _PORT_TOKENS: dict[int, str] = {
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
 
+def _validate_port_field(v: object) -> object:
+    if isinstance(v, str):
+        validate_macro_syntax(v)
+    return v
+
+
 class FirewallRule(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
@@ -62,11 +75,16 @@ class FirewallRule(BaseModel):
     protocol: Optional[Literal["tcp", "udp", "icmp", "esp", "ah", "any"]] = None
     src_address: str = "any"
     dst_address: str = "any"
-    src_port: Optional[int] = None
-    dst_port: Optional[int] = None
+    src_port: Optional[Union[int, str]] = None
+    dst_port: Optional[Union[int, str]] = None
     comment: Optional[str] = None
     priority: int = 100
     enabled: bool = True
+
+    @field_validator("src_port", "dst_port", mode="before")
+    @classmethod
+    def validate_port(cls, v: object) -> object:
+        return _validate_port_field(v)
 
 
 class RuleCreate(BaseModel):
@@ -75,11 +93,16 @@ class RuleCreate(BaseModel):
     protocol: Optional[Literal["tcp", "udp", "icmp", "esp", "ah", "any"]] = None
     src_address: str = "any"
     dst_address: str = "any"
-    src_port: Optional[int] = None
-    dst_port: Optional[int] = None
+    src_port: Optional[Union[int, str]] = None
+    dst_port: Optional[Union[int, str]] = None
     comment: Optional[str] = None
     priority: int = 100
     enabled: bool = True
+
+    @field_validator("src_port", "dst_port", mode="before")
+    @classmethod
+    def validate_port(cls, v: object) -> object:
+        return _validate_port_field(v)
 
 
 class RuleUpdate(BaseModel):
@@ -88,11 +111,16 @@ class RuleUpdate(BaseModel):
     protocol: Optional[Literal["tcp", "udp", "icmp", "esp", "ah", "any"]] = None
     src_address: Optional[str] = None
     dst_address: Optional[str] = None
-    src_port: Optional[int] = None
-    dst_port: Optional[int] = None
+    src_port: Optional[Union[int, str]] = None
+    dst_port: Optional[Union[int, str]] = None
     comment: Optional[str] = None
     priority: Optional[int] = None
     enabled: Optional[bool] = None
+
+    @field_validator("src_port", "dst_port", mode="before")
+    @classmethod
+    def validate_port(cls, v: object) -> object:
+        return _validate_port_field(v)
 
 
 class CompileRequest(BaseModel):
@@ -132,7 +160,13 @@ def _build_networks(rules: list[FirewallRule]) -> dict[str, Any]:
     return {"networks": nets}
 
 
-def _build_policy(rules: list[FirewallRule], filter_name: str, platform: str) -> dict[str, Any]:
+def _build_policy(
+    rules: list[FirewallRule],
+    filter_name: str,
+    platform: str,
+    macro_registry: dict[str, Any],
+    logger: Any,
+) -> dict[str, Any]:
     terms = []
     for rule in sorted(rules, key=lambda r: r.priority):
         if not rule.enabled:
@@ -147,10 +181,26 @@ def _build_policy(rules: list[FirewallRule], filter_name: str, platform: str) ->
             term["source-address"] = [_net_name(rule.src_address)]
         if rule.dst_address and rule.dst_address != "any":
             term["destination-address"] = [_net_name(rule.dst_address)]
-        if rule.src_port:
-            term["source-port"] = [_port_token(rule.src_port)]
-        if rule.dst_port:
-            term["destination-port"] = [_port_token(rule.dst_port)]
+        if rule.src_port is not None:
+            ports = resolve_macro(rule.src_port, macro_registry)
+            if not ports and is_macro(rule.src_port):
+                logger.warning(
+                    "Skipping rule %r: macro %r resolved to no ports (plugin not loaded?)",
+                    rule.name, rule.src_port,
+                )
+                continue
+            if ports:
+                term["source-port"] = [_port_token(p) for p in ports]
+        if rule.dst_port is not None:
+            ports = resolve_macro(rule.dst_port, macro_registry)
+            if not ports and is_macro(rule.dst_port):
+                logger.warning(
+                    "Skipping rule %r: macro %r resolved to no ports (plugin not loaded?)",
+                    rule.name, rule.dst_port,
+                )
+                continue
+            if ports:
+                term["destination-port"] = [_port_token(p) for p in ports]
         terms.append(term)
     # Implicit deny ensures no traffic slips through by default.
     terms.append({"name": "default-deny", "action": "deny", "comment": "Implicit deny all"})
@@ -165,13 +215,19 @@ def _build_policy(rules: list[FirewallRule], filter_name: str, platform: str) ->
     }
 
 
-def _compile_rules(rules: list[FirewallRule], filter_name: str, platform: str) -> str:
+def _compile_rules(
+    rules: list[FirewallRule],
+    filter_name: str,
+    platform: str,
+    macro_registry: dict[str, Any],
+    logger: Any,
+) -> str:
     """
     Invoke the aerleon CLI to produce platform-specific ACL output.
     Falls back to the raw policy YAML if aerleon is not installed or fails.
     """
     networks_data = _build_networks(rules)
-    policy_data = _build_policy(rules, filter_name, platform)
+    policy_data = _build_policy(rules, filter_name, platform, macro_registry, logger)
 
     with tempfile.TemporaryDirectory() as tmp:
         nets_path = os.path.join(tmp, "networks.yaml")
@@ -232,6 +288,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         )
         self._default_platform = self.config.get("default_platform", "iptables")
         self._default_filter = self.config.get("default_filter_name", "fastfirewall")
+        self._macro_registry: dict[str, Any] = {}
         self._rules: dict[str, FirewallRule] = {}
         if not self.config.get("ignore_state_on_boot", False):
             self._load_rules()
@@ -261,7 +318,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         if not enabled:
             return
         try:
-            output = _compile_rules(enabled, self._default_filter, self._default_platform)
+            output = _compile_rules(enabled, self._default_filter, self._default_platform, self._macro_registry, self.logger)
             if output.startswith("#"):
                 self.logger.warning("Skipping boot-time rule apply — aerleon did not produce clean output")
                 return
@@ -354,7 +411,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     def _apply(self) -> dict:
         enabled = [r for r in self._rules.values() if r.enabled]
-        output = _compile_rules(enabled, self._default_filter, self._default_platform)
+        output = _compile_rules(enabled, self._default_filter, self._default_platform, self._macro_registry, self.logger)
         if output.startswith("#"):
             raise HTTPException(503, f"Compile failed — aerleon did not produce clean output: {output.splitlines()[0]}")
         try:
@@ -376,7 +433,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     def _compile(self, body: CompileRequest) -> CompileResult:
         enabled = [r for r in self._rules.values() if r.enabled]
-        output = _compile_rules(enabled, body.filter_name, body.platform)
+        output = _compile_rules(enabled, body.filter_name, body.platform, self._macro_registry, self.logger)
         bus.emit(Event(
             name="firewall.compiled",
             source=self.plugin_id,
@@ -391,7 +448,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     def _get_policy(self, platform: str = "iptables", filter_name: str = "fastfirewall", format: str = "json"):
         enabled = [r for r in self._rules.values() if r.enabled]
-        policy = _build_policy(enabled, filter_name, platform)
+        policy = _build_policy(enabled, filter_name, platform, self._macro_registry, self.logger)
         if format == "yaml":
             return Response(
                 content=yaml.dump(policy, default_flow_style=False, sort_keys=False),
@@ -413,6 +470,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             "default_platform": self._default_platform,
             "default_filter": self._default_filter,
             "pending_changes": self._state_file.pending_changes,
+            "macros": {ns: list(data.keys()) for ns, data in self._macro_registry.items() if isinstance(data, dict)},
         }
 
     # ── event handlers ─────────────────────────────────────────────────
@@ -422,8 +480,33 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         platform = event.payload.get("platform", self._default_platform)
         filter_name = event.payload.get("filter_name", self._default_filter)
         enabled = [r for r in self._rules.values() if r.enabled]
-        output = _compile_rules(enabled, filter_name, platform)
+        output = _compile_rules(enabled, filter_name, platform, self._macro_registry, self.logger)
         if output.startswith("#"):
             self.logger.warning("Compile for %r produced no clean output: %s", platform, output.splitlines()[0])
         else:
             self.logger.info("Compiled %d rules for %r", len(enabled), platform)
+
+    @on("plugins.all_loaded")
+    def on_all_loaded(self, event: Event) -> None:
+        service_ports: dict[str, dict[str, list[int]]] = event.payload.get("service_ports", {})
+        self._macro_registry["service_port"] = service_ports
+        self.logger.debug(
+            "Macro registry[service_port] seeded with %d service(s): %s",
+            len(service_ports), list(service_ports),
+        )
+
+    @on("plugin.loaded")
+    def on_plugin_loaded(self, event: Event) -> None:
+        sp = event.payload.get("service_ports", {})
+        if sp:
+            merge_service_ports(self._macro_registry, sp)
+            self.logger.debug("Macro registry updated from %r: %s", event.payload.get("plugin_id"), list(sp))
+
+    @on("networking.aliases_updated")
+    def on_networking_aliases_updated(self, event: Event) -> None:
+        aliases: dict[str, str] = event.payload.get("aliases", {})
+        merge_interface_aliases(self._macro_registry, aliases)
+        self.logger.debug(
+            "Macro registry[interface] updated: %d alias(es): %s",
+            len(aliases), list(aliases),
+        )

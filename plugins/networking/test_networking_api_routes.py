@@ -97,7 +97,7 @@ def test_status_returns_plugin_metadata(client):
 
 def test_status_managed_counts_start_at_zero(client):
     data = client.get("/v1/networking/status").json()
-    assert data["ff_managed"] == {"interfaces": 0, "routes": 0, "sysctl": 0}
+    assert data["ff_managed"] == {"interfaces": 0, "routes": 0, "sysctl": 0, "aliases": 0}
     assert data["pending_changes"] is False
 
 
@@ -105,8 +105,10 @@ def test_status_counts_reflect_additions(client):
     client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
     client.post("/v1/networking/config/routes", json={"to": "default", "via": "192.168.1.1"})
     client.put("/v1/networking/config/sysctl/net.ipv4.ip_forward", json={"value": "1"})
+    # eth0 interface auto-creates alias "eth0" → adding LAN1 makes 2 aliases total
+    client.put("/v1/networking/config/aliases/LAN1", json={"interface": "eth0"})
     managed = client.get("/v1/networking/status").json()["ff_managed"]
-    assert managed == {"interfaces": 1, "routes": 1, "sysctl": 1}
+    assert managed == {"interfaces": 1, "routes": 1, "sysctl": 1, "aliases": 2}
 
 
 # ── live state (ifstatecli show) ───────────────────────────────────────────────
@@ -952,12 +954,12 @@ def test_apply_state_does_not_crash_on_ifstate_failure(tmp_path):
     assert plugin._interfaces == {"eth0": {"addresses": ["10.0.0.1/24"]}}
 
 
-def test_boot_apply_sets_current_state_on_success(tmp_path):
-    # State on disk with no current_state (e.g. route added but never applied before restart)
+def test_boot_apply_does_not_commit_current_state(tmp_path):
+    # Boot-time apply re-asserts the kernel config but does NOT auto-commit current_state —
+    # only an explicit POST /apply should clear pending_changes.
     _write_boot_state(tmp_path)
     plugin = _make_plugin_raw(tmp_path)
-    assert plugin._state_file.current_snapshot is not None
-    assert plugin._state_file.current_snapshot["interfaces"] == _BOOT_STATE["desired_state"]["interfaces"]
+    assert plugin._state_file.current_snapshot is None
 
 
 def test_boot_apply_does_not_set_current_state_on_failure(tmp_path):
@@ -1074,3 +1076,167 @@ def test_boot_import_does_not_crash_on_ifstate_failure(tmp_path):
     plugin.setup()  # must not raise
     assert plugin._interfaces == {}
     assert plugin._routes == {}
+
+
+# ── interface aliases ──────────────────────────────────────────────────────────
+
+def test_list_aliases_empty(client):
+    r = client.get("/v1/networking/config/aliases")
+    assert r.status_code == 200
+    assert r.json() == {"aliases": {}, "count": 0}
+
+
+def test_set_alias_creates_entry(client):
+    r = client.put("/v1/networking/config/aliases/LAN1", json={"interface": "eth0"})
+    assert r.status_code == 200
+    assert r.json() == {"name": "LAN1", "interface": "eth0"}
+
+
+def test_set_alias_appears_in_list(client):
+    client.put("/v1/networking/config/aliases/LAN1", json={"interface": "eth0"})
+    client.put("/v1/networking/config/aliases/WAN", json={"interface": "eth1"})
+    data = client.get("/v1/networking/config/aliases").json()
+    assert data["count"] == 2
+    assert data["aliases"]["LAN1"] == "eth0"
+    assert data["aliases"]["WAN"] == "eth1"
+
+
+def test_set_alias_overwrites_existing(client):
+    client.put("/v1/networking/config/aliases/LAN1", json={"interface": "eth0"})
+    client.put("/v1/networking/config/aliases/LAN1", json={"interface": "br0"})
+    assert client.get("/v1/networking/config/aliases").json()["aliases"]["LAN1"] == "br0"
+
+
+def test_delete_alias_removes_entry(client):
+    client.put("/v1/networking/config/aliases/LAN1", json={"interface": "eth0"})
+    r = client.delete("/v1/networking/config/aliases/LAN1")
+    assert r.status_code == 200
+    assert r.json()["deleted"] == "LAN1"
+    assert client.get("/v1/networking/config/aliases").json()["aliases"] == {}
+
+
+def test_delete_alias_404_for_unknown(client):
+    r = client.delete("/v1/networking/config/aliases/NOPE")
+    assert r.status_code == 404
+
+
+def test_set_alias_rejects_invalid_name(client):
+    r = client.put("/v1/networking/config/aliases/123bad", json={"interface": "eth0"})
+    assert r.status_code == 422
+
+
+def test_set_alias_rejects_empty_interface(client):
+    r = client.put("/v1/networking/config/aliases/LAN1", json={"interface": ""})
+    assert r.status_code == 422
+
+
+def test_aliases_persisted_across_plugin_instances(tmp_path):
+    plugin1 = _make_plugin(tmp_path)
+    _make_client(plugin1).put("/v1/networking/config/aliases/LAN1", json={"interface": "eth0"})
+    plugin2 = _make_plugin(tmp_path)
+    data = _make_client(plugin2).get("/v1/networking/config/aliases").json()
+    assert data["aliases"].get("LAN1") == "eth0"
+
+
+def test_set_alias_emits_aliases_updated_event(plugin, client):
+    received: list = []
+    global_bus.subscribe("networking.aliases_updated", received.append)
+    try:
+        client.put("/v1/networking/config/aliases/LAN1", json={"interface": "eth0"})
+        assert len(received) == 1
+        assert received[0].payload["aliases"] == {"LAN1": "eth0"}
+    finally:
+        global_bus.unsubscribe("networking.aliases_updated", received.append)
+
+
+def test_delete_alias_emits_aliases_updated_event(plugin, client):
+    client.put("/v1/networking/config/aliases/LAN1", json={"interface": "eth0"})
+    received: list = []
+    global_bus.subscribe("networking.aliases_updated", received.append)
+    try:
+        client.delete("/v1/networking/config/aliases/LAN1")
+        assert len(received) == 1
+        assert received[0].payload["aliases"] == {}
+    finally:
+        global_bus.unsubscribe("networking.aliases_updated", received.append)
+
+
+def test_set_interface_creates_default_alias(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
+    aliases = client.get("/v1/networking/config/aliases").json()["aliases"]
+    assert aliases.get("eth0") == "eth0"
+
+
+def test_set_interface_default_alias_not_overwritten_by_second_put(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
+    client.put("/v1/networking/config/aliases/eth0", json={"interface": "br0"})
+    client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "down"}})
+    # Manual alias must not be clobbered by the setdefault on re-configure
+    assert client.get("/v1/networking/config/aliases").json()["aliases"]["eth0"] == "br0"
+
+
+def test_import_interfaces_creates_default_aliases(plugin, client):
+    show_yaml = yaml.dump({"interfaces": {"eth0": {}, "eth1": {"addresses": ["10.0.0.1/24"]}}})
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout=show_yaml)
+    client.post("/v1/networking/config/interfaces/import", json={})
+    aliases = client.get("/v1/networking/config/aliases").json()["aliases"]
+    assert aliases.get("eth0") == "eth0"
+    assert aliases.get("eth1") == "eth1"
+
+
+def test_boot_import_creates_default_aliases(tmp_path):
+    show_yaml = yaml.dump({"interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}}})
+    plugin = _make_plugin_boot_import(tmp_path, show_stdout=show_yaml)
+    assert plugin._aliases.get("eth0") == "eth0"
+
+
+def test_load_state_creates_default_aliases_for_existing_interfaces(tmp_path):
+    # State file has no aliases key — simulates a state file written before the alias feature.
+    # After loading, each managed interface should automatically get an identity alias.
+    state = {
+        "desired_state": {
+            "interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}},
+            "routes": {},
+            "sysctl": {},
+        },
+        "current_state": {
+            "interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}},
+            "routes": {},
+            "sysctl": {},
+        },
+    }
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "networking_state.json").write_text(json.dumps(state))
+    plugin = _make_plugin(tmp_path)  # loads state → _ensure_default_aliases() adds eth0→eth0
+    assert plugin._aliases.get("eth0") == "eth0"
+
+
+def test_boot_emits_aliases_updated_when_aliases_exist(tmp_path):
+    state = {
+        "desired_state": {
+            "interfaces": {},
+            "routes": {},
+            "sysctl": {},
+            "aliases": {"LAN1": "eth0"},
+        },
+        "current_state": {
+            "interfaces": {},
+            "routes": {},
+            "sysctl": {},
+            "aliases": {"LAN1": "eth0"},
+        },
+    }
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "networking_state.json").write_text(json.dumps(state))
+
+    received: list = []
+    global_bus.subscribe("networking.aliases_updated", received.append)
+    try:
+        _make_plugin(tmp_path, config={"ignore_state_on_boot": True})
+        # ignore_state_on_boot skips _load_state, so no aliases loaded → no event
+        assert len(received) == 0
+        plugin = _make_plugin(tmp_path)
+        assert len(received) == 1
+        assert received[0].payload["aliases"] == {"LAN1": "eth0"}
+    finally:
+        global_bus.unsubscribe("networking.aliases_updated", received.append)
