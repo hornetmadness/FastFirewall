@@ -441,8 +441,7 @@ def test_fetch_blocklist_domains_hosts_format(tmp_path):
     with patch("urllib.request.urlopen") as mock_open:
         mock_open.return_value.__enter__.return_value.read.return_value = _HOSTS_CONTENT.encode()
         domains = inst._fetch_blocklist_domains("http://x.com/hosts.txt", "hosts")
-    assert "ads.example.com" in domains
-    assert "localhost" not in domains
+    assert set(domains) == {"ads.example.com", "tracker.example.com", "bad.example.com"}
 
 
 def test_fetch_blocklist_domains_plain_format(tmp_path):
@@ -451,8 +450,7 @@ def test_fetch_blocklist_domains_plain_format(tmp_path):
     with patch("urllib.request.urlopen") as mock_open:
         mock_open.return_value.__enter__.return_value.read.return_value = _DOMAINS_CONTENT.encode()
         domains = inst._fetch_blocklist_domains("http://x.com/domains.txt", "domains")
-    assert "ads.example.com" in domains
-    assert "tracker.example.com" in domains
+    assert set(domains) == {"ads.example.com", "tracker.example.com"}
 
 
 # ── config builder ─────────────────────────────────────────────────────────────
