@@ -1,0 +1,33 @@
+# Global fallback — covers anything not matched below
+* @hornetmadness
+
+# Core application entrypoint and config
+/app.py @hornetmadness
+/app_config.py @hornetmadness
+/app_config.yaml @hornetmadness
+
+# Plugin system (loader, event bus, base classes, macros)
+/plugin_system/ @hornetmadness
+
+# Authentication
+/ff_auth/ @hornetmadness
+
+# Infrastructure / state management
+/infra/ @hornetmadness
+
+# Plugins
+/plugins/firewall/ @hornetmadness
+/plugins/dnsmasq/ @hornetmadness
+/plugins/host/ @hornetmadness
+/plugins/networking/ @hornetmadness
+/plugins/audit/ @hornetmadness
+/plugins/smtp/ @hornetmadness
+/plugins/syslog/ @hornetmadness
+
+# Tests
+/tests/ @hornetmadness
+
+# CI/CD and repo config
+/.github/ @hornetmadness
+/Dockerfile @hornetmadness
+/pyproject.toml @hornetmadness
