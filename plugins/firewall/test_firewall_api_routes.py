@@ -608,82 +608,54 @@ def test_update_rule_rejects_malformed_macro(client):
 
 
 def test_macro_resolved_to_port_in_policy():
+    from plugin_system.core.macros import macro_registry
     mod = _load_module()
-    registry = {"service_port": {"dns": {"udp": [53]}}}
-    rule = mod.FirewallRule(name="allow-dns", action="accept", protocol="udp", dst_port="$service_port.dns.udp")
-    policy = mod._build_policy([rule], "test", "iptables", registry, logging.getLogger("test"))
-    term = next(t for t in policy["filters"][0]["terms"] if t["name"] == "allow-dns")
-    assert term["destination-port"] == ["DNS"]
+    macro_registry.set_service_ports({"dns": {"udp": [53]}})
+    try:
+        rule = mod.FirewallRule(name="allow-dns", action="accept", protocol="udp", dst_port="$service_port.dns.udp")
+        policy = mod._build_policy([rule], "test", "iptables", logging.getLogger("test"))
+        term = next(t for t in policy["filters"][0]["terms"] if t["name"] == "allow-dns")
+        assert term["destination-port"] == ["DNS"]
+    finally:
+        macro_registry.set_service_ports({})
 
 
 def test_macro_multi_port_all_appear_in_policy():
+    from plugin_system.core.macros import macro_registry
     mod = _load_module()
-    registry = {"service_port": {"smtp": {"tcp": [25, 587, 465]}}}
-    rule = mod.FirewallRule(name="allow-smtp", action="accept", protocol="tcp", dst_port="$service_port.smtp.tcp")
-    policy = mod._build_policy([rule], "test", "iptables", registry, logging.getLogger("test"))
-    term = next(t for t in policy["filters"][0]["terms"] if t["name"] == "allow-smtp")
-    assert len(term["destination-port"]) == 3
+    macro_registry.set_service_ports({"smtp": {"tcp": [25, 587, 465]}})
+    try:
+        rule = mod.FirewallRule(name="allow-smtp", action="accept", protocol="tcp", dst_port="$service_port.smtp.tcp")
+        policy = mod._build_policy([rule], "test", "iptables", logging.getLogger("test"))
+        term = next(t for t in policy["filters"][0]["terms"] if t["name"] == "allow-smtp")
+        assert len(term["destination-port"]) == 3
+    finally:
+        macro_registry.set_service_ports({})
 
 
 def test_macro_rule_skipped_when_registry_empty():
+    from plugin_system.core.macros import macro_registry
     mod = _load_module()
+    macro_registry.set_service_ports({})
     rule = mod.FirewallRule(name="needs-dns", action="accept", dst_port="$service_port.dns.udp")
-    policy = mod._build_policy([rule], "test", "iptables", {}, logging.getLogger("test"))
+    policy = mod._build_policy([rule], "test", "iptables", logging.getLogger("test"))
     term_names = [t["name"] for t in policy["filters"][0]["terms"]]
     assert "needs-dns" not in term_names
     assert "default-deny" in term_names
 
 
-def test_on_all_loaded_seeds_macro_registry(tmp_path):
-    inst, _ = _make_inst(tmp_path)
-    inst.setup()
-    event = Event("plugins.all_loaded", source="plugin_loader", payload={
-        "service_ports": {"dns": {"udp": [53], "tcp": [53]}, "dhcp": {"udp": [67]}},
-        "loaded": ["dnsmasq"],
-    })
-    inst.on_all_loaded(event)
-    assert inst._macro_registry == {
-        "service_port": {"dns": {"udp": [53], "tcp": [53]}, "dhcp": {"udp": [67]}}
-    }
-
-
-def test_on_plugin_loaded_merges_into_existing_registry(tmp_path):
-    inst, _ = _make_inst(tmp_path)
-    inst.setup()
-    inst._macro_registry = {"service_port": {"dns": {"udp": [53]}}}
-    event = Event("plugin.loaded", source="plugin_loader", payload={
-        "plugin_id": "smtp",
-        "version": "1.0",
-        "services": ["smtp"],
-        "service_ports": {"smtp": {"tcp": [25, 587, 465]}},
-    })
-    inst.on_plugin_loaded(event)
-    assert inst._macro_registry["service_port"]["smtp"] == {"tcp": [25, 587, 465]}
-    assert inst._macro_registry["service_port"]["dns"] == {"udp": [53]}
-
-
-def test_on_plugin_loaded_ignores_empty_service_ports(tmp_path):
-    inst, _ = _make_inst(tmp_path)
-    inst.setup()
-    inst._macro_registry = {"service_port": {"dns": {"udp": [53]}}}
-    event = Event("plugin.loaded", source="plugin_loader", payload={
-        "plugin_id": "firewall",
-        "version": "1.0",
-        "services": ["firewall"],
-        "service_ports": {},
-    })
-    inst.on_plugin_loaded(event)
-    assert inst._macro_registry == {"service_port": {"dns": {"udp": [53]}}}
-
-
 def test_status_includes_macros(tmp_path):
-    inst, _ = _make_inst(tmp_path)
-    inst.setup()
-    inst._macro_registry = {"service_port": {"dns": {"udp": [53]}, "dhcp": {"udp": [67]}}}
-    app = FastAPI()
-    app.include_router(inst.router, prefix="/v1/firewall")
-    status = TestClient(app).get("/v1/firewall/status").json()
-    assert set(status["macros"]["service_port"]) == {"dns", "dhcp"}
+    from plugin_system.core.macros import macro_registry
+    macro_registry.set_service_ports({"dns": {"udp": [53]}, "dhcp": {"udp": [67]}})
+    try:
+        inst, _ = _make_inst(tmp_path)
+        inst.setup()
+        app = FastAPI()
+        app.include_router(inst.router, prefix="/v1/firewall")
+        status = TestClient(app).get("/v1/firewall/status").json()
+        assert "service_port" in status["macros"]
+    finally:
+        macro_registry.set_service_ports({})
 
 
 def test_macro_rule_survives_reload(tmp_path):
@@ -710,56 +682,34 @@ def test_interface_macro_syntax_accepted(client):
     assert validate_macro_syntax("$interface.LAN1") == "$interface.LAN1"
 
 
-def test_on_networking_aliases_updated_populates_registry(tmp_path):
-    inst, _ = _make_inst(tmp_path)
-    inst.setup()
-    event = Event("networking.aliases_updated", source="networking", payload={
-        "aliases": {"LAN1": "eth0", "WAN": "eth1"},
-    })
-    inst.on_networking_aliases_updated(event)
-    assert inst._macro_registry.get("interface") == {"LAN1": "eth0", "WAN": "eth1"}
-
-
-def test_on_networking_aliases_updated_replaces_existing(tmp_path):
-    inst, _ = _make_inst(tmp_path)
-    inst.setup()
-    inst._macro_registry["interface"] = {"LAN1": "eth0"}
-    event = Event("networking.aliases_updated", source="networking", payload={
-        "aliases": {"WAN": "eth1"},
-    })
-    inst.on_networking_aliases_updated(event)
-    assert inst._macro_registry.get("interface") == {"WAN": "eth1"}
-
-
-def test_on_networking_aliases_updated_empty_clears_registry(tmp_path):
-    inst, _ = _make_inst(tmp_path)
-    inst.setup()
-    inst._macro_registry["interface"] = {"LAN1": "eth0"}
-    event = Event("networking.aliases_updated", source="networking", payload={"aliases": {}})
-    inst.on_networking_aliases_updated(event)
-    assert inst._macro_registry.get("interface") == {}
-
-
 def test_status_includes_interface_macro_namespace(tmp_path):
-    inst, _ = _make_inst(tmp_path)
-    inst.setup()
-    inst._macro_registry["interface"] = {"LAN1": "eth0", "WAN": "eth1"}
-    app = FastAPI()
-    app.include_router(inst.router, prefix="/v1/firewall")
-    status = TestClient(app).get("/v1/firewall/status").json()
-    assert "interface" in status["macros"]
-    assert set(status["macros"]["interface"]) == {"LAN1", "WAN"}
+    from plugin_system.core.macros import macro_registry
+    _aliases: dict[str, str] = {"LAN1": "eth0", "WAN": "eth1"}
+    macro_registry.register_namespace("interface", lambda *s: _aliases.get(s[0]) if s else None)
+    try:
+        inst, _ = _make_inst(tmp_path)
+        inst.setup()
+        app = FastAPI()
+        app.include_router(inst.router, prefix="/v1/firewall")
+        status = TestClient(app).get("/v1/firewall/status").json()
+        assert "interface" in status["macros"]
+    finally:
+        macro_registry.unregister_namespace("interface")
 
 
 def test_interface_macro_resolve_string():
-    from plugin_system.core.macros import resolve_string_macro
-    registry = {"interface": {"LAN1": "eth0", "WAN": "eth1"}}
-    assert resolve_string_macro("$interface.LAN1", registry) == "eth0"
-    assert resolve_string_macro("$interface.WAN", registry) == "eth1"
-    assert resolve_string_macro("$interface.MISSING", registry) is None
-    assert resolve_string_macro("$service_port.dns.udp", registry) is None
+    from plugin_system.core.macros import macro_registry
+    _aliases: dict[str, str] = {"LAN1": "eth0", "WAN": "eth1"}
+    macro_registry.register_namespace("interface", lambda *s: _aliases.get(s[0]) if s else None)
+    try:
+        assert macro_registry.resolve_string("$interface.LAN1") == "eth0"
+        assert macro_registry.resolve_string("$interface.WAN") == "eth1"
+        assert macro_registry.resolve_string("$interface.MISSING") is None
+        assert macro_registry.resolve_string("$service_port.dns.udp") is None
+    finally:
+        macro_registry.unregister_namespace("interface")
 
 
 def test_interface_macro_unknown_namespace_returns_none():
-    from plugin_system.core.macros import resolve_string_macro
-    assert resolve_string_macro("$unknown.FOO", {}) is None
+    from plugin_system.core.macros import macro_registry
+    assert macro_registry.resolve_string("$unknown.FOO") is None

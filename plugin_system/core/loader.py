@@ -81,6 +81,8 @@ from .decorators import _HANDLER_EVENTS_ATTR, _WILDCARD_ATTR
 from .events import Event, EventBus, bus as default_bus
 from .plugin_base import PluginBase
 from .api_router_plugin import ApiRouterPlugin
+from .macro_provider_plugin import MacroProviderPlugin
+from .macros import macro_registry
 from .services import Service
 
 YAML_FILENAME = "plugin.yaml"
@@ -446,7 +448,7 @@ class PluginLoader:
                 return
         raise PluginError(f"Plugin {plugin_id!r} not found in {root}")
 
-    def load_directory(self, directory: str | Path, only: list[str] | None = None) -> list[str]:
+    def load_directory(self, directory: str | Path, only: list[str] | None = None, skip_requirements: bool = False) -> list[str]:
         """
         Scan *directory* for plugin sub-directories and load each one.
         Returns a list of successfully loaded plugin ids.
@@ -545,7 +547,7 @@ class PluginLoader:
         errored: list[tuple[str, str]] = []
         for pid in load_order:
             try:
-                loaded_id = self.load_plugin(active[pid]["path"])
+                loaded_id = self.load_plugin(active[pid]["path"], skip_requirements=skip_requirements)
                 loaded.append(loaded_id)
             except Exception as exc:
                 self.logger.exception("Failed to load plugin from %s", active[pid]["path"])
@@ -575,10 +577,14 @@ class PluginLoader:
             lp = self._plugins.get(pid)
             if lp is not None and isinstance(lp.service_ports, dict):
                 for svc_name, proto_map in lp.service_ports.items():
-                    all_service_ports[svc_name] = {
-                        proto: [p for p in ports if p != -1]
+                    filtered = {
+                        proto: real
                         for proto, ports in proto_map.items()
+                        if (real := [p for p in ports if p != -1])
                     }
+                    if filtered:
+                        all_service_ports[svc_name] = filtered
+        macro_registry.set_service_ports(all_service_ports)
         self._bus.emit(Event(
             "plugins.all_loaded",
             source="plugin_loader",
@@ -587,7 +593,7 @@ class PluginLoader:
 
         return loaded
 
-    def load_plugin(self, path: str | Path) -> str:
+    def load_plugin(self, path: str | Path, skip_requirements: bool = False) -> str:
         """
         Load a single plugin from *path* (the plugin directory).
         Returns the plugin id on success.
@@ -698,7 +704,7 @@ class PluginLoader:
                 )
 
         # --- install python requirements via pyinfra + pipx -----------
-        if py_requirements:
+        if py_requirements and not skip_requirements:
             self.logger.info(
                 "Plugin %r needs Python packages: %s",
                 plugin_id,
@@ -707,7 +713,7 @@ class PluginLoader:
             self._install_py_requirements(plugin_id, py_requirements)
 
         # --- install OS requirements via pyinfra ----------------------
-        if os_requirements:
+        if os_requirements and not skip_requirements:
             self.logger.info(
                 "Plugin %r needs OS packages: %s",
                 plugin_id,
@@ -758,6 +764,7 @@ class PluginLoader:
         if instance is not None:
             instance.setup()
             self._register_api_routes(instance, plugin_id)
+            self._register_macro_provider(instance, plugin_id)
 
         svc_values = [s.value for s in services]
         self._bus.emit(Event(
@@ -780,11 +787,14 @@ class PluginLoader:
         if loaded is None:
             raise PluginError(f"Plugin {plugin_id!r} is not loaded")
 
-        # Release service claims and port reservations
+        # Release service claims, port reservations, and macro namespaces
         for svc in loaded.services:
             self._service_registry.pop(svc, None)
         self._bus.plugin_services.pop(plugin_id, None)
         self._release_ports(loaded.service_ports)
+        if loaded.instance is not None and isinstance(loaded.instance, MacroProviderPlugin):
+            for name in loaded.instance._macro_namespaces:
+                macro_registry.unregister_namespace(name)
 
         # Unsubscribe all handlers
         for event_name, fn in loaded.handlers:
@@ -884,6 +894,14 @@ class PluginLoader:
             f"No supported OS package manager found for plugin {plugin_id!r} "
             f"(system={system!r}). Packages required: {packages}"
         )
+
+    def _register_macro_provider(self, instance: PluginBase, plugin_id: str) -> None:
+        """Register any macro namespaces a MacroProviderPlugin declared in setup()."""
+        if not isinstance(instance, MacroProviderPlugin):
+            return
+        for name, resolver in instance._macro_namespaces.items():
+            macro_registry.register_namespace(name, resolver)
+            self.logger.debug("Registered macro namespace %r from plugin %r", name, plugin_id)
 
     def _register_api_routes(self, instance: PluginBase, plugin_id: str) -> None:
         """Mount a ApiRouterPlugin's router on the FastAPI app at /v1/<plugin_id>/."""
