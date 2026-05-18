@@ -56,6 +56,10 @@ def _app_with_middleware(cfg: AuthConfig) -> TestClient:
     async def protected():
         return {"ok": True}
 
+    @app.post("/mutate")
+    async def mutate():
+        return {"ok": True}
+
     @app.get("/token")
     async def token_stub():
         return {"exempted": True}
@@ -69,10 +73,10 @@ def _app_with_middleware(cfg: AuthConfig) -> TestClient:
 
 @pytest.fixture(autouse=True)
 def reset_auth():
-    """Reset module singleton to disabled state around every test."""
-    setup(AuthConfig())
+    """Reset module singleton to a known disabled state around every test."""
+    setup(AuthConfig(enabled=False))
     yield
-    setup(AuthConfig())
+    setup(AuthConfig(enabled=False))
 
 
 # ---------------------------------------------------------------------------
@@ -246,3 +250,51 @@ def test_dependency_returns_anonymous_when_disabled():
     r = client.get("/me")
     assert r.status_code == 200
     assert r.json()["username"] == "anonymous"
+
+
+# ---------------------------------------------------------------------------
+# _decode_token — user existence check
+# ---------------------------------------------------------------------------
+
+def test_decode_token_unknown_user_returns_none():
+    setup(_cfg(users=[{"username": "alice", "password": "pw", "roles": ["admin"]}]))
+    token = create_token("ghost", [])
+    assert _decode_token(token) is None
+
+
+def test_decode_token_roles_sourced_from_user_store_not_payload():
+    setup(_cfg(users=[{"username": "admin", "password": "admin", "roles": ["admin"]}]))
+    token = create_token("admin", [])
+    user = _decode_token(token)
+    assert user is not None
+    assert "admin" in user.roles
+
+
+# ---------------------------------------------------------------------------
+# enforce_auth — RBAC
+# ---------------------------------------------------------------------------
+
+def test_middleware_forbids_mutating_request_for_non_admin():
+    cfg = _cfg(users=[{"username": "reader", "password": "pw", "roles": ["viewer"]}])
+    client = _app_with_middleware(cfg)
+    r = client.post("/mutate", headers={"Authorization": _basic_header("reader", "pw")})
+    assert r.status_code == 403
+
+
+def test_middleware_allows_mutating_request_for_admin():
+    client = _app_with_middleware(_cfg())
+    r = client.post("/mutate", headers={"Authorization": _basic_header("admin", "admin")})
+    assert r.status_code == 200
+
+
+def test_middleware_allows_read_request_for_non_admin():
+    cfg = _cfg(users=[{"username": "reader", "password": "pw", "roles": ["viewer"]}])
+    client = _app_with_middleware(cfg)
+    r = client.get("/protected", headers={"Authorization": _basic_header("reader", "pw")})
+    assert r.status_code == 200
+
+
+def test_middleware_mutate_passes_through_when_auth_disabled():
+    client = _app_with_middleware(_cfg(enabled=False))
+    r = client.post("/mutate")
+    assert r.status_code == 200
