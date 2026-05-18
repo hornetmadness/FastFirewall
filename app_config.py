@@ -25,7 +25,7 @@ class PluginsConfig:
 
 
 _AUTH_DEFAULTS = {
-    "enabled": False,
+    "enabled": True,
     "secret_key": "CHANGE-ME",
     "algorithm": "HS256",
     "token_expire_minutes": 60,
@@ -38,7 +38,7 @@ _SERVER_KNOWN_KEYS = {"host", "port", "reload"}
 
 @dataclass
 class AuthConfig:
-    enabled: bool = False
+    enabled: bool = True
     secret_key: str = "CHANGE-ME"
     algorithm: str = "HS256"
     token_expire_minutes: int = 60

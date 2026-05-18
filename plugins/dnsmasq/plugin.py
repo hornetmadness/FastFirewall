@@ -10,11 +10,14 @@ POST /apply to write /etc/dnsmasq.d/ff-managed.conf and restart dnsmasq.
 Routes mount at /v1/dnsmasq/.
 """
 import datetime
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import tempfile
+import urllib.parse
 import urllib.request
 import uuid
 from typing import Any, Literal, Optional
@@ -181,6 +184,30 @@ class BlocklistCreate(BaseModel):
     url: str
     name: str
     format: Literal["hosts", "domains"] = "hosts"
+
+
+def _validate_blocklist_url(url: str) -> None:
+    """Reject non-http/https URLs and URLs that resolve to private/loopback addresses."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        raise HTTPException(422, "Invalid blocklist URL")
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(422, "Blocklist URL must use http or https scheme")
+    hostname = parsed.hostname
+    if not hostname:
+        raise HTTPException(422, "Blocklist URL must have a valid hostname")
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except OSError:
+        raise HTTPException(422, "Blocklist URL hostname could not be resolved")
+    for info in infos:
+        try:
+            addr = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+            raise HTTPException(422, "Blocklist URL must not resolve to a private or reserved address")
 
 
 # ── plugin class ───────────────────────────────────────────────────────────────
@@ -463,6 +490,7 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin):
     # ── blocklist fetcher ──────────────────────────────────────────────
 
     def _fetch_blocklist_domains(self, url: str, fmt: str) -> list[str]:
+        _validate_blocklist_url(url)
         with urllib.request.urlopen(url, timeout=30) as resp:
             content = resp.read().decode("utf-8", errors="replace")
         domains: list[str] = []

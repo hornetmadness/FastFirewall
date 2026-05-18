@@ -7,9 +7,11 @@ pyinfra backend (apt, yum, dnf, apk, pacman).
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -55,6 +57,20 @@ class RepoBody(BaseModel):
     url: Optional[str] = None
     # pacman: signature verification level for this repo
     sig_level: str = "Required DatabaseOptional"
+
+
+_PACMAN_REPO_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\.]+$")
+
+
+def _validate_pacman_repo(name: str, url: str) -> None:
+    if not _PACMAN_REPO_NAME_RE.match(name):
+        raise HTTPException(422, "pacman repo name must contain only alphanumerics, hyphens, underscores, or dots")
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        raise HTTPException(422, "pacman repo URL is invalid")
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(422, "pacman repo URL must use http or https scheme")
 
 
 def detect_package_manager() -> str:
@@ -209,6 +225,7 @@ class PackageManager:
         elif self.platform == "pacman":
             if not body.url:
                 raise HTTPException(422, "pacman repos require 'url'")
+            _validate_pacman_repo(name, body.url)
             if body.present:
                 self._pyinfra_run(
                     server_ops.shell,

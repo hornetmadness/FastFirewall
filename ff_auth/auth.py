@@ -85,12 +85,17 @@ def _check_password(username: str, password: str) -> AuthUser | None:
     return None
 
 
+_MUTATING_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+
+
 def _decode_token(token: str) -> AuthUser | None:
     try:
         payload = _jwt.decode(token, _st.secret_key, algorithms=[_st.algorithm])
         username = payload.get("sub")
         if username:
-            return AuthUser(username=username, roles=payload.get("roles", []))
+            rec = _st.users.get(username)
+            if rec:
+                return AuthUser(username=username, roles=rec["roles"])
     except _jwt.PyJWTError:
         pass
     return None
@@ -161,6 +166,11 @@ async def enforce_auth(request: Request, call_next) -> Response:
             status_code=status.HTTP_401_UNAUTHORIZED,
             headers={"WWW-Authenticate": 'Basic realm="FastFirewall", Bearer error="invalid_token"'},
             content={"detail": "Authentication required"},
+        )
+    if request.method in _MUTATING_METHODS and "admin" not in user.roles:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"detail": "Admin role required for write operations"},
         )
     request.state.user = user
     return await call_next(request)

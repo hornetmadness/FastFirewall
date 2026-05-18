@@ -206,7 +206,7 @@ def test_default_load_reads_repo_config():
 def test_auth_defaults_when_section_absent(tmp_path):
     p = write_config(tmp_path, "")
     cfg = AppConfig.load(p)
-    assert cfg.auth.enabled is False
+    assert cfg.auth.enabled is True
     assert cfg.auth.secret_key == "CHANGE-ME"
     assert cfg.auth.algorithm == "HS256"
     assert cfg.auth.token_expire_minutes == 60
