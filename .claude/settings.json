@@ -8,7 +8,8 @@
       "Bash(find / -path \"*/pyinfra/*.pyi\")",
       "Edit(plugins/*/test_*.py)",
       "Edit(tests/**)",
-      "Bash(git pull *)"
+      "Bash(git pull *)",
+      "Bash(git checkout *)"
     ]
   },
   "hooks": {

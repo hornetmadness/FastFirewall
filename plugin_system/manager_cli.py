@@ -3,13 +3,15 @@ import sys
 from pathlib import Path
 
 
-def run(loader, plugins_dir: str | Path) -> tuple[list[str] | None, bool]:
+def run(loader, plugins_dir: str | Path) -> tuple[list[str] | None, bool, bool]:
     """
     Parse CLI arguments, handle any management commands, and return
-    ``(only, ignore_plugins_states)`` for normal server startup.
+    ``(only, ignore_plugins_states, show_macros)`` for normal server startup.
 
     ``only`` is the plugin allow-list (None means load all plugins).
     ``ignore_plugins_states`` is True when --ignore-plugins-states was passed.
+    ``show_macros`` is True when --show-macros was passed; the caller should
+    call ``print_macros(loader)`` and exit after loading plugins.
     """
     parser = _build_parser()
     args, _ = parser.parse_known_args()
@@ -32,7 +34,77 @@ def run(loader, plugins_dir: str | Path) -> tuple[list[str] | None, bool]:
         _print_plugin_table(loader.list_plugins(plugins_dir))
         sys.exit(0)
 
-    return args.plugins or None, bool(args.ignore_plugins_states)
+    return args.plugins or None, bool(args.ignore_plugins_states), bool(args.show_macros)
+
+
+def get_macros(loader) -> dict:
+    """
+    Return macro namespace data as a structured dict, suitable for JSON or CLI display.
+
+    Shape::
+
+        {
+            "service_port": {
+                "kind": "built-in",
+                "entries": {"$service_port.dns.udp": [53], ...}
+            },
+            "interface": {
+                "kind": "plugin",
+                "plugin": "networking",
+                "entries": {"$interface.lan1": "enp0s25", ...}
+            },
+            ...
+        }
+    """
+    from plugin_system.core.macros import macro_registry
+    from plugin_system.core.macro_provider_plugin import MacroProviderPlugin
+
+    result: dict = {}
+
+    sp = macro_registry._service_ports
+    sp_entries: dict[str, list[int]] = {}
+    for svc, proto_map in sp.items():
+        for proto, ports in proto_map.items():
+            sp_entries[f"$service_port.{svc}.{proto}"] = ports
+    result["service_port"] = {"kind": "built-in", "entries": sp_entries}
+
+    for loaded in loader._plugins.values():
+        if loaded.instance is not None and isinstance(loaded.instance, MacroProviderPlugin):
+            for ns, entries_dict in loaded.instance.macro_snapshot().items():
+                result[ns] = {
+                    "kind": "plugin",
+                    "plugin": loaded.plugin_id,
+                    "entries": {f"${ns}.{k}": v for k, v in entries_dict.items()},
+                }
+
+    return result
+
+
+def print_macros(loader) -> None:
+    """Print all macro namespaces after plugins have been loaded."""
+    data = get_macros(loader)
+
+    print("Macro namespaces\n")
+    for ns, info in data.items():
+        if info["kind"] == "built-in":
+            print(f"  ${ns}  (built-in — aggregated from enabled plugins' plugin.yaml)\n")
+        else:
+            print(f"\n  ${ns}  (plugin-defined — provided by '{info['plugin']}')\n")
+
+        entries = info["entries"]
+        if not entries:
+            print("    (no entries registered)")
+        else:
+            rows = [
+                (macro, ", ".join(str(p) for p in val) if isinstance(val, list) else str(val))
+                for macro, val in entries.items()
+            ]
+            macro_w = max(len(r[0]) for r in rows)
+            print(f"    {'MACRO':<{macro_w}}  VALUE")
+            print("    " + "-" * (macro_w + 10))
+            for macro, val in rows:
+                print(f"    {macro:<{macro_w}}  {val}")
+        print()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -67,6 +139,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--disable-plugin",
         metavar="PLUGIN_ID",
         help="Disable a plugin in its plugin.yaml, then exit.",
+    )
+    parser.add_argument(
+        "--show-macros",
+        action="store_true",
+        help="Print all available macro namespaces and their resolved values, then exit.",
     )
     parser.add_argument(
         "--ignore-plugins-states",

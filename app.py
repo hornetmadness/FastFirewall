@@ -87,9 +87,19 @@ async def validation_exception_handler(
     )
 
 loader = PluginLoader(bus=bus, app=app, logger=cfg.logger)
-only_plugins, ignore_plugins_states = manager_cli.run(loader, cfg.plugins_dir())
+only_plugins, ignore_plugins_states, show_macros = manager_cli.run(loader, cfg.plugins_dir())
 loader.ignore_state_on_boot = ignore_plugins_states
-loader.load_directory(cfg.plugins_dir(), only=only_plugins)
+loader.load_directory(cfg.plugins_dir(), only=only_plugins, skip_requirements=show_macros)
+
+if show_macros:
+    import sys
+    manager_cli.print_macros(loader)
+    sys.exit(0)
+
+
+@app.get("/v1/macros", tags=["macros"], summary="List all macro namespaces and their current values")
+def list_macros():
+    return manager_cli.get_macros(loader)
 
 if __name__ == "__main__":
     cfg.logger.debug("Starting server with uvicorn kwargs: %s", cfg.uvicorn_kwargs())

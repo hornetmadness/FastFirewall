@@ -34,7 +34,7 @@ from fastapi import HTTPException  # TODO: add structured logging throughout thi
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
-from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service
+from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, MacroProviderPlugin, Service
 from plugin_system.core.events import Event, bus
 
 
@@ -185,7 +185,7 @@ def _diff_state(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
 
 # ── plugin class ───────────────────────────────────────────────────────────────
 
-class NetworkingPlugin(PluginBase, ApiRouterPlugin):
+class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
     services = [Service.NETWORKING]
 
     # ── lifecycle ──────────────────────────────────────────────────────
@@ -215,6 +215,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
                 source=self.plugin_id,
                 payload={"aliases": dict(self._aliases)},
             ))
+        self.add_macro_namespace("interface", self._resolve_interface_macro)
         self._register_routes()
 
     def teardown(self) -> None:
@@ -230,6 +231,13 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin):
         self._sysctl = desired.get("sysctl", {})
         self._aliases = desired.get("aliases", {})
         self._ensure_default_aliases()
+
+    def _resolve_interface_macro(self, *segments: str) -> Any:
+        alias = segments[0] if segments else None
+        return self._aliases.get(alias) if alias else None
+
+    def macro_snapshot(self) -> dict[str, dict[str, Any]]:
+        return {"interface": dict(self._aliases)}
 
     def _ensure_default_aliases(self) -> None:
         """Add identity alias (name → name) for every managed interface not yet in _aliases."""

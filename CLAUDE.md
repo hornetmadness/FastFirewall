@@ -23,6 +23,9 @@ uv run python app.py --plugin firewall --plugin dns
 # List all plugins and their enabled state
 uv run python app.py --list-plugins
 
+# Show all macro namespaces and their current resolved values, then exit
+uv run python app.py --show-macros
+
 # Enable or disable a plugin (edits plugin.yaml, then exits)
 uv run python app.py --enable-plugin syslog
 uv run python app.py --disable-plugin syslog
@@ -54,7 +57,7 @@ uv sync --extra dev
 
 The OpenAPI docs are available at `http://localhost:8000/docs` when the server is running.
 
-CLI argument parsing and all management commands (`--list-plugins`, `--enable-plugin`, `--disable-plugin`, `--help`) are handled by `plugin_system/manager_cli.py`. `app.py` calls `manager_cli.run(loader, plugins_dir)` which either exits after handling a management command or returns the plugin allow-list for normal startup.
+CLI argument parsing and all management commands (`--list-plugins`, `--show-macros`, `--enable-plugin`, `--disable-plugin`, `--help`) are handled by `plugin_system/manager_cli.py`. `app.py` calls `manager_cli.run(loader, plugins_dir)` which either exits after handling a pre-load command or returns `(only, ignore_states, show_macros)` for normal startup. `--show-macros` is a post-load command: `run()` signals it via the third return value, `app.py` calls `load_directory(skip_requirements=True)` to populate the macro registry without installing packages, then calls `manager_cli.print_macros(loader)` and exits. `manager_cli.get_macros(loader)` returns the same data as a plain dict and is used by `GET /v1/macros`.
 
 ## Architecture
 
@@ -65,8 +68,9 @@ This is a **FastAPI application driven entirely by plugins**. The app itself (`a
 1. `AppConfig.load()` reads `app_config.yaml` into typed dataclasses. `configure_state()` is called immediately after to apply backup settings before any plugin runs.
 2. `manager_cli.run(loader, plugins_dir)` parses CLI args; exits early for management commands, otherwise returns an optional plugin allow-list.
 3. `PluginLoader.load_directory()` scans the configured `plugins/` directory and derives load order via topological sort of `plugin_requirements` (dependencies before dependents; alphabetical tiebreaker). Pass `only=[...]` to restrict which plugins are loaded; transitive dependencies are included automatically.
-4. For each plugin directory with a `plugin.yaml` + `plugin.py`: the loader imports the module, instantiates any `PluginBase` subclass, wires up event handlers, calls `setup()`, then mounts FastAPI routes if the plugin is a `ApiRouterPlugin`.
-5. After loading, a `plugin.loaded` event is emitted on the bus.
+4. For each plugin directory with a `plugin.yaml` + `plugin.py`: the loader imports the module, instantiates any `PluginBase` subclass, wires up event handlers, calls `setup()`, then mounts FastAPI routes if the plugin is an `ApiRouterPlugin` and registers macro namespaces if the plugin is a `MacroProviderPlugin`.
+5. After all plugins are loaded, the loader populates `macro_registry` with the aggregated `service_port` data (ports with `-1`-only entries are omitted), then emits `plugins.all_loaded` on the bus.
+6. A `plugin.loaded` event is emitted on the bus after each individual plugin loads.
 
 ### Plugin anatomy
 
@@ -102,6 +106,24 @@ class MyPlugin(PluginBase, ApiRouterPlugin):
     services = [Service.DNS]     # exclusive ownership claim
 ```
 The loader mounts `self.router` at `/v1/<plugin_id>/`. Add routes to `self.router` inside `setup()`.
+
+`MacroProviderPlugin` (`plugin_system/core/macro_provider_plugin.py`) — mixin for plugins that expose one or more macro namespaces. Must also inherit `PluginBase`. Call `self.add_macro_namespace(name, resolver)` inside `setup()` for each namespace the plugin owns — analogous to adding routes to `self.router`:
+```python
+class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
+    services = [Service.NETWORKING]
+
+    def setup(self):
+        self.add_macro_namespace("interface", self._resolve_interface_macro)
+        # a plugin can register multiple namespaces
+
+    def _resolve_interface_macro(self, *segments: str) -> Any:
+        return self._aliases.get(segments[0]) if segments else None
+
+    def macro_snapshot(self) -> dict[str, dict[str, Any]]:
+        # optional — override to expose current entries for --show-macros / GET /v1/macros
+        return {"interface": dict(self._aliases)}
+```
+After `setup()` the loader calls `macro_registry.register_namespace(name, resolver)` for every namespace the plugin declared. On unload each namespace is unregistered. Both `ApiRouterPlugin` and `MacroProviderPlugin` use cooperative `__init__` (`super().__init__()`), so multiple mixins compose correctly.
 
 ### Service exclusivity
 
@@ -141,12 +163,67 @@ await bus.emit_async(event)   # awaits async handlers; prefer in async contexts
 
 The bus auto-injects the emitting plugin's `services` list into `event.payload` unless the caller already set a `"services"` key.
 
+### Macro system
+
+`macro_registry` (`plugin_system/core/macros.py`) is the module-level singleton that stores all macro namespaces. Plugins and rules reference macros with `$namespace.key` syntax (e.g. `$service_port.dns.udp`, `$interface.lan1`).
+
+**Built-in namespace — `service_port`**
+
+Populated by the loader after all plugins finish loading. Keys come from each plugin's `service_ports` in `plugin.yaml`; protocols with all-`-1` port values are omitted. Example: `$service_port.dns.udp` → `[53]`.
+
+**Plugin-defined namespaces**
+
+Populated by `MacroProviderPlugin` subclasses (see Plugin base classes above). The loader calls `macro_registry.register_namespace(name, resolver)` after `setup()` for each namespace the plugin declared. On unload, each namespace is unregistered.
+
+**Resolution API**
+
+```python
+from plugin_system.core.macros import macro_registry
+
+# Resolve to a list of port integers (also accepts a bare int)
+ports: list[int] = macro_registry.resolve_ports("$service_port.dns.udp")   # → [53]
+
+# Resolve to a string (string-valued namespaces only)
+alias: str | None = macro_registry.resolve_string("$interface.lan1")       # → "enp0s25"
+
+# All currently registered namespaces
+namespaces: list[str] = macro_registry.namespaces   # e.g. ["service_port", "interface"]
+```
+
+Both `resolve_ports` and `resolve_string` return `[]` / `None` for unknown macros or malformed syntax — callers should treat these as "unresolvable" rather than errors.
+
+**Testing with macros**
+
+Tests that exercise port-based rules must seed the registry before the call and clean up after:
+
+```python
+from plugin_system.core.macros import macro_registry
+
+macro_registry.set_service_ports({"dns": {"udp": [53]}})
+try:
+    # ... test code
+finally:
+    macro_registry.set_service_ports({})
+```
+
+For string-valued namespaces, use `register_namespace` / `unregister_namespace`:
+
+```python
+macro_registry.register_namespace("interface", lambda *s: "enp0s25" if s == ("lan1",) else None)
+try:
+    # ... test code
+finally:
+    macro_registry.unregister_namespace("interface")
+```
+
 ### PluginLoader management API
 
 Beyond `load_plugin` / `unload_plugin`, `PluginLoader` exposes two read/write helpers that do not load or execute any plugin code:
 
 - `list_plugins(directory)` — scans `directory` and returns a list of dicts with `id`, `name`, `version`, `description`, `author`, `enabled`, `plugin_requirements`, `service_ports` for every discovered plugin, sorted in topological load order.
 - `set_plugin_enabled(directory, plugin_id, enabled)` — finds the plugin by id, sets the `enabled` field in its `plugin.yaml`, and writes it back. Raises `PluginError` if the plugin is not found.
+
+`load_directory(directory, only=None, skip_requirements=False)` and `load_plugin(path, skip_requirements=False)` accept a `skip_requirements` flag. When `True`, the loader skips pyinfra `py_requirements` / `os_requirements` installation. Use this for CLI-only loads (e.g. `--show-macros`) where populating runtime state is needed but installing packages is a side-effect you want to avoid.
 
 `PluginLoader` maintains two runtime registries updated on every load/unload:
 - `service_registry` — `{Service → plugin_id}`: which plugin owns each service
@@ -346,6 +423,7 @@ Enforcement is a middleware in `app.py` (`enforce_auth`). Routes listed in `auth
 **Endpoints added by `app.py`:**
 - `POST /token` — OAuth2 password flow; accepts `username` + `password` form fields, returns `{"access_token": "...", "token_type": "bearer"}`
 - `GET /auth/me` — returns `{"username": "...", "roles": [...]}` for the authenticated caller; also registers both security schemes in the OpenAPI `/docs` "Authorize" dialog
+- `GET /v1/macros` — returns all macro namespaces and their current resolved values as a structured dict; delegates to `manager_cli.get_macros(loader)` (same data as `--show-macros`)
 
 **Using Basic Auth:**
 ```
