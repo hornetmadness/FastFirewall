@@ -13,10 +13,10 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 import bcrypt as _bcrypt
+import jwt as _jwt
 from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials, OAuth2PasswordBearer
-from jose import JWTError, jwt
 
 if TYPE_CHECKING:
     from app_config import AuthConfig
@@ -87,11 +87,11 @@ def _check_password(username: str, password: str) -> AuthUser | None:
 
 def _decode_token(token: str) -> AuthUser | None:
     try:
-        payload = jwt.decode(token, _st.secret_key, algorithms=[_st.algorithm])
+        payload = _jwt.decode(token, _st.secret_key, algorithms=[_st.algorithm])
         username = payload.get("sub")
         if username:
             return AuthUser(username=username, roles=payload.get("roles", []))
-    except JWTError:
+    except _jwt.PyJWTError:
         pass
     return None
 
@@ -114,7 +114,7 @@ def _user_from_header(authorization: str) -> AuthUser | None:
 
 def create_token(username: str, roles: list[str]) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=_st.token_expire_minutes)
-    return jwt.encode(
+    return _jwt.encode(
         {"sub": username, "roles": roles, "exp": expire},
         _st.secret_key,
         algorithm=_st.algorithm,
