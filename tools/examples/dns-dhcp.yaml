@@ -1,0 +1,43 @@
+# FastFirewall bootstrap config — DNS + DHCP only scenario
+#
+# Configures dnsmasq for internal name resolution and DHCP on a LAN segment.
+# Does not touch networking interfaces or firewall rules.
+#
+# Run with:
+#   uv run tools/bootstrap.py --config tools/examples/dns-dhcp.yaml
+
+server:
+  host: "http://localhost:8000"
+  username: "admin"
+  password: "admin"
+
+scenario: "dns-dhcp"
+
+# LAN address is used to set the DNS listen address and as the default
+# gateway/DNS option handed out to DHCP clients.
+network:
+  lan:
+    address: "192.168.0.1/24"
+
+dns:
+  domain: "home.lan"
+  upstream:
+    - "8.8.8.8"
+    - "1.1.1.1"
+  # Optional static records
+  records:
+    - type: "A"
+      name: "router.home.lan"
+      value: "192.168.0.1"
+    # - type: "CNAME"
+    #   name: "www.home.lan"
+    #   value: "router.home.lan"
+
+dhcp:
+  start: "192.168.0.100"
+  end: "192.168.0.200"
+  lease_time: "24h"
+  interface: "eth1"       # bind DHCP to this interface (optional but recommended)
+  # gateway: "192.168.0.1"  # defaults to the LAN address above
+  # dns: "192.168.0.1"      # defaults to the LAN address above
+  # netmask: "255.255.255.0"

@@ -476,6 +476,86 @@ def test_import_group_not_found_returns_404(client):
     assert client.post("/v1/host/groups/no_such_group_xyz/import").status_code == 404
 
 
+def test_import_group_includes_members(client):
+    r = client.post("/v1/host/groups/root/import")
+    assert r.status_code == 201
+    assert "members" in r.json()
+
+
+def test_list_group_members_returns_ff_managed_flag(client):
+    client.post("/v1/host/groups/root/import")
+    r = client.get("/v1/host/groups/root/members")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["group"] == "root"
+    assert isinstance(data["members"], list)
+    for m in data["members"]:
+        assert "username" in m
+        assert "ff_managed" in m
+
+
+def test_list_group_members_not_found_returns_404(client):
+    assert client.get("/v1/host/groups/no_such_group_xyz/members").status_code == 404
+
+
+def test_add_group_member_requires_managed_group(client):
+    r = client.post("/v1/host/groups/unmanaged_xyz/members", json={"username": "alice"})
+    assert r.status_code == 404
+
+
+def test_add_group_member_success(client, plugin):
+    client.post("/v1/host/groups/root/import")
+    plugin._pyinfra_run.reset_mock()
+    r = client.post("/v1/host/groups/root/members", json={"username": "alice"})
+    assert r.status_code == 201
+    assert r.json() == {"group": "root", "username": "alice", "ff_managed": True}
+    args, kwargs = plugin._pyinfra_run.call_args
+    from pyinfra.operations import server as server_ops
+    assert args[0] is server_ops.shell
+    assert "alice" in kwargs["commands"][0]
+
+
+def test_add_group_member_rejects_invalid_username(client):
+    client.post("/v1/host/groups/root/import")
+    r = client.post("/v1/host/groups/root/members", json={"username": "bad;user"})
+    assert r.status_code == 422
+
+
+def test_add_group_member_idempotent(client, plugin):
+    client.post("/v1/host/groups/root/import")
+    client.post("/v1/host/groups/root/members", json={"username": "alice"})
+    plugin._pyinfra_run.reset_mock()
+    r = client.post("/v1/host/groups/root/members", json={"username": "alice"})
+    assert r.status_code == 201
+    members_in_state = [
+        m for m in client.get("/v1/host/groups/root/members").json()["members"]
+        if m["username"] == "alice" and m["ff_managed"]
+    ]
+    assert len(members_in_state) == 1
+
+
+def test_remove_group_member_success(client, plugin):
+    client.post("/v1/host/groups/root/import")
+    client.post("/v1/host/groups/root/members", json={"username": "alice"})
+    plugin._pyinfra_run.reset_mock()
+    r = client.delete("/v1/host/groups/root/members/alice")
+    assert r.status_code == 200
+    assert r.json()["deleted"] is True
+    from pyinfra.operations import server as server_ops
+    args, kwargs = plugin._pyinfra_run.call_args
+    assert args[0] is server_ops.shell
+    assert "alice" in kwargs["commands"][0]
+
+
+def test_remove_group_member_not_managed_returns_404(client):
+    client.post("/v1/host/groups/root/import")
+    assert client.delete("/v1/host/groups/root/members/nobody").status_code == 404
+
+
+def test_remove_group_member_unmanaged_group_returns_404(client):
+    assert client.delete("/v1/host/groups/ghost/members/alice").status_code == 404
+
+
 # ── cron ───────────────────────────────────────────────────────────────────────
 
 def test_list_cron_empty(client):

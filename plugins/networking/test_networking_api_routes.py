@@ -1240,3 +1240,76 @@ def test_boot_emits_aliases_updated_when_aliases_exist(tmp_path):
         assert received[0].payload["aliases"] == {"LAN1": "eth0"}
     finally:
         global_bus.unsubscribe("networking.aliases_updated", received.append)
+
+
+# ── GET /config/diff ───────────────────────────────────────────────────────────
+
+def test_diff_empty_when_no_pending_changes(client):
+    r = client.get("/v1/networking/config/diff")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["pending_changes"] is False
+    assert body["diff"] == {}
+
+
+def test_diff_shows_added_interface(plugin, client):
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    client.post("/v1/networking/apply")
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
+    r = client.get("/v1/networking/config/diff")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["pending_changes"] is True
+    assert "eth0" in body["diff"]["interfaces"]["added"]
+
+
+def test_diff_shows_removed_interface(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    client.post("/v1/networking/apply")
+    client.delete("/v1/networking/config/interfaces/eth0")
+    r = client.get("/v1/networking/config/diff")
+    body = r.json()
+    assert body["pending_changes"] is True
+    assert "eth0" in body["diff"]["interfaces"]["removed"]
+
+
+def test_diff_shows_modified_interface(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    client.post("/v1/networking/apply")
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.2/24"]})
+    r = client.get("/v1/networking/config/diff")
+    body = r.json()
+    assert body["pending_changes"] is True
+    modified = body["diff"]["interfaces"]["modified"]["eth0"]
+    assert modified["from"]["addresses"] == ["10.0.0.1/24"]
+    assert modified["to"]["addresses"] == ["10.0.0.2/24"]
+
+
+def test_diff_shows_added_sysctl(plugin, client):
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    client.post("/v1/networking/apply")
+    client.put("/v1/networking/config/sysctl/net.ipv4.ip_forward", json={"value": "1"})
+    r = client.get("/v1/networking/config/diff")
+    body = r.json()
+    assert body["pending_changes"] is True
+    assert "net.ipv4.ip_forward" in body["diff"]["sysctl"]["added"]
+
+
+def test_diff_pending_false_after_apply(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+    client.post("/v1/networking/apply")
+    r = client.get("/v1/networking/config/diff")
+    body = r.json()
+    assert body["pending_changes"] is False
+    assert body["diff"] == {}
+
+
+def test_diff_no_current_snapshot_returns_empty_diff(client):
+    # With ignore_state_on_boot the plugin has no current snapshot yet
+    r = client.get("/v1/networking/config/diff")
+    body = r.json()
+    assert body["pending_changes"] is False
+    assert body["diff"] == {}

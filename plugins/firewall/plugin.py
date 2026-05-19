@@ -17,7 +17,10 @@ Events consumed:
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import shutil
 import subprocess
 import tempfile
 import uuid
@@ -40,18 +43,11 @@ SUPPORTED_PLATFORMS = [
     "juniper",
     "paloalto",
     "arista",
-    "iptables",
+    "nftables",
     "nsxv",
     "srx",
     "gce",
 ]
-
-_PORT_TOKENS: dict[int, str] = {
-    20: "FTP_DATA", 21: "FTP", 22: "SSH", 23: "TELNET", 25: "SMTP",
-    53: "DNS", 80: "HTTP", 110: "POP3", 143: "IMAP", 443: "HTTPS",
-    445: "MICROSOFT_DS", 3306: "MYSQL", 3389: "RDP", 5432: "POSTGRESQL",
-    8080: "HTTP_8080", 8443: "HTTPS_8443",
-}
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
@@ -118,7 +114,7 @@ class RuleUpdate(BaseModel):
 
 
 class CompileRequest(BaseModel):
-    platform: str = "iptables"
+    platform: str = "nftables"
     filter_name: str = "fastfirewall"
 
 
@@ -138,7 +134,7 @@ def _net_name(address: str) -> str:
 
 
 def _port_token(port: int) -> str:
-    return _PORT_TOKENS.get(port, str(port))
+    return str(port)
 
 
 def _build_networks(rules: list[FirewallRule]) -> dict[str, Any]:
@@ -197,10 +193,14 @@ def _build_policy(
         terms.append(term)
     # Implicit deny ensures no traffic slips through by default.
     terms.append({"name": "default-deny", "action": "deny", "comment": "Implicit deny all"})
+    _TARGET_OPTIONS: dict[str, str] = {
+        "nftables": "inet input 0",
+    }
+    target_opts = _TARGET_OPTIONS.get(platform, "extended")
     return {
         "filters": [{
             "header": {
-                "targets": {platform: "extended"},
+                "targets": {platform: target_opts},
                 "comment": f"FastFirewall managed policy: {filter_name}",
             },
             "terms": terms,
@@ -213,6 +213,7 @@ def _compile_rules(
     filter_name: str,
     platform: str,
     logger: Any,
+    debug_dir: str | None = None,
 ) -> str:
     """
     Invoke the aerleon CLI to produce platform-specific ACL output.
@@ -237,10 +238,11 @@ def _compile_rules(
                 [
                     "uv",
                     "run",
-                    "aerleon",
-                    "--policy-file", policy_path,
-                    "--base-directory", tmp,
-                    "--output-directory", output_dir,
+                    "aclgen",
+                    "--policy_file", policy_path,
+                    "--base_directory", tmp,
+                    "--definitions_directory", tmp,
+                    "--output_directory", output_dir,
                 ],
                 capture_output=True, text=True, timeout=30,
             )
@@ -255,6 +257,11 @@ def _compile_rules(
             for fname in sorted(os.listdir(output_dir)):
                 with open(os.path.join(output_dir, fname)) as fh:
                     outputs.append(f"# --- {fname} ---\n{fh.read()}")
+            if debug_dir is not None:
+                os.makedirs(debug_dir, exist_ok=True)
+                shutil.copy2(nets_path, os.path.join(debug_dir, "networks.yaml"))
+                shutil.copy2(policy_path, os.path.join(debug_dir, "policy.yaml"))
+                logger.debug("aerleon policy inputs written to %s", debug_dir)
             return "\n".join(outputs) if outputs else "# (no output files generated)"
 
         except FileNotFoundError:
@@ -264,6 +271,38 @@ def _compile_rules(
             )
         except subprocess.TimeoutExpired:
             return "# aerleon compile timed out after 30 s"
+
+
+def _rule_hash(data: dict) -> str:
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
+
+
+_DEFAULT_RULES: list[dict] = [
+    {
+        "name": "allow-ssh",
+        "action": "accept",
+        "protocol": "tcp",
+        "src_address": "any",
+        "dst_address": "any",
+        "src_port": None,
+        "dst_port": 22,
+        "comment": "Allow SSH from any source",
+        "priority": 10,
+        "enabled": True,
+    },
+    {
+        "name": "allow-fastfirewall-api",
+        "action": "accept",
+        "protocol": "tcp",
+        "src_address": "any",
+        "dst_address": "any",
+        "src_port": None,
+        "dst_port": 8000,
+        "comment": "Allow FastFirewall API from any source",
+        "priority": 11,
+        "enabled": True,
+    },
+]
 
 
 # ── plugin class ───────────────────────────────────────────────────────────────
@@ -278,8 +317,9 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             self.plugin_dir, self.config, "rules_file", "firewall_rules.json", self.logger,
             mutation_model="deferred",
         )
-        self._default_platform = self.config.get("default_platform", "iptables")
+        self._default_platform = self.config.get("default_platform", "nftables")
         self._default_filter = self.config.get("default_filter_name", "fastfirewall")
+        self._debug = bool(self.config.get("debug", False))
         self._rules: dict[str, FirewallRule] = {}
         if not self.config.get("ignore_state_on_boot", False):
             self._load_rules()
@@ -294,12 +334,20 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
     # ── persistence ────────────────────────────────────────────────────
 
     def _load_rules(self) -> None:
+        fresh_install = not self._state_file.path.exists()
         raw = self._state_file.load_desired(default=[])
         try:
             self._rules = {r["id"]: FirewallRule(**r) for r in raw}
         except Exception:
             self.logger.error("Failed to parse rules from %r, starting empty", self._state_file.path, exc_info=True)
             self._rules = {}
+        if fresh_install:
+            for rule_data in _DEFAULT_RULES:
+                rule_id = _rule_hash(rule_data)
+                if rule_id not in self._rules:
+                    self._rules[rule_id] = FirewallRule(id=rule_id, **rule_data)
+            self._save_rules()
+            self.logger.info("Fresh install — seeded %d default rules", len(_DEFAULT_RULES))
 
     def _save_rules(self) -> None:
         self._state_file.save_desired([r.model_dump() for r in self._rules.values()])
@@ -309,27 +357,30 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         if not enabled:
             return
         try:
-            output = _compile_rules(enabled, self._default_filter, self._default_platform, self.logger)
+            output = _compile_rules(enabled, self._default_filter, self._default_platform, self.logger, self._debug_dir)
             if output.startswith("#"):
                 self.logger.warning("Skipping boot-time rule apply — aerleon did not produce clean output")
                 return
-            self._execute_compiled_rules(output)
+            self._execute_compiled_rules(output, self._compiled_output_path)
             self._state_file.commit()
             self.logger.info("Re-applied %d rules to %s on boot", len(enabled), self._default_platform)
         except Exception as exc:
             self.logger.warning("Could not re-apply rules on boot: %s", exc)
 
-    def _execute_compiled_rules(self, output: str) -> None:
-        if self._default_platform != "iptables":
+    def _execute_compiled_rules(self, output: str, output_path: str) -> None:
+        if self._default_platform != "nftables":
             raise RuntimeError(
                 f"Auto-apply unsupported for platform {self._default_platform!r}; apply manually"
             )
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w") as fh:
+            fh.write(output)
         result = subprocess.run(
-            ["sudo", "iptables-restore"],
-            input=output, text=True, capture_output=True, timeout=30,
+            ["sudo", "nft", "-f", output_path],
+            capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"iptables-restore failed: {result.stderr.strip()}")
+            raise RuntimeError(f"nft failed: {result.stderr.strip()}")
 
     # ── route registration ─────────────────────────────────────────────
 
@@ -340,7 +391,8 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         add("/rules/{rule_id}", self._get_rule,       methods=["GET"],    summary="Get a firewall rule")
         add("/rules/{rule_id}", self._update_rule,    methods=["PUT"],    summary="Update a firewall rule")
         add("/rules/{rule_id}", self._delete_rule,    methods=["DELETE"], summary="Delete a firewall rule")
-        add("/apply",           self._apply,          methods=["POST"],   summary="Compile and apply rules to iptables")
+        add("/check",           self._check,          methods=["POST"],   summary="Dry-run compile (no apply)")
+        add("/apply",           self._apply,          methods=["POST"],   summary="Compile and apply rules to nftables")
         add("/compile",         self._compile,        methods=["POST"],   summary="Compile rules with aerleon (preview only)")
         add("/policy",          self._get_policy,      methods=["GET"],   summary="Show raw aerleon policy")
         add("/platforms",       self._list_platforms, methods=["GET"],    summary="List supported platforms")
@@ -355,7 +407,10 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         return {"rules": [r.model_dump() for r in rules], "count": len(rules)}
 
     def _create_rule(self, body: RuleCreate) -> dict:
-        rule = FirewallRule(**body.model_dump())
+        rule_id = _rule_hash(body.model_dump())
+        if rule_id in self._rules:
+            raise HTTPException(409, f"An identical rule already exists (id={rule_id!r})")
+        rule = FirewallRule(id=rule_id, **body.model_dump())
         self._rules[rule.id] = rule
         self._save_rules()
         bus.emit(Event(
@@ -400,13 +455,32 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     # ── apply / aerleon endpoints ──────────────────────────────────────
 
-    def _apply(self) -> dict:
+    @property
+    def _debug_dir(self) -> str | None:
+        return os.path.join(str(self.plugin_dir), "data", "aerleon_debug") if self._debug else None
+
+    @property
+    def _compiled_output_path(self) -> str:
+        return os.path.join(str(self.plugin_dir), "data", f"{self._default_filter}.nft")
+
+    def _check(self) -> dict:
         enabled = [r for r in self._rules.values() if r.enabled]
         output = _compile_rules(enabled, self._default_filter, self._default_platform, self.logger)
+        success = not output.startswith("#")
+        return {
+            "success": success,
+            "platform": self._default_platform,
+            "rule_count": len(enabled),
+            "output": output if not success else "",
+        }
+
+    def _apply(self) -> dict:
+        enabled = [r for r in self._rules.values() if r.enabled]
+        output = _compile_rules(enabled, self._default_filter, self._default_platform, self.logger, self._debug_dir)
         if output.startswith("#"):
             raise HTTPException(503, f"Compile failed — aerleon did not produce clean output: {output.splitlines()[0]}")
         try:
-            self._execute_compiled_rules(output)
+            self._execute_compiled_rules(output, self._compiled_output_path)
         except RuntimeError as exc:
             raise HTTPException(500, str(exc)) from exc
         self._state_file.commit()
@@ -424,7 +498,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     def _compile(self, body: CompileRequest) -> CompileResult:
         enabled = [r for r in self._rules.values() if r.enabled]
-        output = _compile_rules(enabled, body.filter_name, body.platform, self.logger)
+        output = _compile_rules(enabled, body.filter_name, body.platform, self.logger, self._debug_dir)
         bus.emit(Event(
             name="firewall.compiled",
             source=self.plugin_id,
@@ -437,7 +511,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             rule_count=len(enabled),
         )
 
-    def _get_policy(self, platform: str = "iptables", filter_name: str = "fastfirewall", format: str = "json"):
+    def _get_policy(self, platform: str = "nftables", filter_name: str = "fastfirewall", format: str = "json"):
         enabled = [r for r in self._rules.values() if r.enabled]
         policy = _build_policy(enabled, filter_name, platform, self.logger)
         if format == "yaml":
@@ -462,6 +536,8 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             "default_filter": self._default_filter,
             "pending_changes": self._state_file.pending_changes,
             "macros": macro_registry.namespaces,
+            "compiled_output": self._compiled_output_path,
+            **({"debug_dir": self._debug_dir} if self._debug else {}),
         }
 
     # ── event handlers ─────────────────────────────────────────────────
@@ -471,7 +547,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         platform = event.payload.get("platform", self._default_platform)
         filter_name = event.payload.get("filter_name", self._default_filter)
         enabled = [r for r in self._rules.values() if r.enabled]
-        output = _compile_rules(enabled, filter_name, platform, self.logger)
+        output = _compile_rules(enabled, filter_name, platform, self.logger, self._debug_dir)
         if output.startswith("#"):
             self.logger.warning("Compile for %r produced no clean output: %s", platform, output.splitlines()[0])
         else:

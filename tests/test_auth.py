@@ -28,7 +28,7 @@ from ff_auth.auth import (
 def _cfg(**kwargs) -> AuthConfig:
     defaults = dict(
         enabled=True,
-        secret_key="test-secret-key",
+        secret_key="test-secret-key-for-unit-tests-only",
         algorithm="HS256",
         token_expire_minutes=60,
         exempt_paths=["/token"],
@@ -165,9 +165,9 @@ def test_decode_invalid_token_returns_none():
 
 
 def test_decode_token_wrong_secret():
-    setup(_cfg(secret_key="secret-a"))
+    setup(_cfg(secret_key="secret-aaa-padded-to-thirty-two-bytes"))
     token = create_token("admin", [])
-    setup(_cfg(secret_key="secret-b"))
+    setup(_cfg(secret_key="secret-bbb-padded-to-thirty-two-bytes"))
     assert _decode_token(token) is None
 
 

@@ -14,11 +14,27 @@ Seven managed resource types, each following the same three-endpoint pattern:
 | sysctl | `GET /sysctl` | `PUT /sysctl/{key}` | `DELETE /sysctl/{key}` | `POST /sysctl/{key}/import` |
 | users | `GET /users` | `POST /users/{name}` | `DELETE /users/{name}` | `POST /users/{name}/import` |
 | groups | `GET /groups` | `POST /groups/{name}` | `DELETE /groups/{name}` | `POST /groups/{name}/import` |
+| group members | `GET /groups/{name}/members` | `POST /groups/{name}/members` | `DELETE /groups/{name}/members/{username}` | — |
 | cron | `GET /cron` | `POST /cron/{name}` | `DELETE /cron/{name}` | `POST /cron/{name}/import` |
 | packages | `GET /packages` | `POST /packages/{name}` | `DELETE /packages/{name}` | `POST /packages/{name}/import` |
 | repos | `GET /repos` | `POST /repos/{name}` | `DELETE /repos/{name}` | `POST /repos/import` |
 
 Additional routes: `GET /status`, `GET /tasks`, `GET /hostname`, `PUT /hostname`, `GET /sysctl-all`, `GET /packages/search`, `POST /packages/upgrade-system`.
+
+### Group member management
+
+`GET /groups/{name}/members` — returns all members of the OS group (live read via `grp.getgrnam`), merged with the FF-managed member list. Each entry includes `ff_managed: bool`. Non-existent groups return 404.
+
+`POST /groups/{name}/members` — adds a user to a group via `gpasswd -a`. Requires the group to be FF-managed (imported or created via FF) — returns 404 otherwise. Body: `{"username": "..."}`. Username is validated against `^[a-z_][a-z0-9_-]{0,31}$`.
+
+`DELETE /groups/{name}/members/{username}` — removes a user from a group via `gpasswd -d`. Only removes FF-managed members (tracked in the state file); returns 404 if the username is not in the managed member list.
+
+Groups store their member list in the state file:
+```json
+"groups": {
+  "mygroup": {"system": false, "gid": 1001, "members": ["alice", "bob"]}
+}
+```
 
 `GET /services`, `GET /sysctl`, `GET /users`, `GET /groups`, `GET /cron`, `GET /repos` all read live system state and merge it with the managed dict, annotating each entry with `ff_managed: bool`. `GET /packages` returns only FF-managed packages (no live system merge).
 

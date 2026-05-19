@@ -387,8 +387,9 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         add("/config/sysctl/{key}",      self._set_sysctl,             methods=["PUT"],    summary="Set a sysctl value")
         add("/config/sysctl/{key}",      self._delete_sysctl,          methods=["DELETE"], summary="Remove a sysctl setting")
 
-        # full config + apply / check / discard
+        # full config + apply / check / discard / diff
         add("/config",                   self._get_config,             methods=["GET"],    summary="Full ifstate config (YAML or JSON)")
+        add("/config/diff",              self._diff,                   methods=["GET"],    summary="Diff between current (applied) and desired state")
         add("/apply",                    self._apply,                  methods=["POST"],   summary="Apply config via ifstatecli apply")
         add("/check",                    self._check,                  methods=["POST"],   summary="Dry-run via ifstatecli check")
         add("/discard",                  self._discard,                methods=["POST"],   summary="Discard pending changes and restore last applied state")
@@ -655,6 +656,15 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
 
     # ── apply / check ──────────────────────────────────────────────────
 
+    def _diff(self) -> dict[str, Any]:
+        current = self._state_file.current_snapshot or {}
+        desired = self._desired_snapshot()
+        changes = _diff_state(current, desired)
+        return {
+            "pending_changes": self._state_file.pending_changes,
+            "diff": changes,
+        }
+
     def _apply(self) -> dict[str, Any]:
         debug: bool = bool(self.config.get("debug", False))
         desired = self._desired_snapshot()
@@ -749,6 +759,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             )
         self._aliases[name] = body.interface
         self._save_state()
+        self._state_file.commit(self._desired_snapshot())
         bus.emit(Event(
             name="networking.aliases_updated",
             source=self.plugin_id,
@@ -761,6 +772,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             raise HTTPException(404, f"Alias {name!r} not found")
         del self._aliases[name]
         self._save_state()
+        self._state_file.commit(self._desired_snapshot())
         bus.emit(Event(
             name="networking.aliases_updated",
             source=self.plugin_id,

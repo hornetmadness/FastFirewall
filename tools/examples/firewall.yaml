@@ -1,0 +1,20 @@
+# FastFirewall bootstrap config — firewall-only scenario
+#
+# Adds a minimal set of firewall rules for a single-NIC host or an
+# existing router where DNS/DHCP are already configured.
+#
+# Run with:
+#   uv run tools/bootstrap.py --config tools/examples/firewall.yaml
+
+server:
+  host: "http://localhost:8000"
+  username: "admin"
+  password: "admin"
+
+scenario: "firewall"
+
+firewall:
+  lan_subnet: "192.168.0.0/24"
+  allow_ssh_from_lan: true
+  allow_http_from_lan: true
+  allow_https_from_lan: true

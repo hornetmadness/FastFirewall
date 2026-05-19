@@ -9,7 +9,11 @@
       "Edit(plugins/*/test_*.py)",
       "Edit(tests/**)",
       "Bash(git pull *)",
-      "Bash(git checkout *)"
+      "Bash(git checkout *)",
+      "Bash(git -C /home/emathis/FastFirewall branch -a)",
+      "Bash(git -C /home/emathis/FastFirewall status)",
+      "Bash(git -C /home/emathis/FastFirewall diff --stat HEAD)",
+      "Bash(git add *)"
     ]
   },
   "hooks": {

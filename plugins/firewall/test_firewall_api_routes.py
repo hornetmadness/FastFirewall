@@ -47,7 +47,7 @@ def _make_app(tmp_path):
     inst.logger = logging.getLogger("test.firewall")
     inst.config = {
         "rules_file": "rules.json",
-        "default_platform": "iptables",
+        "default_platform": "nftables",
         "default_filter_name": "test-fw",
     }
     inst.setup()
@@ -84,16 +84,16 @@ def test_status_returns_plugin_metadata(client):
     assert data["version"] == "1.0.0"
 
 
-def test_status_rule_counts_start_at_zero(client):
+def test_status_rule_counts_start_at_defaults(client):
     counts = client.get("/v1/firewall/status").json()["rules"]
-    assert counts == {"total": 0, "enabled": 0, "disabled": 0}
+    assert counts == {"total": 2, "enabled": 2, "disabled": 0}
 
 
 def test_status_counts_update_after_create(client):
     _create_rule(client, name="on",  enabled=True)
     _create_rule(client, name="off", enabled=False)
     counts = client.get("/v1/firewall/status").json()["rules"]
-    assert counts == {"total": 2, "enabled": 1, "disabled": 1}
+    assert counts == {"total": 4, "enabled": 3, "disabled": 1}
 
 
 def test_status_pending_changes_true_after_create(tmp_path):
@@ -124,24 +124,26 @@ def test_status_pending_changes_false_after_boot_apply(tmp_path):
 # List rules
 # ---------------------------------------------------------------------------
 
-def test_list_rules_empty(client):
+def test_list_rules_starts_with_defaults(client):
     r = client.get("/v1/firewall/rules")
     assert r.status_code == 200
-    assert r.json() == {"rules": [], "count": 0}
+    names = {rule["name"] for rule in r.json()["rules"]}
+    assert "allow-ssh" in names
+    assert "allow-fastfirewall-api" in names
 
 
 def test_list_rules_returns_all(client):
     _create_rule(client, name="rule-a")
     _create_rule(client, name="rule-b")
-    assert client.get("/v1/firewall/rules").json()["count"] == 2
+    assert client.get("/v1/firewall/rules").json()["count"] == 4  # 2 defaults + 2 added
 
 
 def test_list_rules_sorted_by_priority(client):
     _create_rule(client, name="low",  priority=200)
-    _create_rule(client, name="high", priority=10)
+    _create_rule(client, name="high", priority=5)   # below default priorities (10, 11)
     _create_rule(client, name="mid",  priority=100)
     names = [r["name"] for r in client.get("/v1/firewall/rules").json()["rules"]]
-    assert names == ["high", "mid", "low"]
+    assert names.index("high") < names.index("mid") < names.index("low")
 
 
 def test_list_rules_enabled_only_filter(client):
@@ -262,7 +264,7 @@ def test_delete_rule_404_for_unknown_id(client):
 
 def test_list_platforms_returns_known_platforms(client):
     platforms = client.get("/v1/firewall/platforms").json()["platforms"]
-    for expected in ("cisco", "juniper", "iptables"):
+    for expected in ("cisco", "juniper", "nftables"):
         assert expected in platforms
 
 
@@ -282,7 +284,7 @@ def test_apply_calls_execute_compiled_rules(tmp_path):
     with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
         r = TestClient(app).post("/v1/firewall/apply")
     assert r.status_code == 200
-    inst._execute_compiled_rules.assert_called_once_with(_CLEAN_OUTPUT)
+    inst._execute_compiled_rules.assert_called_once_with(_CLEAN_OUTPUT, inst._compiled_output_path)
 
 
 def test_apply_commits_state(tmp_path):
@@ -311,7 +313,7 @@ def test_apply_returns_rule_count(tmp_path):
     _create_rule(client, name="r2", enabled=False)
     with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
         data = client.post("/v1/firewall/apply").json()
-    assert data["rule_count"] == 1
+    assert data["rule_count"] == 3  # 2 defaults (enabled) + r1 (enabled)
     assert data["success"] is True
 
 
@@ -328,15 +330,15 @@ def test_apply_returns_503_when_aerleon_unavailable(tmp_path):
     assert r.status_code == 503
 
 
-def test_apply_returns_500_on_iptables_failure(tmp_path):
+def test_apply_returns_500_on_nft_failure(tmp_path):
     inst, mod = _make_inst(tmp_path)
-    inst._execute_compiled_rules = MagicMock(side_effect=RuntimeError("iptables-restore failed"))
+    inst._execute_compiled_rules = MagicMock(side_effect=RuntimeError("nft failed"))
     with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
     _create_rule(TestClient(app), name="r")
-    inst._execute_compiled_rules.side_effect = RuntimeError("iptables-restore failed")
+    inst._execute_compiled_rules.side_effect = RuntimeError("nft failed")
     with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
         r = TestClient(app).post("/v1/firewall/apply")
     assert r.status_code == 500
@@ -367,25 +369,26 @@ def test_apply_emits_event(tmp_path):
 
 def test_compile_returns_correct_shape(client):
     _create_rule(client, name="allow-https", action="accept", protocol="tcp", dst_port=443)
-    r = client.post("/v1/firewall/compile", json={"platform": "iptables", "filter_name": "test-fw"})
+    r = client.post("/v1/firewall/compile", json={"platform": "nftables", "filter_name": "test-fw"})
     assert r.status_code == 200
     data = r.json()
-    assert data["platform"] == "iptables"
+    assert data["platform"] == "nftables"
     assert data["filter_name"] == "test-fw"
-    assert data["rule_count"] == 1
+    assert data["rule_count"] == 3  # 2 defaults + 1 added
     assert data["output"] != ""
 
 
 def test_compile_counts_only_enabled_rules(client):
     _create_rule(client, name="on",  enabled=True)
     _create_rule(client, name="off", enabled=False)
-    assert client.post("/v1/firewall/compile", json={"platform": "cisco", "filter_name": "fw"}).json()["rule_count"] == 1
+    # 2 defaults (enabled) + "on" (enabled) = 3; "off" (disabled) excluded
+    assert client.post("/v1/firewall/compile", json={"platform": "cisco", "filter_name": "fw"}).json()["rule_count"] == 3
 
 
 def test_compile_with_no_rules_still_responds(client):
     r = client.post("/v1/firewall/compile", json={"platform": "cisco", "filter_name": "fw"})
     assert r.status_code == 200
-    assert r.json()["rule_count"] == 0
+    assert r.json()["rule_count"] == 2  # 2 defaults
 
 
 # ---------------------------------------------------------------------------
@@ -400,10 +403,10 @@ def test_policy_json_contains_rule_name(client):
     assert "ssh-rule" in r.text
 
 
-def test_policy_json_default_platform_is_iptables(client):
+def test_policy_json_default_platform_is_nftables(client):
     r = client.get("/v1/firewall/policy")
     targets = r.json()["filters"][0]["header"]["targets"]
-    assert "iptables" in targets
+    assert "nftables" in targets
 
 
 def test_policy_default_format_is_json(client):
@@ -436,9 +439,13 @@ def test_corrupt_rules_file_starts_empty(tmp_path):
     assert client.get("/v1/firewall/rules").json() == {"rules": [], "count": 0}
 
 
-def test_missing_rules_file_starts_empty(tmp_path):
+def test_missing_rules_file_seeds_defaults(tmp_path):
     client = TestClient(_make_app(tmp_path))
-    assert client.get("/v1/firewall/rules").json() == {"rules": [], "count": 0}
+    rules = client.get("/v1/firewall/rules").json()
+    assert rules["count"] == 2
+    names = {r["name"] for r in rules["rules"]}
+    assert "allow-ssh" in names
+    assert "allow-fastfirewall-api" in names
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +469,7 @@ def _make_inst(tmp_path, config=None):
     inst.logger = logging.getLogger("test.firewall")
     inst.config = {
         "rules_file": "rules.json",
-        "default_platform": "iptables",
+        "default_platform": "nftables",
         "default_filter_name": "test-fw",
         **(config or {}),
     }
@@ -477,14 +484,14 @@ _BOOT_RULE = [{"id": "r1", "name": "allow-http", "action": "accept"}]
 _CLEAN_OUTPUT = "*filter\n-P INPUT ACCEPT\nCOMMIT\n"
 
 
-def test_rules_applied_to_iptables_on_boot(tmp_path):
+def test_rules_applied_to_nft_on_boot(tmp_path):
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "rules.json").write_text(json.dumps({"desired_state": _BOOT_RULE}))
     inst, mod = _make_inst(tmp_path)
     inst._execute_compiled_rules = MagicMock()
     with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
         inst.setup()
-    inst._execute_compiled_rules.assert_called_once_with(_CLEAN_OUTPUT)
+    inst._execute_compiled_rules.assert_called_once_with(_CLEAN_OUTPUT, inst._compiled_output_path)
 
 
 def test_ignore_state_on_boot_skips_load_and_apply(tmp_path):
@@ -507,7 +514,7 @@ def test_apply_state_skips_when_aerleon_unavailable(tmp_path):
     assert "r1" in inst._rules  # rules still loaded
 
 
-def test_apply_state_does_not_crash_on_iptables_failure(tmp_path):
+def test_apply_state_does_not_crash_on_nft_failure(tmp_path):
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "rules.json").write_text(json.dumps({"desired_state": _BOOT_RULE}))
     inst, mod = _make_inst(tmp_path)
@@ -595,6 +602,48 @@ def test_create_rule_rejects_malformed_macro(client):
     assert r.status_code == 422
 
 
+def test_create_rule_rejects_duplicate_content(client):
+    body = {"name": "allow-ssh", "action": "accept", "protocol": "tcp", "dst_port": 22}
+    assert client.post("/v1/firewall/rules", json=body).status_code == 201
+    r = client.post("/v1/firewall/rules", json=body)
+    assert r.status_code == 409
+
+
+def test_create_rule_allows_same_name_different_content(client):
+    client.post("/v1/firewall/rules", json={"name": "allow-ssh", "action": "accept", "protocol": "tcp", "dst_port": 22})
+    r = client.post("/v1/firewall/rules", json={"name": "allow-ssh", "action": "accept", "protocol": "tcp", "dst_port": 2222})
+    assert r.status_code == 201
+
+
+def test_fresh_install_seeds_default_rules(tmp_path):
+    mod = _load_module()
+    app = _make_app(tmp_path)
+    client = TestClient(app)
+    rules = client.get("/v1/firewall/rules").json()["rules"]
+    names = {r["name"] for r in rules}
+    assert "allow-ssh" in names
+    assert "allow-fastfirewall-api" in names
+
+
+def test_fresh_install_persists_state_file(tmp_path):
+    _make_app(tmp_path)
+    state_file = tmp_path / "data" / "rules.json"
+    assert state_file.exists()
+    data = json.loads(state_file.read_text())
+    assert len(data["desired_state"]) == 2
+
+
+def test_existing_state_file_not_reseeded(tmp_path):
+    _make_app(tmp_path)
+    # second boot with an existing state file should not add duplicates
+    app2 = _make_app(tmp_path)
+    client = TestClient(app2)
+    rules = client.get("/v1/firewall/rules").json()["rules"]
+    names = [r["name"] for r in rules]
+    assert names.count("allow-ssh") == 1
+    assert names.count("allow-fastfirewall-api") == 1
+
+
 def test_update_rule_accepts_macro_port(client):
     rule = _create_rule(client, name="upgrade-to-macro", dst_port=22)
     data = client.put(f"/v1/firewall/rules/{rule['id']}", json={"dst_port": "$service_port.smtp.tcp"}).json()
@@ -613,9 +662,9 @@ def test_macro_resolved_to_port_in_policy():
     macro_registry.set_service_ports({"dns": {"udp": [53]}})
     try:
         rule = mod.FirewallRule(name="allow-dns", action="accept", protocol="udp", dst_port="$service_port.dns.udp")
-        policy = mod._build_policy([rule], "test", "iptables", logging.getLogger("test"))
+        policy = mod._build_policy([rule], "test", "nftables", logging.getLogger("test"))
         term = next(t for t in policy["filters"][0]["terms"] if t["name"] == "allow-dns")
-        assert term["destination-port"] == ["DNS"]
+        assert term["destination-port"] == ["53"]
     finally:
         macro_registry.set_service_ports({})
 
@@ -626,7 +675,7 @@ def test_macro_multi_port_all_appear_in_policy():
     macro_registry.set_service_ports({"smtp": {"tcp": [25, 587, 465]}})
     try:
         rule = mod.FirewallRule(name="allow-smtp", action="accept", protocol="tcp", dst_port="$service_port.smtp.tcp")
-        policy = mod._build_policy([rule], "test", "iptables", logging.getLogger("test"))
+        policy = mod._build_policy([rule], "test", "nftables", logging.getLogger("test"))
         term = next(t for t in policy["filters"][0]["terms"] if t["name"] == "allow-smtp")
         assert len(term["destination-port"]) == 3
     finally:
@@ -638,7 +687,7 @@ def test_macro_rule_skipped_when_registry_empty():
     mod = _load_module()
     macro_registry.set_service_ports({})
     rule = mod.FirewallRule(name="needs-dns", action="accept", dst_port="$service_port.dns.udp")
-    policy = mod._build_policy([rule], "test", "iptables", logging.getLogger("test"))
+    policy = mod._build_policy([rule], "test", "nftables", logging.getLogger("test"))
     term_names = [t["name"] for t in policy["filters"][0]["terms"]]
     assert "needs-dns" not in term_names
     assert "default-deny" in term_names
