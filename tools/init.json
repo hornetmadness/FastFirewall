@@ -1,0 +1,260 @@
+[
+  {
+    "method": "PUT",
+    "url": "http://localhost:8000/v1/host/hostname",
+    "description": "Set system hostname",
+    "body": {
+      "hostname": "gateway"
+    }
+  },
+  {
+    "method": "PUT",
+    "url": "http://localhost:8000/v1/networking/config/interfaces/enp0s25",
+    "description": "Configure WAN interface enp0s25",
+    "body": {
+      "link": {
+        "state": "up"
+      }
+    }
+  },
+  {
+    "method": "PUT",
+    "url": "http://localhost:8000/v1/networking/config/interfaces/enxf8e43b030662",
+    "description": "Configure LAN interface enxf8e43b030662",
+    "body": {
+      "addresses": [
+        "192.168.0.1/24"
+      ],
+      "link": {
+        "state": "up"
+      }
+    }
+  },
+  {
+    "method": "PUT",
+    "url": "http://localhost:8000/v1/networking/config/aliases/wan",
+    "description": "Set alias wan \u2192 enp0s25",
+    "body": {
+      "interface": "enp0s25"
+    }
+  },
+  {
+    "method": "PUT",
+    "url": "http://localhost:8000/v1/networking/config/aliases/lan",
+    "description": "Set alias lan \u2192 enxf8e43b030662",
+    "body": {
+      "interface": "enxf8e43b030662"
+    }
+  },
+  {
+    "method": "PUT",
+    "url": "http://localhost:8000/v1/networking/config/sysctl/net.ipv4.ip_forward",
+    "description": "Enable IPv4 forwarding for routing",
+    "body": {
+      "value": "1"
+    }
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/networking/check",
+    "description": "Validate networking config before applying"
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/networking/apply",
+    "description": "Apply networking config via ifstatecli"
+  },
+  {
+    "method": "PUT",
+    "url": "http://localhost:8000/v1/dnsmasq/dns",
+    "description": "Configure DNS settings",
+    "body": {
+      "rebind_protection": true,
+      "domain": "home.lan",
+      "upstream": [
+        "8.8.8.8",
+        "1.1.1.1"
+      ],
+      "listen_addresses": [
+        "192.168.0.1"
+      ]
+    }
+  },
+  {
+    "method": "PUT",
+    "url": "http://localhost:8000/v1/dnsmasq/dhcp",
+    "description": "Enable authoritative DHCP",
+    "body": {
+      "enabled": true,
+      "authoritative": true
+    }
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/dnsmasq/dhcp/ranges",
+    "description": "Add DHCP scope",
+    "body": {
+      "start": "192.168.0.100",
+      "end": "192.168.0.200",
+      "lease_time": "24h",
+      "interface": "enxf8e43b030662"
+    }
+  },
+  {
+    "method": "PUT",
+    "url": "http://localhost:8000/v1/dnsmasq/dhcp",
+    "description": "Set DHCP options (router, DNS, domain)",
+    "body": {
+      "options": {
+        "3": "192.168.0.1",
+        "6": "192.168.0.1",
+        "15": "home.lan"
+      }
+    }
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/dnsmasq/check",
+    "description": "Validate dnsmasq config before applying"
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/dnsmasq/apply",
+    "description": "Apply dnsmasq config and restart"
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/firewall/rules",
+    "description": "Add rule: allow-icmp",
+    "body": {
+      "name": "allow-icmp",
+      "action": "accept",
+      "protocol": "icmp",
+      "comment": "Allow ICMP (ping)",
+      "priority": 10
+    }
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/firewall/rules",
+    "description": "Add rule: allow-dns-udp-from-lan",
+    "body": {
+      "name": "allow-dns-udp-from-lan",
+      "action": "accept",
+      "protocol": "udp",
+      "src_address": "192.168.0.0/24",
+      "dst_port": 53,
+      "comment": "Allow DNS/UDP from LAN",
+      "priority": 20
+    }
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/firewall/rules",
+    "description": "Add rule: allow-dns-tcp-from-lan",
+    "body": {
+      "name": "allow-dns-tcp-from-lan",
+      "action": "accept",
+      "protocol": "tcp",
+      "src_address": "192.168.0.0/24",
+      "dst_port": 53,
+      "comment": "Allow DNS/TCP from LAN",
+      "priority": 21
+    }
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/firewall/rules",
+    "description": "Add rule: allow-dhcp-from-lan",
+    "body": {
+      "name": "allow-dhcp-from-lan",
+      "action": "accept",
+      "protocol": "udp",
+      "src_address": "192.168.0.0/24",
+      "dst_port": 67,
+      "comment": "Allow DHCP from LAN",
+      "priority": 22
+    }
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/firewall/rules",
+    "description": "Add rule: allow-ssh-from-lan",
+    "body": {
+      "name": "allow-ssh-from-lan",
+      "action": "accept",
+      "protocol": "tcp",
+      "src_address": "192.168.0.0/24",
+      "dst_port": 22,
+      "comment": "Allow SSH from LAN",
+      "priority": 30
+    }
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/firewall/rules",
+    "description": "Add rule: allow-http-from-lan",
+    "body": {
+      "name": "allow-http-from-lan",
+      "action": "accept",
+      "protocol": "tcp",
+      "src_address": "192.168.0.0/24",
+      "dst_port": 80,
+      "comment": "Allow HTTP from LAN",
+      "priority": 40
+    }
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/firewall/rules",
+    "description": "Add rule: allow-https-from-lan",
+    "body": {
+      "name": "allow-https-from-lan",
+      "action": "accept",
+      "protocol": "tcp",
+      "src_address": "192.168.0.0/24",
+      "dst_port": 443,
+      "comment": "Allow HTTPS from LAN",
+      "priority": 41
+    }
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/firewall/rules",
+    "description": "Add rule: deny-all",
+    "body": {
+      "name": "deny-all",
+      "action": "deny",
+      "comment": "Default deny \u2014 must be last",
+      "priority": 1000
+    }
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/firewall/check",
+    "description": "Validate firewall config before applying"
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/firewall/apply",
+    "description": "Apply firewall rules to iptables"
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/host/users/auser",
+    "description": "Create user auser",
+    "body": {
+      "shell": "/bin/bash"
+    }
+  },
+  {
+    "method": "POST",
+    "url": "http://localhost:8000/v1/host/groups/sudo/import",
+    "description": "Import sudo group into FF management"
+  },
+  {
+    "method": "GET",
+    "url": "http://localhost:8000/v1/host/groups",
+    "description": "Verify sudo group is FF-managed"
+  }
+]

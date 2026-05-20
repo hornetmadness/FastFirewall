@@ -34,6 +34,8 @@ import json
 import os
 import pickle
 import pwd
+import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -44,11 +46,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import BackgroundTasks, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from pyinfra.operations import files as files_ops
 from pyinfra.operations import server as server_ops
 from pyinfra.operations import systemd as systemd_ops
 
+from infra import PYINFRA_WORKER
 from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service
 from plugin_system.core.events import Event, bus
 from plugins.host._pkg_manager import (
@@ -84,6 +87,17 @@ class UserBody(BaseModel):
 class GroupBody(BaseModel):
     system: bool = False
     gid: Optional[int] = None
+
+
+class GroupMemberBody(BaseModel):
+    username: str
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, v: str) -> str:
+        if not re.match(r"^[a-z_][a-z0-9_-]{0,31}$", v):
+            raise ValueError("Invalid username format")
+        return v
 
 
 class CronBody(BaseModel):
@@ -263,8 +277,6 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
 
     # ── pyinfra helper ─────────────────────────────────────────────────────────
 
-    _WORKER_SCRIPT = Path(__file__).parent / "_pyinfra_worker.py"
-
     def _pyinfra_run(self, op: Any, **kwargs: Any) -> None:
         norm_kwargs = {
             k: ("__stringio__", v.getvalue()) if isinstance(v, io.StringIO) else v
@@ -272,7 +284,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         }
         payload = pickle.dumps((op.__module__, op.__name__, norm_kwargs))
         proc = subprocess.run(
-            [sys.executable, str(self._WORKER_SCRIPT)],
+            [sys.executable, str(PYINFRA_WORKER)],
             input=payload,
             capture_output=True,
         )
@@ -459,10 +471,13 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         add("/users/{name}",               self._delete_user,      methods=["DELETE"], summary="Remove a system user")
         add("/users/{name}/import",        self._import_user,      methods=["POST"],   summary="Import an existing system user into FF management", status_code=201)
 
-        add("/groups",                     self._list_groups,      methods=["GET"],    summary="List all groups with ff_managed flag")
-        add("/groups/{name}",              self._set_group,        methods=["POST"],   summary="Create or reconfigure a system group",  status_code=201)
-        add("/groups/{name}",              self._delete_group,     methods=["DELETE"], summary="Remove a system group")
-        add("/groups/{name}/import",       self._import_group,     methods=["POST"],   summary="Import an existing system group into FF management", status_code=201)
+        add("/groups",                     self._list_groups,        methods=["GET"],    summary="List all groups with ff_managed flag")
+        add("/groups/{name}",              self._set_group,          methods=["POST"],   summary="Create or reconfigure a system group",  status_code=201)
+        add("/groups/{name}",              self._delete_group,       methods=["DELETE"], summary="Remove a system group")
+        add("/groups/{name}/import",       self._import_group,       methods=["POST"],   summary="Import an existing system group into FF management", status_code=201)
+        add("/groups/{name}/members",      self._list_group_members, methods=["GET"],    summary="List group members with ff_managed flag")
+        add("/groups/{name}/members",      self._add_group_member,   methods=["POST"],   summary="Add a user to a group", status_code=201)
+        add("/groups/{name}/members/{username}", self._remove_group_member, methods=["DELETE"], summary="Remove a user from a group")
 
         add("/cron",                       self._list_cron,        methods=["GET"],    summary="List all cron entries with ff_managed flag")
         add("/cron/{name}",                self._set_cron,         methods=["POST"],   summary="Create or update a cron entry",         status_code=201)
@@ -826,11 +841,58 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         state: dict[str, Any] = {
             "system": entry.gr_gid < 1000,
             "gid": entry.gr_gid,
+            "members": list(entry.gr_mem),
         }
         self._state["groups"][name] = state
         self._save_state()
         self._emit("host.group.changed", {"group": name, **state})
         return {"group": name, **state, "ff_managed": True}
+
+    def _list_group_members(self, name: str) -> dict:
+        try:
+            entry = grp.getgrnam(name)
+        except KeyError:
+            raise HTTPException(404, f"Group {name!r} not found on system")
+        ff_members = set(self._state.get("groups", {}).get(name, {}).get("members", []))
+        all_members = set(entry.gr_mem) | ff_members
+        return {
+            "group": name,
+            "members": [
+                {"username": m, "ff_managed": m in ff_members}
+                for m in sorted(all_members)
+            ],
+        }
+
+    def _add_group_member(self, name: str, body: GroupMemberBody) -> dict:
+        if name not in self._state["groups"]:
+            raise HTTPException(404, f"Group {name!r} is not managed by FF — import it first")
+        self._pyinfra_run(
+            server_ops.shell,
+            name=f"Add {body.username} to group {name}",
+            commands=[f"gpasswd -a {shlex.quote(body.username)} {shlex.quote(name)}"],
+        )
+        members: list[str] = self._state["groups"][name].setdefault("members", [])
+        if body.username not in members:
+            members.append(body.username)
+        self._save_state()
+        self._emit("host.group.changed", {"group": name, "members": members})
+        return {"group": name, "username": body.username, "ff_managed": True}
+
+    def _remove_group_member(self, name: str, username: str) -> dict:
+        if name not in self._state["groups"]:
+            raise HTTPException(404, f"Group {name!r} is not managed by FF")
+        members: list[str] = self._state["groups"][name].get("members", [])
+        if username not in members:
+            raise HTTPException(404, f"{username!r} is not an FF-managed member of {name!r}")
+        self._pyinfra_run(
+            server_ops.shell,
+            name=f"Remove {username} from group {name}",
+            commands=[f"gpasswd -d {shlex.quote(username)} {shlex.quote(name)}"],
+        )
+        members.remove(username)
+        self._save_state()
+        self._emit("host.group.changed", {"group": name, "members": members})
+        return {"group": name, "username": username, "deleted": True}
 
     # ── cron ───────────────────────────────────────────────────────────────────
 

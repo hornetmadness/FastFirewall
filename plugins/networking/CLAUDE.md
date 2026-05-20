@@ -16,7 +16,7 @@ Three managed resource types:
 | routes | `GET /config/routes` | `POST /config/routes` | `DELETE /config/routes/{route_id}` | `POST /config/routes/import` |
 | sysctl | `GET /config/sysctl` | `PUT /config/sysctl/{key}` | `DELETE /config/sysctl/{key}` | — |
 
-Additional routes: `GET /status`, `GET /interfaces`, `GET /interfaces/{name}`, `GET /identify`, `GET /config`, `POST /apply`, `POST /check`, `POST /discard`, `POST /ping`, `POST /mtr`.
+Additional routes: `GET /status`, `GET /interfaces`, `GET /interfaces/{name}`, `GET /identify`, `GET /config`, `GET /config/diff`, `POST /apply`, `POST /check`, `POST /discard`, `POST /ping`, `POST /mtr`.
 
 ## Route prefixes: live vs config
 
@@ -61,6 +61,10 @@ Additional routes: `GET /status`, `GET /interfaces`, `GET /interfaces/{name}`, `
 
 **`_run_ifstate(*args)`** — runs `sudo uv run ifstatecli <args>` as a subprocess.
 
+## `GET /config/diff`
+
+Returns a structured diff between the last applied state (`current_snapshot`) and the current desired state. Response: `{pending_changes: bool, diff: {...}}`. The `diff` is computed by `_diff_state(current, desired)`. If nothing has ever been applied (`current_snapshot` is `None`), treats current as `{}`.
+
 ## `POST /discard`
 
 Reverts `_interfaces`, `_routes`, `_sysctl` back to `self._state_file.current_snapshot`. If `current_snapshot` is `None` (never applied), raises 409.
@@ -77,6 +81,10 @@ Routes are keyed by a 16-character SHA-256 prefix of the serialized route dict (
 
 `POST /ping` — runs `ping -c <count> <host>`. Input validated by Pydantic (`PingRequest`) to reject shell metacharacters.  
 `POST /mtr` — runs `mtr --report --json --report-cycles <count> <host>` and formats the hub list into a tabular string array.
+
+## Alias mutations and `pending_changes`
+
+Interface alias `PUT`/`DELETE` mutations call `self._state_file.commit(self._desired_snapshot())` immediately after `_save_state()`. This means alias changes do **not** leave `pending_changes: true` — they are treated as instant (no external apply step is needed to commit an alias change, since aliases are local to the FF macro system and don't touch the kernel).
 
 ## Events emitted
 

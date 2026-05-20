@@ -1,0 +1,64 @@
+# FastFirewall bootstrap config — full gateway scenario
+#
+# Configures a dual-homed router/gateway with:
+#   - WAN and LAN interface addressing
+#   - IPv4 forwarding
+#   - Internal DNS (dnsmasq) with an upstream resolver
+#   - DHCP scope for the LAN segment
+#   - Firewall rules (allow LAN traffic, deny unsolicited WAN ingress)
+#   - A new admin user (sudo must be configured manually after)
+#
+# Run with:
+#   uv run tools/bootstrap.py --config tools/examples/gateway.yaml
+#   uv run tools/bootstrap.py --config tools/examples/gateway.yaml --export my-setup.json
+
+server:
+  host: "http://localhost:8000"
+  username: "admin"
+  password: "admin"
+
+scenario: "gateway"
+
+hostname: "gateway"
+
+network:
+  wan:
+    interface: "eth0"
+    mode: "dhcp"           # or "static" — set address + gateway below if static
+    # address: "203.0.113.5/24"
+    # gateway: "203.0.113.1"
+  lan:
+    interface: "eth1"
+    address: "192.168.0.1/24"
+
+dns:
+  domain: "home.lan"
+  upstream:
+    - "8.8.8.8"
+    - "1.1.1.1"
+  # Optional static DNS records
+  records:
+    - type: "A"
+      name: "gateway.home.lan"
+      value: "192.168.0.1"
+    # - type: "A"
+    #   name: "nas.home.lan"
+    #   value: "192.168.0.10"
+
+dhcp:
+  start: "192.168.0.100"
+  end: "192.168.0.200"
+  lease_time: "24h"
+  # gateway and dns default to the LAN address above (192.168.0.1)
+  # netmask: "255.255.255.0"   # optional; dnsmasq infers from range if omitted
+
+firewall:
+  lan_subnet: "192.168.0.0/24"
+  allow_ssh_from_lan: true
+  allow_http_from_lan: true
+  allow_https_from_lan: true
+
+user:
+  username: "netadmin"
+  shell: "/bin/bash"
+  sudo: true    # note: sudo group membership requires: usermod -aG sudo netadmin

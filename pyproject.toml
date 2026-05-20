@@ -12,6 +12,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "PyJWT[crypto]>=2.4",
     "bcrypt>=4.0",
+    "idna>=3.15",
 ]
 
 [project.optional-dependencies]

@@ -233,11 +233,32 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         self._ensure_default_aliases()
 
     def _resolve_interface_macro(self, *segments: str) -> Any:
-        alias = segments[0] if segments else None
-        return self._aliases.get(alias) if alias else None
+        if len(segments) < 2:
+            return None
+        alias, field = segments[0], segments[1]
+        device = self._aliases.get(alias)
+        if device is None:
+            return None
+        if field == "name":
+            return device
+        if field == "address":
+            return [
+                str(ipaddress.ip_interface(a).ip)
+                for a in self._interfaces.get(device, {}).get("addresses", [])
+            ]
+        return None
 
     def macro_snapshot(self) -> dict[str, dict[str, Any]]:
-        return {"interface": dict(self._aliases)}
+        entries: dict[str, Any] = {}
+        for alias, device in self._aliases.items():
+            entries[f"{alias}.name"] = device
+            addrs = [
+                str(ipaddress.ip_interface(a).ip)
+                for a in self._interfaces.get(device, {}).get("addresses", [])
+            ]
+            if addrs:
+                entries[f"{alias}.address"] = addrs
+        return {"interface": entries}
 
     def _ensure_default_aliases(self) -> None:
         """Add identity alias (name → name) for every managed interface not yet in _aliases."""
@@ -387,8 +408,9 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         add("/config/sysctl/{key}",      self._set_sysctl,             methods=["PUT"],    summary="Set a sysctl value")
         add("/config/sysctl/{key}",      self._delete_sysctl,          methods=["DELETE"], summary="Remove a sysctl setting")
 
-        # full config + apply / check / discard
+        # full config + apply / check / discard / diff
         add("/config",                   self._get_config,             methods=["GET"],    summary="Full ifstate config (YAML or JSON)")
+        add("/config/diff",              self._diff,                   methods=["GET"],    summary="Diff between current (applied) and desired state")
         add("/apply",                    self._apply,                  methods=["POST"],   summary="Apply config via ifstatecli apply")
         add("/check",                    self._check,                  methods=["POST"],   summary="Dry-run via ifstatecli check")
         add("/discard",                  self._discard,                methods=["POST"],   summary="Discard pending changes and restore last applied state")
@@ -655,6 +677,15 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
 
     # ── apply / check ──────────────────────────────────────────────────
 
+    def _diff(self) -> dict[str, Any]:
+        current = self._state_file.current_snapshot or {}
+        desired = self._desired_snapshot()
+        changes = _diff_state(current, desired)
+        return {
+            "pending_changes": self._state_file.pending_changes,
+            "diff": changes,
+        }
+
     def _apply(self) -> dict[str, Any]:
         debug: bool = bool(self.config.get("debug", False))
         desired = self._desired_snapshot()
@@ -749,6 +780,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             )
         self._aliases[name] = body.interface
         self._save_state()
+        self._state_file.commit(self._desired_snapshot())
         bus.emit(Event(
             name="networking.aliases_updated",
             source=self.plugin_id,
@@ -761,6 +793,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             raise HTTPException(404, f"Alias {name!r} not found")
         del self._aliases[name]
         self._save_state()
+        self._state_file.commit(self._desired_snapshot())
         bus.emit(Event(
             name="networking.aliases_updated",
             source=self.plugin_id,
