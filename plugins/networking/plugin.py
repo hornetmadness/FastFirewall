@@ -233,11 +233,32 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         self._ensure_default_aliases()
 
     def _resolve_interface_macro(self, *segments: str) -> Any:
-        alias = segments[0] if segments else None
-        return self._aliases.get(alias) if alias else None
+        if len(segments) < 2:
+            return None
+        alias, field = segments[0], segments[1]
+        device = self._aliases.get(alias)
+        if device is None:
+            return None
+        if field == "name":
+            return device
+        if field == "address":
+            return [
+                str(ipaddress.ip_interface(a).ip)
+                for a in self._interfaces.get(device, {}).get("addresses", [])
+            ]
+        return None
 
     def macro_snapshot(self) -> dict[str, dict[str, Any]]:
-        return {"interface": dict(self._aliases)}
+        entries: dict[str, Any] = {}
+        for alias, device in self._aliases.items():
+            entries[f"{alias}.name"] = device
+            addrs = [
+                str(ipaddress.ip_interface(a).ip)
+                for a in self._interfaces.get(device, {}).get("addresses", [])
+            ]
+            if addrs:
+                entries[f"{alias}.address"] = addrs
+        return {"interface": entries}
 
     def _ensure_default_aliases(self) -> None:
         """Add identity alias (name → name) for every managed interface not yet in _aliases."""

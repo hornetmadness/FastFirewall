@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from pyinfra.operations import files as files_ops
 from pyinfra.operations import server as server_ops
 
+from infra import PYINFRA_WORKER
 from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service
 from plugin_system.core.events import Event, bus
 
@@ -68,8 +69,6 @@ _VALID_PRIORITIES = {"emerg", "alert", "crit", "err", "warning", "notice", "info
 
 class SyslogPlugin(PluginBase, ApiRouterPlugin):
     services = [Service.SYSLOG]
-
-    _WORKER_SCRIPT = Path(__file__).parent / "_pyinfra_worker.py"
 
     def setup(self) -> None:
         self._log_dir = Path(self.config.get("log_dir", "/var/log/fastfirewall"))
@@ -130,7 +129,7 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
         }
         payload = pickle.dumps((op.__module__, op.__name__, norm_kwargs))
         proc = subprocess.run(
-            [sys.executable, str(self._WORKER_SCRIPT)],
+            [sys.executable, str(PYINFRA_WORKER)],
             input=payload,
             capture_output=True,
         )

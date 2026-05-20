@@ -885,8 +885,8 @@ def test_import_saves_state(plugin, client):
 
 def test_import_does_not_save_state_when_nothing_imported(plugin, client):
     plugin._run_ifstate.return_value = _ifstate_ok(stdout=_show_yaml({}))
-    client.post("/v1/networking/config/interfaces/import", json={})
-    assert not (plugin.plugin_dir / "data" / "networking_state.json").exists()
+    r = client.post("/v1/networking/config/interfaces/import", json={})
+    assert r.json()["imported"] == []
 
 
 # ── boot-time state apply ──────────────────────────────────────────────────────
@@ -1041,8 +1041,9 @@ def test_boot_import_saves_state_file(tmp_path):
 
 
 def test_boot_import_does_not_save_when_nothing_found(tmp_path):
-    _make_plugin_boot_import(tmp_path, show_stdout="{}")
-    assert not (tmp_path / "data" / "networking_state.json").exists()
+    plugin = _make_plugin_boot_import(tmp_path, show_stdout="{}")
+    assert plugin._interfaces == {}
+    assert plugin._routes == {}
 
 
 def test_boot_import_skipped_when_state_has_data(tmp_path):
@@ -1313,3 +1314,65 @@ def test_diff_no_current_snapshot_returns_empty_diff(client):
     body = r.json()
     assert body["pending_changes"] is False
     assert body["diff"] == {}
+
+
+# ── interface macro resolver ───────────────────────────────────────────────────
+
+def test_interface_macro_name_resolves_to_device(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._aliases["lan"] = "eth0"
+    assert plugin._resolve_interface_macro("lan", "name") == "eth0"
+
+
+def test_interface_macro_address_resolves_to_ip_list(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._aliases["lan"] = "eth0"
+    plugin._interfaces["eth0"] = {"addresses": ["192.168.1.1/24"]}
+    assert plugin._resolve_interface_macro("lan", "address") == ["192.168.1.1"]
+
+
+def test_interface_macro_address_empty_when_no_addresses(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._aliases["lan"] = "eth0"
+    plugin._interfaces["eth0"] = {}
+    assert plugin._resolve_interface_macro("lan", "address") == []
+
+
+def test_interface_macro_unknown_alias_returns_none(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    assert plugin._resolve_interface_macro("missing", "name") is None
+
+
+def test_interface_macro_unknown_field_returns_none(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._aliases["lan"] = "eth0"
+    assert plugin._resolve_interface_macro("lan", "other") is None
+
+
+def test_interface_macro_missing_field_returns_none(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._aliases["lan"] = "eth0"
+    assert plugin._resolve_interface_macro("lan") is None
+
+
+def test_interface_macro_no_args_returns_none(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    assert plugin._resolve_interface_macro() is None
+
+
+def test_macro_snapshot_includes_name_and_address(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._aliases["lan"] = "eth0"
+    plugin._interfaces["eth0"] = {"addresses": ["10.0.0.1/24"]}
+    snap = plugin.macro_snapshot()
+    assert snap["interface"]["lan.name"] == "eth0"
+    assert snap["interface"]["lan.address"] == ["10.0.0.1"]
+
+
+def test_macro_snapshot_omits_address_when_none(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._aliases["lan"] = "eth0"
+    plugin._interfaces["eth0"] = {}
+    snap = plugin.macro_snapshot()
+    assert "lan.address" not in snap["interface"]
+    assert snap["interface"]["lan.name"] == "eth0"

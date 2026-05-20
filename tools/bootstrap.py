@@ -459,6 +459,7 @@ def run_gateway(client: FFClient, cfg: dict[str, Any]) -> None:
                 description=f"Set alias {alias_name} → {iface_name}",
             )
             _print_ok(f"Alias '{alias_name}' → '{iface_name}'")
+            _print_ok(f"  Macros: $interface.{alias_name}.name  $interface.{alias_name}.address")
 
     # 5. IP forwarding
     _print_step("Enabling IPv4 forwarding")
@@ -593,6 +594,12 @@ def run_gateway(client: FFClient, cfg: dict[str, Any]) -> None:
                 _print_warn(f"sudo group not found — add '{username}' to sudo manually: usermod -aG sudo {username}")
 
     _print_header("Gateway setup complete!")
+    if aliases:
+        print("  Interface macros ready to use in rules and config:")
+        for alias_name, iface_name in aliases.items():
+            print(f"    $interface.{alias_name}.name    → {iface_name}")
+            # address resolved at rule-compile time from the running interface
+            print(f"    $interface.{alias_name}.address → (L3 address of {iface_name})")
 
 
 # ---------------------------------------------------------------------------
@@ -711,12 +718,14 @@ def _confirm_apply(cfg: dict[str, Any]) -> None:
 
     wan = net.get("wan", {})
     lan = net.get("lan", {})
+    wan_alias = wan.get("alias", "wan")
+    lan_alias = lan.get("alias", "lan")
     if wan.get("interface"):
         mode = wan.get("mode", "dhcp")
         addr = f"  ({wan['address']})" if mode == "static" and wan.get("address") else ""
-        print(f"  WAN      : {wan['interface']} — {mode}{addr}")
+        print(f"  WAN      : {wan['interface']} — {mode}{addr}  ($interface.{wan_alias}.name / .address)")
     if lan.get("interface") and lan.get("address"):
-        print(f"  LAN      : {lan['interface']} — {lan['address']}")
+        print(f"  LAN      : {lan['interface']} — {lan['address']}  ($interface.{lan_alias}.name / .address)")
 
     if dns_cfg.get("domain"):
         upstream = ", ".join(dns_cfg.get("upstream", []))

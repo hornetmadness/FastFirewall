@@ -43,6 +43,7 @@ class Service(str, Enum):
     HOST = "host"
     NETWORKING = "networking"
     PKG_MANAGEMENT = "pkg_management"
+    PKG_CACHE = "pkg_cache"
     MONITORING = "monitoring"
     SYSCTL = "sysctl"
     CRON = "cron"

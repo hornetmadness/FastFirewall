@@ -1,16 +1,14 @@
 """
 Subprocess entry point for pyinfra operations.
 
-Run by host_plugin._pyinfra_run to avoid the gevent/anyio conflict:
-pyinfra's local connector uses gevent.subprocess.Popen, which requires
-the libev "default loop" for child watchers.  FastAPI's anyio thread pool
-creates non-default gevent hubs, so every pyinfra call would crash with
-"child watchers are only available on the default loop".  Spawning a fresh
-process gives gevent a clean default loop.
+Spawned by plugin._pyinfra_run to avoid the gevent/anyio conflict:
+pyinfra's local connector uses gevent.subprocess.Popen which requires the libev
+"default loop" for child watchers. FastAPI's anyio thread pool creates non-default
+gevent hubs, causing crashes. A fresh subprocess gives gevent a clean default loop.
 
 Protocol: pickled (op_module, op_name, norm_kwargs) on stdin.
-  norm_kwargs values may be ("__stringio__", content) tuples, which are
-  reconstructed as io.StringIO before passing to the operation.
+  norm_kwargs values may be ("__stringio__", content) tuples, reconstructed as
+  io.StringIO before passing to the operation.
 """
 import io
 import importlib

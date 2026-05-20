@@ -51,6 +51,7 @@ from pyinfra.operations import files as files_ops
 from pyinfra.operations import server as server_ops
 from pyinfra.operations import systemd as systemd_ops
 
+from infra import PYINFRA_WORKER
 from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service
 from plugin_system.core.events import Event, bus
 from plugins.host._pkg_manager import (
@@ -276,8 +277,6 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
 
     # ── pyinfra helper ─────────────────────────────────────────────────────────
 
-    _WORKER_SCRIPT = Path(__file__).parent / "_pyinfra_worker.py"
-
     def _pyinfra_run(self, op: Any, **kwargs: Any) -> None:
         norm_kwargs = {
             k: ("__stringio__", v.getvalue()) if isinstance(v, io.StringIO) else v
@@ -285,7 +284,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         }
         payload = pickle.dumps((op.__module__, op.__name__, norm_kwargs))
         proc = subprocess.run(
-            [sys.executable, str(self._WORKER_SCRIPT)],
+            [sys.executable, str(PYINFRA_WORKER)],
             input=payload,
             capture_output=True,
         )

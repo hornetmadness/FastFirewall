@@ -1,0 +1,33 @@
+name: Apt-Cacher-NG Plugin
+id: apt_cacher_ng
+version: "1.0.0"
+description: >
+  Installs and manages apt-cacher-ng, a caching proxy for Debian/Ubuntu package
+  downloads. Writes /etc/apt-cacher-ng/acng.conf and controls the service via
+  systemctl. Routes mount at /v1/apt_cacher_ng/.
+author: hornetmadness@gmail.com
+
+enabled: true
+
+plugin_requirements: []
+py_requirements: []
+os_requirements:
+  - apt-cacher-ng
+
+skip_host_os_port_check: true  # apt-cacher-ng may already be running; this plugin manages it
+
+service_ports:
+  pkg_cache:
+    tcp: [3142]
+
+# Events emitted:
+#   apt_cacher_ng.config.updated   – payload: {keys: [list of changed field names]}
+#   apt_cacher_ng.cache.flushed    – payload: {cache_dir}
+#   apt_cacher_ng.service.reloaded – payload: {}
+
+config:
+  state_file: apt_cacher_ng_state.json
+  conf_file: /etc/apt-cacher-ng/acng.conf
+  cache_dir: /var/cache/apt-cacher-ng
+  log_dir: /var/log/apt-cacher-ng
+  ignore_state_on_boot: false

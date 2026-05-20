@@ -117,17 +117,35 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         # a plugin can register multiple namespaces
 
     def _resolve_interface_macro(self, *segments: str) -> Any:
-        return self._aliases.get(segments[0]) if segments else None
+        # segments[0] = alias name, segments[1] = "name" | "address"
+        if len(segments) < 2:
+            return None
+        device = self._aliases.get(segments[0])
+        if device is None:
+            return None
+        if segments[1] == "name":
+            return device
+        if segments[1] == "address":
+            return [str(ipaddress.ip_interface(a).ip)
+                    for a in self._interfaces.get(device, {}).get("addresses", [])]
+        return None
 
     def macro_snapshot(self) -> dict[str, dict[str, Any]]:
         # optional — override to expose current entries for --show-macros / GET /v1/macros
-        return {"interface": dict(self._aliases)}
+        entries: dict[str, Any] = {}
+        for alias, device in self._aliases.items():
+            entries[f"{alias}.name"] = device
+            addrs = [str(ipaddress.ip_interface(a).ip)
+                     for a in self._interfaces.get(device, {}).get("addresses", [])]
+            if addrs:
+                entries[f"{alias}.address"] = addrs
+        return {"interface": entries}
 ```
 After `setup()` the loader calls `macro_registry.register_namespace(name, resolver)` for every namespace the plugin declared. On unload each namespace is unregistered. Both `ApiRouterPlugin` and `MacroProviderPlugin` use cooperative `__init__` (`super().__init__()`), so multiple mixins compose correctly.
 
 ### Service exclusivity
 
-`Service` (`plugin_system/core/services.py`) is a `str` enum of well-known network-appliance services (`FIREWALL`, `DNS`, `DHCP`, `HOST`, `NETWORKING`, `PKG_MANAGEMENT`, `MONITORING`, etc.). Only one plugin may claim a given `Service` at a time; the loader raises `PluginError` if a second plugin tries to claim an already-owned service.
+`Service` (`plugin_system/core/services.py`) is a `str` enum of well-known network-appliance services (`FIREWALL`, `DNS`, `DHCP`, `HOST`, `NETWORKING`, `PKG_MANAGEMENT`, `PKG_CACHE`, `MONITORING`, etc.). Only one plugin may claim a given `Service` at a time; the loader raises `PluginError` if a second plugin tries to claim an already-owned service.
 
 ### Event bus
 
@@ -165,7 +183,7 @@ The bus auto-injects the emitting plugin's `services` list into `event.payload` 
 
 ### Macro system
 
-`macro_registry` (`plugin_system/core/macros.py`) is the module-level singleton that stores all macro namespaces. Plugins and rules reference macros with `$namespace.key` syntax (e.g. `$service_port.dns.udp`, `$interface.lan1`).
+`macro_registry` (`plugin_system/core/macros.py`) is the module-level singleton that stores all macro namespaces. Plugins and rules reference macros with `$namespace.segment[.segment...]` syntax (e.g. `$service_port.dns.udp`, `$interface.lan.name`, `$interface.lan.address`).
 
 **Built-in namespace — `service_port`**
 
@@ -183,14 +201,17 @@ from plugin_system.core.macros import macro_registry
 # Resolve to a list of port integers (also accepts a bare int)
 ports: list[int] = macro_registry.resolve_ports("$service_port.dns.udp")   # → [53]
 
-# Resolve to a string (string-valued namespaces only)
-alias: str | None = macro_registry.resolve_string("$interface.lan1")       # → "enp0s25"
+# Resolve to a string (string-valued macros only)
+name: str | None = macro_registry.resolve_string("$interface.lan.name")    # → "enp0s25"
+
+# Resolve without type coercion — returns the raw value from the resolver
+raw: Any = macro_registry.resolve("$interface.lan.address")                # → ["192.168.0.1"]
 
 # All currently registered namespaces
 namespaces: list[str] = macro_registry.namespaces   # e.g. ["service_port", "interface"]
 ```
 
-Both `resolve_ports` and `resolve_string` return `[]` / `None` for unknown macros or malformed syntax — callers should treat these as "unresolvable" rather than errors.
+`resolve_ports` returns `[]` and `resolve_string` / `resolve` return `None` for unknown macros or malformed syntax — callers should treat these as "unresolvable" rather than errors.
 
 **Testing with macros**
 
@@ -206,10 +227,14 @@ finally:
     macro_registry.set_service_ports({})
 ```
 
-For string-valued namespaces, use `register_namespace` / `unregister_namespace`:
+For plugin-defined namespaces, use `register_namespace` / `unregister_namespace`:
 
 ```python
-macro_registry.register_namespace("interface", lambda *s: "enp0s25" if s == ("lan1",) else None)
+macro_registry.register_namespace(
+    "interface",
+    lambda *s: "enp0s25" if s == ("lan", "name") else
+               ["192.168.0.1"] if s == ("lan", "address") else None,
+)
 try:
     # ... test code
 finally:
@@ -232,6 +257,19 @@ Beyond `load_plugin` / `unload_plugin`, `PluginLoader` exposes two read/write he
 ### Dependency installation
 
 Plugins can declare `py_requirements` (pip packages) and `os_requirements` (system packages) in `plugin.yaml`. The loader installs them at load time using **pyinfra** running against `@local`.
+
+**Pyinfra worker subprocess**
+
+Plugins that write privileged files via pyinfra (e.g. host, syslog, apt_cacher_ng) must not call pyinfra directly from the FastAPI process — pyinfra's gevent monkey-patching conflicts with anyio. Instead they spawn a fresh subprocess:
+
+```python
+from infra import PYINFRA_WORKER   # Path to infra/pyinfra_worker.py
+
+payload = pickle.dumps((op.__module__, op.__name__, norm_kwargs))
+proc = subprocess.run([sys.executable, str(PYINFRA_WORKER)], input=payload, capture_output=True)
+```
+
+`infra/pyinfra_worker.py` is the single canonical worker. It reads `(op_module, op_name, kwargs)` from stdin, reconstructs any `io.StringIO` values, and runs the operation via pyinfra's local connector. The `PYINFRA_WORKER` path constant is exported from `infra/__init__.py`. Never create per-plugin copies of this worker.
 
 ### Testing
 
@@ -259,7 +297,7 @@ client = TestClient(app)
 
 Use `tmp_path` for any file-backed state (e.g. `rules_file`, `state_file`) so tests are isolated. Plugins that persist state write into a `data/` subdirectory of `plugin_dir` (e.g. `tmp_path / "data" / "rules.json"`); the subdirectory is created automatically on first save.
 
-**Plugin test pattern — pyinfra mocking (host)**
+**Plugin test pattern — pyinfra mocking (host, syslog, apt_cacher_ng)**
 
 For plugins that call `_pyinfra_run`, replace it with `MagicMock` after instantiation and before `setup()`. Then assert on `call_args` to verify the correct pyinfra op and kwargs were used without touching the real system:
 
@@ -325,7 +363,7 @@ self._state_file.save_and_commit(snapshot)
 ```
 
 **Envelope API:**
-- `load_desired(default)` — reads `desired_state` from disk, restores `current_snapshot` from `current_state`, returns `desired_state` (or `default` if missing).
+- `load_desired(default)` — reads `desired_state` from disk, restores `current_snapshot` from `current_state`, returns `desired_state` (or `default` if missing). **On first load (file absent), writes `default` to disk immediately so every plugin starts with a state file rather than creating it lazily.**
 - `save_desired(snapshot)` — writes `snapshot` as `desired_state`. For `"immediate"` model, also sets `current = snapshot`.
 - `commit(snapshot=None)` — sets `current_state` to `snapshot` (or current desired if omitted) and flushes to disk. Use in deferred plugins after a successful apply.
 - `save_and_commit(snapshot)` — writes `snapshot` as both `desired_state` and `current_state` in one disk write. Use for import endpoints where desired and current are identical.

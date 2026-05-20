@@ -19,8 +19,9 @@ Plugin-defined namespaces:
   ``macro_registry.resolve_string()`` directly.
 
   Example (networking plugin owns the ``interface`` namespace):
-    $interface.LAN1  →  OS interface name mapped to alias "LAN1"
-    $interface.WAN   →  OS interface name mapped to alias "WAN"
+    $interface.LAN1.name     →  OS device name mapped to alias "LAN1"
+    $interface.LAN1.address  →  list of L3 addresses on that device (no prefix)
+    $interface.WAN.name      →  OS device name mapped to alias "WAN"
 """
 from __future__ import annotations
 
@@ -122,6 +123,19 @@ class MacroRegistry:
         if isinstance(result, int):
             return [result]
         return []
+
+    def resolve(self, value: str) -> Any:
+        """Resolve a macro and return the raw result without type coercion.
+        Returns None if the namespace is unknown, the macro is malformed, or the
+        resolver returns None."""
+        m = _PARSE_RE.match(value)
+        if m is None:
+            return None
+        namespace, rest = m.group(1), m.group(2)
+        resolver = self._resolvers.get(namespace)
+        if resolver is None:
+            return None
+        return resolver(*rest.split("."))
 
     def resolve_string(self, value: str) -> Optional[str]:
         """

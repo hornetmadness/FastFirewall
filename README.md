@@ -314,7 +314,7 @@ Manages network interfaces, static routes, and kernel sysctl settings via [ifsta
 | `/mtr` | POST | Run mtr and return hop table |
 | `/status` | GET | Plugin status and pending changes |
 
-**Interface aliases** let you assign friendly names to interface device names (e.g. `lan` → `enp3s0`). These aliases are used in the `$interface.lan` macro system and by the bootstrap wizard.
+**Interface aliases** let you assign friendly names to interface device names (e.g. `lan` → `enp3s0`). Each alias exposes two macros — `$interface.lan.name` (the OS device name) and `$interface.lan.address` (the L3 address of that device) — and are used by the bootstrap wizard.
 
 ```bash
 # Assign LAN alias
@@ -694,7 +694,14 @@ Automatically populated from each plugin's `service_ports` declaration in `plugi
 
 **Plugin-defined namespaces: `$interface`**
 
-The networking plugin exposes interface aliases as the `$interface` namespace. If you set an alias `lan` → `enp3s0`, then `$interface.lan` resolves to `"enp3s0"`.
+The networking plugin exposes interface aliases as the `$interface` namespace. Each alias provides two sub-keys:
+
+| Macro | Resolves to |
+|---|---|
+| `$interface.lan.name` | OS device name (e.g. `"enp3s0"`) |
+| `$interface.lan.address` | L3 addresses on that device (e.g. `["192.168.0.1"]`) |
+
+Set an alias with `PUT /v1/networking/config/aliases/lan` `{"interface": "enp3s0"}` and both macros become available immediately.
 
 ```bash
 # See all registered macros and their current values

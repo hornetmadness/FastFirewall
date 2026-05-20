@@ -79,7 +79,16 @@ class PluginStateFile:
         Also restores current_snapshot from current_state so pending_changes is
         immediately accurate after load. Returns the desired_state value, or
         *default* if the file is missing or has no desired_state key.
+
+        On first load (file absent) the default is written to disk immediately
+        so every plugin starts with a state file rather than creating it lazily
+        on the first mutation.
         """
+        if not self._path.exists():
+            self._desired = default
+            self._current = default if self._mutation_model == "immediate" else None
+            self._flush()
+            return default
         raw = self.load(default={})
         self._current = raw.get("current_state")
         desired = raw.get("desired_state", default)
