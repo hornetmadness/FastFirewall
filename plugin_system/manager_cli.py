@@ -31,7 +31,7 @@ def run(loader, plugins_dir: str | Path) -> tuple[list[str] | None, bool, bool]:
         sys.exit(0)
 
     if args.list_plugins:
-        _print_plugin_table(loader.list_plugins(plugins_dir))
+        print_plugin_table(loader.list_plugins(plugins_dir))
         sys.exit(0)
 
     return args.plugins or None, bool(args.ignore_plugins_states), bool(args.show_macros)
@@ -173,7 +173,7 @@ def _format_service_ports(service_ports) -> str:
     return "  ".join(parts) if parts else "-"
 
 
-def _print_plugin_table(rows: list[dict]) -> None:
+def print_plugin_table(rows: list[dict]) -> None:
     formatted_services = [_format_services(r.get("services", []))      for r in rows]
     formatted_ports    = [_format_service_ports(r.get("service_ports")) for r in rows]
 
