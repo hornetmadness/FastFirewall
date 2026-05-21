@@ -102,5 +102,7 @@ def list_macros():
     return manager_cli.get_macros(loader)
 
 if __name__ == "__main__":
+    manager_cli.print_plugin_table(loader.list_plugins(cfg.plugins_dir()))
+    print()
     cfg.logger.debug("Starting server with uvicorn kwargs: %s", cfg.uvicorn_kwargs())
     uvicorn.run(app, **cfg.uvicorn_kwargs())
