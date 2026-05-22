@@ -83,7 +83,7 @@ Ten dicts/lists are kept in memory, populated from the state file by `_load_stat
 
 **`_build_blocklist_config()`** — iterates `_blocklists`, emitting one `address=/{domain}/#` line per blocked domain.
 
-**`_fetch_blocklist_domains(url, fmt)`** — downloads a blocklist via `urllib.request.urlopen`. Supports two formats:
+**`_fetch_blocklist_domains(url, fmt)`** — downloads a blocklist asynchronously via `httpx.AsyncClient`. Supports two formats:
 - `"hosts"` — parses lines like `0.0.0.0 domain.com` or `127.0.0.1 domain.com`; skips `localhost`, `broadcasthost`, and `0.0.0.0` itself
 - `"domains"` — plain one-domain-per-line list; skips comment lines
 
