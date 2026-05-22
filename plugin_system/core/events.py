@@ -13,6 +13,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from request_context import get_request_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -71,6 +73,7 @@ class EventBus:
         # setdefault preserves an explicit "services" key if the caller set one.
         if event.source in self.plugin_services:
             event.payload.setdefault("services", self.plugin_services[event.source])
+        event.payload.setdefault("request_id", get_request_id())
 
     def emit(self, event: Event) -> None:
         """Emit synchronously.

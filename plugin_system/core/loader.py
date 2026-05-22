@@ -590,8 +590,22 @@ class PluginLoader:
             source="plugin_loader",
             payload={"service_ports": all_service_ports, "loaded": loaded},
         ))
+        self._log_pending_changes()
 
         return loaded
+
+    def _log_pending_changes(self) -> None:
+        pending = [
+            pid
+            for pid, lp in self._plugins.items()
+            if lp.instance is not None
+            and getattr(getattr(lp.instance, "_state_file", None), "pending_changes", False)
+        ]
+        if pending:
+            self.logger.warning(
+                "Plugin(s) booted with pending changes (last apply may have failed): %s",
+                ", ".join(pending),
+            )
 
     def load_plugin(self, path: str | Path, skip_requirements: bool = False) -> str:
         """

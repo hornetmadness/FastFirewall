@@ -1,146 +1,126 @@
 """
-app_config.py — loads app_config.yaml into a typed AppConfig dataclass.
+app_config.py — loads app_config.yaml into validated Pydantic models.
+
+Invalid values (e.g. token_expire_minutes: "sixty") produce a clear
+ValidationError at startup rather than a cryptic TypeError.
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, field_validator
+
+from request_context import install_filter
 
 _DEFAULT_PATH = Path(__file__).parent / "app_config.yaml"
-
-
-@dataclass
-class LoggingConfig:
-    level: str = "INFO"
-    format: str = "%(levelname)s %(name)s: %(message)s"
-
-
-@dataclass
-class PluginsConfig:
-    directory: str = "plugins"
-
-
-_AUTH_DEFAULTS = {
-    "enabled": True,
-    "secret_key": "CHANGE-ME",
-    "algorithm": "HS256",
-    "token_expire_minutes": 60,
-    "exempt_paths": ["/token", "/docs", "/openapi.json", "/redoc"],
-    "rate_limit": {"max_attempts": 5, "window_seconds": 300},
-    "users": [],
-}
-
 _SERVER_KNOWN_KEYS = {"host", "port", "reload"}
 
 
-@dataclass
-class RateLimitConfig:
-    max_attempts: int = 5
-    window_seconds: int = 300
+class LoggingConfig(BaseModel):
+    level: str = "INFO"
+    format: str = "%(levelname)s %(name)s: %(message)s"
+
+    @field_validator("level", mode="before")
+    @classmethod
+    def _uppercase_level(cls, v: Any) -> str:
+        return str(v).upper()
 
 
-@dataclass
-class AuthConfig:
+class PluginsConfig(BaseModel):
+    directory: str = "plugins"
+
+
+class RateLimitConfig(BaseModel):
+    max_attempts: int = Field(5, ge=1)
+    window_seconds: int = Field(300, ge=1)
+
+
+class AuthConfig(BaseModel):
     enabled: bool = True
     secret_key: str = "CHANGE-ME"
     algorithm: str = "HS256"
-    token_expire_minutes: int = 60
-    exempt_paths: list = field(default_factory=lambda: ["/token", "/docs", "/openapi.json", "/redoc"])
-    rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
-    users: list = field(default_factory=list)
+    token_expire_minutes: int = Field(60, ge=1)
+    exempt_paths: list[str] = Field(
+        default_factory=lambda: ["/token", "/docs", "/openapi.json", "/redoc"]
+    )
+    rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
+    users: list[dict[str, Any]] = Field(default_factory=list)
 
 
-@dataclass
-class ServerConfig:
+class ServerConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = Field(8000, ge=1, le=65535)
     reload: bool = False
 
 
-@dataclass
-class StateBackupConfig:
+class StateBackupConfig(BaseModel):
     enabled: bool = False
     directory: str = "/var/tmp/ff-backups/states"
 
 
-@dataclass
-class StateConfig:
-    backup: StateBackupConfig = field(default_factory=StateBackupConfig)
+class StateConfig(BaseModel):
+    backup: StateBackupConfig = Field(default_factory=StateBackupConfig)
 
 
-@dataclass
-class AppConfig:
-    logging: LoggingConfig = field(default_factory=LoggingConfig)
-    plugins: PluginsConfig = field(default_factory=PluginsConfig)
-    server: ServerConfig = field(default_factory=ServerConfig)
-    auth: AuthConfig = field(default_factory=AuthConfig)
-    state: StateConfig = field(default_factory=StateConfig)
-    logger: logging.Logger = field(
-        init=False, repr=False, compare=False,
+class AppConfig(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    plugins: PluginsConfig = Field(default_factory=PluginsConfig)
+    server: ServerConfig = Field(default_factory=ServerConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
+    state: StateConfig = Field(default_factory=StateConfig)
+
+    # Not from YAML — set in load() after validation.
+    # Typed as Any to avoid a name-collision: the field named "logging" above
+    # shadows the logging module when Pydantic resolves "logging.Logger".
+    logger: Any = Field(
         default_factory=lambda: logging.getLogger("app"),
+        exclude=True,
+        repr=False,
     )
-    _uvicorn_kwargs: dict[str, Any] = field(
-        init=False, repr=False, compare=False,
-        default_factory=dict,
-    )
+    _uvicorn_kwargs: dict[str, Any] = PrivateAttr(default_factory=dict)
 
     @classmethod
     def load(cls, path: str | Path = _DEFAULT_PATH) -> "AppConfig":
         with open(path) as fh:
             raw = yaml.safe_load(fh) or {}
 
-        log_raw = raw.get("logging", {})
-        plugins_raw = raw.get("plugins", {})
-        server_raw = raw.get("server", {})
-        auth_raw = {**_AUTH_DEFAULTS, **raw.get("auth", {})}
-        state_raw = raw.get("state", {})
-        backup_raw = state_raw.get("backup", {})
+        try:
+            cfg = cls.model_validate(raw)
+        except ValidationError as exc:
+            print(f"Invalid app_config.yaml:\n{exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
 
-        cfg = cls(
-            logging=LoggingConfig(
-                level=str(log_raw.get("level", "INFO")).upper(),
-                format=log_raw.get("format", LoggingConfig.format),
-            ),
-            plugins=PluginsConfig(
-                directory=plugins_raw.get("directory", "plugins"),
-            ),
-            server=ServerConfig(
-                host=server_raw.get("host", "0.0.0.0"),
-                port=int(server_raw.get("port", 8000)),
-                reload=bool(server_raw.get("reload", False)),
-            ),
-            auth=AuthConfig(
-                enabled=bool(auth_raw["enabled"]),
-                secret_key=str(auth_raw["secret_key"]),
-                algorithm=str(auth_raw["algorithm"]),
-                token_expire_minutes=int(auth_raw["token_expire_minutes"]),
-                exempt_paths=list(auth_raw["exempt_paths"]),
-                rate_limit=RateLimitConfig(
-                    max_attempts=int(auth_raw["rate_limit"].get("max_attempts", 5)),
-                    window_seconds=int(auth_raw["rate_limit"].get("window_seconds", 300)),
-                ),
-                users=list(auth_raw["users"]),
-            ),
-            state=StateConfig(
-                backup=StateBackupConfig(
-                    enabled=bool(backup_raw.get("enabled", False)),
-                    directory=str(backup_raw.get("directory", "backup/state")),
-                ),
-            ),
-        )
-        extra = {k.replace("-", "_"): v for k, v in server_raw.items() if k not in _SERVER_KNOWN_KEYS}
-        cfg._uvicorn_kwargs = {"host": cfg.server.host, "port": cfg.server.port, "reload": cfg.server.reload, "log_config": None, **extra}
+        server_raw = raw.get("server", {})
+        extra = {
+            k.replace("-", "_"): v
+            for k, v in server_raw.items()
+            if k not in _SERVER_KNOWN_KEYS
+        }
+        cfg._uvicorn_kwargs = {
+            "host": cfg.server.host,
+            "port": cfg.server.port,
+            "reload": cfg.server.reload,
+            "log_config": None,
+            **extra,
+        }
 
         logging.basicConfig(level=cfg.logging.level, format=cfg.logging.format)
+        install_filter()
         return cfg
 
     def uvicorn_kwargs(self) -> dict[str, Any]:
         """Return kwargs suitable for passing directly to uvicorn.run()."""
-        return dict(getattr(self, "_uvicorn_kwargs", {"host": self.server.host, "port": self.server.port, "reload": self.server.reload}))
+        if self._uvicorn_kwargs:
+            return dict(self._uvicorn_kwargs)
+        return {"host": self.server.host, "port": self.server.port, "reload": self.server.reload}
 
     def plugins_dir(self, base: Path | None = None) -> Path:
         """Return the resolved plugins directory path."""
