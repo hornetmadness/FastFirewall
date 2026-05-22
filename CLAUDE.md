@@ -60,6 +60,39 @@ addresses: list[Annotated[str, Field(max_length=39)]] | None = None
 
 Response-only models (never received as input) do not need `max_length`.
 
+### Plugin dependency installation
+
+Plugins declare OS packages in `os_requirements` in `plugin.yaml`. The loader installs them automatically via pyinfra before calling `setup()`. **Never emit `pkg_management.add.package` to install a plugin's own dependencies.** That event is for runtime package management requested by users or other plugins — not for bootstrapping a plugin's own packages.
+
+```yaml
+# Correct — loader installs these before setup() is called
+os_requirements:
+  - fluent-bit
+  - logrotate
+```
+
+```python
+# Wrong — do not emit this event to install your own package
+bus.emit(Event("pkg_management.add.package", source=self.plugin_id, payload={"name": "fluent-bit"}))
+```
+
+**Third-party repos** are a different matter. If a plugin's `os_requirements` package lives in a repo that is not in the default apt/yum/dnf sources, the plugin must register that repo *before* the loader installs `os_requirements`. Do this by emitting `pkg_management.add.repo` from `__init__` (not `setup()`), so the repo is added before the loader proceeds to package installation:
+
+```python
+def __init__(self) -> None:
+    super().__init__()
+    # repo must exist before the loader installs os_requirements
+    bus.emit(Event("pkg_management.add.repo", source="myplugin", payload={
+        "name": "vendor-repo",
+        "key_url": "https://vendor.example.com/gpg.key",
+        "key_dest": "/usr/share/keyrings/vendor.gpg",
+        "src": "deb [signed-by=/usr/share/keyrings/vendor.gpg] https://vendor.example.com/apt stable main",
+        "filename": "vendor",
+    }))
+```
+
+Do **not** also emit the repo event from `setup()` — `__init__` already covered it and a second emission causes `apt update` to run again unnecessarily.
+
 ## Working style
 
 - Never ask the user to edit `test_*` files — make all test changes directly.
@@ -121,8 +154,8 @@ This is a **FastAPI application driven entirely by plugins**. The app itself (`a
 
 1. `AppConfig.load()` reads `app_config.yaml` into typed dataclasses. `configure_state()` is called immediately after to apply backup settings before any plugin runs.
 2. `manager_cli.run(loader, plugins_dir)` parses CLI args; exits early for management commands, otherwise returns an optional plugin allow-list.
-3. `PluginLoader.load_directory()` scans the configured `plugins/` directory and derives load order via topological sort of `plugin_requirements` (dependencies before dependents; alphabetical tiebreaker). Pass `only=[...]` to restrict which plugins are loaded; transitive dependencies are included automatically.
-4. For each plugin directory with a `plugin.yaml` + `plugin.py`: the loader imports the module, instantiates any `PluginBase` subclass, wires up event handlers, calls `setup()`, then mounts FastAPI routes if the plugin is an `ApiRouterPlugin` and registers macro namespaces if the plugin is a `MacroProviderPlugin`.
+3. `PluginLoader.load_directory()` scans the configured `plugins/` directory and derives load order via topological sort of `plugin_requirements` (dependencies before dependents; alphabetical tiebreaker). Pass `only=[...]` to restrict which plugins are loaded; transitive dependencies are included automatically. If a plugin fails to load, all plugins that depend on it (directly or transitively) are skipped rather than erroring out.
+4. For each plugin directory with a `plugin.yaml` + `plugin.py`: the loader imports the module, instantiates any `PluginBase` subclass, wires up event handlers, calls `setup()`, then mounts FastAPI routes if the plugin is an `ApiRouterPlugin` and registers macro namespaces if the plugin is a `MacroProviderPlugin`. **Instantiation (calling `__init__`) happens before `os_requirements` are installed** — plugins that need a third-party apt/yum/dnf repo for their `os_requirements` package must emit `pkg_management.add.repo` from `__init__` so the repo exists when the loader proceeds to install packages.
 5. After all plugins are loaded, the loader populates `macro_registry` with the aggregated `service_port` data (ports with `-1`-only entries are omitted), then emits `plugins.all_loaded` on the bus.
 6. A `plugin.loaded` event is emitted on the bus after each individual plugin loads.
 
@@ -313,6 +346,10 @@ Beyond `load_plugin` / `unload_plugin`, `PluginLoader` exposes two read/write he
 
 `load_directory(directory, only=None, skip_requirements=False)` and `load_plugin(path, skip_requirements=False)` accept a `skip_requirements` flag. When `True`, the loader skips pyinfra `py_requirements` / `os_requirements` installation. Use this for CLI-only loads (e.g. `--show-macros`) where populating runtime state is needed but installing packages is a side-effect you want to avoid.
 
+`load_plugin(path)` auto-loads any missing `plugin_requirements` it finds as sibling directories before loading the requested plugin. Circular dependencies are detected via `_loading: set[str]` (plugin ids currently mid-load) and raise `PluginError` immediately.
+
+`load_directory` tracks which plugins failed to load in a `failed` set and silently skips any plugin whose dependency is in that set, logging a warning rather than propagating the error.
+
 `PluginLoader` maintains two runtime registries updated on every load/unload:
 - `service_registry` — `{Service → plugin_id}`: which plugin owns each service
 - `_port_registry` — `{(proto, port) → plugin_id}`: which plugin has claimed each port; port `-1` is never registered
@@ -338,9 +375,9 @@ if not success:
     raise RuntimeError(f"pyinfra '{op.__name__}' failed:\n{err}")
 ```
 
-`infra/pyinfra_worker.py` is the single canonical worker. It reads a **list** of `(op_module, op_name, norm_kwargs)` tuples from stdin, runs each operation independently (a failure in one does not abort the rest), and writes a list of `(success, error_or_None)` results to stdout. The worker always exits 0; per-operation errors are reported in the result list, not via exit code.
+`infra/pyinfra_worker.py` is the single canonical worker. It reads a **list** of `(op_module, op_name, norm_kwargs)` tuples from stdin, runs each operation independently (a failure in one does not abort the rest), and writes a list of `(success, error_or_None)` results to stdout. The worker always exits 0; per-operation errors are reported in the result list, not via exit code. When an exception has an empty `str()`, the error falls back to `type(exc).__name__` so callers always get a non-empty error string.
 
-`pyinfra_run_batch(ops)` in `infra/__init__.py` is the shared entry point. It spawns the worker, handles catastrophic startup failure (non-zero exit → all ops failed), and returns the result list. Never create per-plugin subprocess logic — use `pyinfra_run_batch` directly.
+`pyinfra_run_batch(ops)` in `infra/__init__.py` is the shared entry point. It spawns the worker, handles catastrophic startup failure (non-zero exit → all ops failed), and returns the result list. When the worker exits 0 but any operation failed, any stderr the worker emitted is appended to the error strings of the failed operations — so pyinfra's own diagnostic output (e.g. `gpg: not found`) surfaces to the caller. Never create per-plugin subprocess logic — use `pyinfra_run_batch` directly.
 
 Plugins that apply many operations at boot (e.g. `HostPlugin._apply_state`) build a single batch list and call `_pyinfra_run_many`, so Python startup and the full pyinfra import happen once per boot cycle instead of once per operation.
 

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from fastapi import HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pyinfra.operations import apk as apk_ops
 from pyinfra.operations import apt as apt_ops
 from pyinfra.operations import dnf as dnf_ops
@@ -47,6 +47,9 @@ class RepoBody(BaseModel):
     filename: Optional[str] = None
     # apt: GPG key URL to import alongside the repo
     key_url: Optional[str] = None
+    # apt: destination path for the dearmored key (e.g. /usr/share/keyrings/vendor.gpg);
+    # relative names are resolved under /etc/apt/keyrings/ by pyinfra
+    key_dest: Optional[str] = Field(None, max_length=4096)
     # yum/dnf: repo base URL (alternative to embedding it in src)
     baseurl: Optional[str] = None
     description: Optional[str] = None
@@ -179,12 +182,23 @@ class PackageManager:
             if not body.src:
                 raise HTTPException(422, "apt repos require 'src' (e.g. 'deb https://... focal main')")
             if body.key_url and body.present:
-                self._pyinfra_run(
-                    apt_ops.key,
-                    name=f"Import GPG key for apt repo {name}",
-                    src=body.key_url,
-                    _sudo=True,
-                )
+                key_kwargs: dict[str, Any] = {
+                    "name": f"Import GPG key for apt repo {name}",
+                    "src": body.key_url,
+                    "dest": body.key_dest,
+                    "_sudo": True,
+                }
+                # if body.key_dest:
+                #     # gpg is required to dearmor the key to a specific path
+                #     self._pyinfra_run(
+                #         apt_ops.packages,
+                #         name="Ensure gpg is installed for key dearmoring",
+                #         packages=["gpg"],
+                #         present=True,
+                #         _sudo=True,
+                #     )
+                #   key_kwargs["dest"] = body.key_dest    
+                self._pyinfra_run(apt_ops.key, **key_kwargs)
             self._pyinfra_run(
                 apt_ops.repo,
                 name=f"Manage apt repo {name}",
@@ -193,7 +207,7 @@ class PackageManager:
                 filename=body.filename,
                 _sudo=True,
             )
-            
+
         elif self.platform in ("yum", "dnf"):
             if not body.src:
                 raise HTTPException(422, f"{self.platform} repos require 'src' (repo name or .repo URL)")

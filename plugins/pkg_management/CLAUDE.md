@@ -80,6 +80,17 @@ Errors (missing fields, pyinfra failures) are logged and swallowed — they neve
 
 The package index is cached for `os_pkgmgr_max_cache_ttl_secs` seconds (default 300). `assert_supported()` raises HTTP 501 on unsupported platforms.
 
+**`RepoBody` fields relevant to apt:**
+
+| Field | Type | Purpose |
+|---|---|---|
+| `src` | `str` | Full `deb [...]` line for `sources.list.d` |
+| `filename` | `str` | Filename (without `.list`) under `/etc/apt/sources.list.d/` |
+| `key_url` | `str` | URL of the GPG key to import via `apt_ops.key` |
+| `key_dest` | `str \| None` | Destination path for the dearmored key (e.g. `/usr/share/keyrings/vendor.gpg`). Passed as `dest` to `apt_ops.key`; requires `gpg` to be installed. If `None`, pyinfra uses its default key location. |
+
+`apply_repo` for apt: imports the GPG key (`apt_ops.key`) if `key_url` is set, adds/removes the repo (`apt_ops.repo`), then refreshes the cache (`apt_ops.update`) if `body.present` is true.
+
 ## Import endpoints
 
 `POST /services/{name}/import` — reads live system state for the service, writes it to `self._state`, calls `_save_state()`. No pyinfra call.
@@ -108,7 +119,7 @@ plugin._pyinfra_run_many = MagicMock(side_effect=lambda ops: [(True, None)] * le
 | `ignore_state_on_boot` | `false` | skip `_apply_state()` on startup |
 | `os_pkgmgr_max_cache_ttl_secs` | `300` | package index cache TTL (0 = always refresh) |
 
-`plugin_requirements: ["smtp"]` — the smtp plugin is recommended so `smtp.send` events from `POST /packages/upgrade-system` are delivered.
+`plugin_requirements: ["smtp", "audit"]` — smtp is recommended so `smtp.send` events from `POST /packages/upgrade-system` are delivered; audit provides audit logging.
 
 ## Testing
 

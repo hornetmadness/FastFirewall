@@ -21,6 +21,10 @@ service_ports:
     udp: [514]
 
 config:
+  fluent_bit_key_url: https://packages.fluentbit.io/fluentbit.key
+  fluent_bit_key_dest: /usr/share/keyrings/fluentbit-keyring.gpg
+  fluent_bit_repo_url: https://packages.fluentbit.io/debian
+  fluent_bit_repo_filename: fluent-bit
   enable_systemd_input: true
   fastfirewall_conf: /etc/fluent-bit/conf.d/fastfirewall
   fluent_bit_main_conf: /etc/fluent-bit/fluent-bit.conf

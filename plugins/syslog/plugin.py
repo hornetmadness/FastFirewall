@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -49,6 +50,11 @@ class LogrotateConfigUpdate(BaseModel):
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
+_FB_KEY_URL      = "https://packages.fluentbit.io/fluentbit.key"
+_FB_KEY_DEST     = "/usr/share/keyrings/fluentbit-keyring.gpg"
+_FB_REPO_URL     = "https://packages.fluentbit.io/debian"
+_FB_REPO_FILE    = "fluent-bit"
+
 _VALID_SYSLOG_MODES = {"udp", "tcp", "tcp+udp"}
 _VALID_UNIX_MODES = {"unix_udp", "unix_tcp"}
 
@@ -67,6 +73,21 @@ _VALID_PRIORITIES = {"emerg", "alert", "crit", "err", "warning", "notice", "info
 
 class SyslogPlugin(PluginBase, ApiRouterPlugin):
     services = [Service.SYSLOG]
+
+    def __init__(self) -> None:
+        super().__init__()
+        try:
+            codename = platform.freedesktop_os_release().get("VERSION_CODENAME", "trixie")
+        except Exception:
+            codename = "trixie"
+        src = f"deb [signed-by={_FB_KEY_DEST}] {_FB_REPO_URL}/{codename} {codename} main"
+        bus.emit(Event("pkg_management.add.repo", source="syslog", payload={
+            "name": "fluent-bit",
+            "key_url": _FB_KEY_URL,
+            "key_dest": _FB_KEY_DEST,
+            "src": src,
+            "filename": _FB_REPO_FILE,
+        }))
 
     def setup(self) -> None:
         self._log_dir = Path(self.config.get("log_dir", "/var/log/fastfirewall"))
@@ -636,7 +657,6 @@ def _build_fastfirewall_conf_classic(
     out_cfg["Match"] = "*"
     out_cfg["Path"] = str(log_dir)
     out_cfg["File"] = "fluent-bit.log"
-    out_cfg["Format"] = "json"
 
     return _build_fb_ini(dict(sections))
 

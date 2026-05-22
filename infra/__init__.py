@@ -25,7 +25,15 @@ def pyinfra_run_batch(ops: list[OpSpec]) -> BatchResult:
         input=payload,
         capture_output=True,
     )
+    stderr = proc.stderr.decode(errors="replace").strip()
     if proc.returncode != 0:
-        err = proc.stderr.decode(errors="replace")
-        return [(False, err)] * len(ops)
-    return pickle.loads(proc.stdout)
+        return [(False, stderr or "worker process failed")] * len(ops)
+    results: BatchResult = pickle.loads(proc.stdout)
+    if stderr and any(not success for success, _ in results):
+        # Attach the worker's pyinfra output to failed operations so callers
+        # see "gpg: not found" instead of an empty error string.
+        return [
+            (success, f"{err}\n{stderr}".strip() if not success else err)
+            for success, err in results
+        ]
+    return results

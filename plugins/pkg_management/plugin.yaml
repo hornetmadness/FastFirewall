@@ -9,7 +9,7 @@ author: hornetmadness@gmail.com
 
 enabled: true
 
-plugin_requirements: ["smtp"]  # smtp recommended — handles smtp.send events from the upgrade endpoint
+plugin_requirements: ["smtp", "audit"]  # smtp recommended — handles smtp.send events from the upgrade endpoint
 py_requirements: []    # pyinfra is already a core dependency
 os_requirements: []
 
