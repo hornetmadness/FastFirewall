@@ -26,6 +26,9 @@ from ff_auth import (
     create_token,
     enforce_auth,
     get_current_user,
+    is_rate_limited,
+    record_login_failure,
+    record_login_success,
     setup as auth_setup,
 )
 
@@ -52,14 +55,23 @@ async def _auth_middleware(request: Request, call_next):
 
 
 @app.post("/token", tags=["auth"], summary="Obtain a Bearer JWT")
-async def login(form: Annotated[OAuth2PasswordRequestForm, Depends()]):
+async def login(request: Request, form: Annotated[OAuth2PasswordRequestForm, Depends()]):
+    client_ip = request.client.host if request.client else "unknown"
+    if is_rate_limited(client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts. Try again later.",
+            headers={"Retry-After": "300"},
+        )
     user = authenticate_for_token(form.username, form.password)
     if user is None:
+        record_login_failure(client_ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    record_login_success(client_ip)
     return {"access_token": create_token(user.username, user.roles), "token_type": "bearer"}
 
 

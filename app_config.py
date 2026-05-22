@@ -30,10 +30,17 @@ _AUTH_DEFAULTS = {
     "algorithm": "HS256",
     "token_expire_minutes": 60,
     "exempt_paths": ["/token", "/docs", "/openapi.json", "/redoc"],
+    "rate_limit": {"max_attempts": 5, "window_seconds": 300},
     "users": [],
 }
 
 _SERVER_KNOWN_KEYS = {"host", "port", "reload"}
+
+
+@dataclass
+class RateLimitConfig:
+    max_attempts: int = 5
+    window_seconds: int = 300
 
 
 @dataclass
@@ -43,6 +50,7 @@ class AuthConfig:
     algorithm: str = "HS256"
     token_expire_minutes: int = 60
     exempt_paths: list = field(default_factory=lambda: ["/token", "/docs", "/openapi.json", "/redoc"])
+    rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
     users: list = field(default_factory=list)
 
 
@@ -111,6 +119,10 @@ class AppConfig:
                 algorithm=str(auth_raw["algorithm"]),
                 token_expire_minutes=int(auth_raw["token_expire_minutes"]),
                 exempt_paths=list(auth_raw["exempt_paths"]),
+                rate_limit=RateLimitConfig(
+                    max_attempts=int(auth_raw["rate_limit"].get("max_attempts", 5)),
+                    window_seconds=int(auth_raw["rate_limit"].get("window_seconds", 300)),
+                ),
                 users=list(auth_raw["users"]),
             ),
             state=StateConfig(

@@ -445,7 +445,8 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
     def _show_interfaces(self) -> dict:
         result = self._run_ifstate("show")
         if result.returncode != 0:
-            raise HTTPException(500, f"ifstatecli show failed: {result.stderr.strip()}")
+            self.logger.error("ifstatecli show failed: %s", result.stderr.strip())
+            raise HTTPException(500, "Failed to read interface state; check server logs")
         try:
             data = yaml.safe_load(result.stdout) or {}
         except Exception:
@@ -459,7 +460,8 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
     def _show_interface(self, name: str) -> dict:
         result = self._run_ifstate("show")
         if result.returncode != 0:
-            raise HTTPException(500, f"ifstatecli show failed: {result.stderr.strip()}")
+            self.logger.error("ifstatecli show failed: %s", result.stderr.strip())
+            raise HTTPException(500, "Failed to read interface state; check server logs")
         try:
             data = yaml.safe_load(result.stdout) or {}
         except Exception:
@@ -472,7 +474,8 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
     def _identify(self) -> dict:
         result = self._run_ifstate("identify")
         if result.returncode != 0:
-            raise HTTPException(500, f"ifstatecli identify failed: {result.stderr.strip()}")
+            self.logger.error("ifstatecli identify failed: %s", result.stderr.strip())
+            raise HTTPException(500, "Failed to identify interfaces; check server logs")
         return yaml.safe_load(result.stdout) or {}
 
     # ── managed config — interfaces ────────────────────────────────────
@@ -519,7 +522,8 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
     def _import_interfaces(self, body: ImportInterfacesRequest) -> dict:
         result = self._run_ifstate("show")
         if result.returncode != 0:
-            raise HTTPException(500, f"ifstatecli show failed: {result.stderr.strip()}")
+            self.logger.error("ifstatecli show failed: %s", result.stderr.strip())
+            raise HTTPException(500, "Failed to read interface state; check server logs")
         try:
             data = yaml.safe_load(result.stdout) or {}
         except Exception:
@@ -598,7 +602,8 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
     def _import_routes(self, body: ImportRoutesRequest) -> dict:
         result = self._run_ifstate("show")
         if result.returncode != 0:
-            raise HTTPException(500, f"ifstatecli show failed: {result.stderr.strip()}")
+            self.logger.error("ifstatecli show failed: %s", result.stderr.strip())
+            raise HTTPException(500, "Failed to read interface state; check server logs")
         try:
             data = yaml.safe_load(result.stdout) or {}
         except Exception:

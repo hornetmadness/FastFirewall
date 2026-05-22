@@ -339,7 +339,8 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
         try:
             self._apply_config()
         except Exception as exc:
-            raise HTTPException(500, f"Config written but reload failed: {exc}") from exc
+            self.logger.error("Config written but fluent-bit reload failed", exc_info=True)
+            raise HTTPException(500, "Config written but reload failed; check server logs") from exc
 
         bus.emit(Event("syslog.config.updated", source=self.plugin_id, payload=self._get_config()))
         return self._get_config()
@@ -350,7 +351,8 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
             capture_output=True, text=True,
         )
         if proc.returncode != 0:
-            raise HTTPException(500, f"fluent-bit restart failed: {proc.stderr.strip()}")
+            self.logger.error("fluent-bit restart failed: %s", proc.stderr.strip())
+            raise HTTPException(500, "fluent-bit restart failed; check server logs")
         return {"reloaded": True}
 
     def _get_raw(self) -> dict:
@@ -452,7 +454,8 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
         try:
             self._apply_logrotate_config()
         except Exception as exc:
-            raise HTTPException(500, f"Config written but logrotate apply failed: {exc}") from exc
+            self.logger.error("Config written but logrotate apply failed", exc_info=True)
+            raise HTTPException(500, "Config written but logrotate apply failed; check server logs") from exc
         bus.emit(Event("syslog.logrotate.updated", source=self.plugin_id, payload=self._get_logrotate()))
         return self._get_logrotate()
 
@@ -462,7 +465,8 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
             capture_output=True, text=True,
         )
         if proc.returncode != 0:
-            raise HTTPException(500, f"logrotate failed: {proc.stderr.strip()}")
+            self.logger.error("logrotate failed: %s", proc.stderr.strip())
+            raise HTTPException(500, "logrotate failed; check server logs")
         bus.emit(Event("syslog.logrotate.ran", source=self.plugin_id, payload={"logrotate_conf": str(self._logrotate_conf)}))
         return {"rotated": True}
 
@@ -537,7 +541,8 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
 
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode not in (0, 1):
-            raise HTTPException(500, f"journalctl failed: {proc.stderr.strip()}")
+            self.logger.error("journalctl failed: %s", proc.stderr.strip())
+            raise HTTPException(500, "journalctl failed; check server logs")
 
         if output == "json":
             entries = []

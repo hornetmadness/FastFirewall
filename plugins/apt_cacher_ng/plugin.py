@@ -233,7 +233,8 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
             self._write_conf_file(content)
             self._reload_service()
         except Exception as exc:
-            raise HTTPException(500, f"Config written but apply failed: {exc}") from exc
+            self.logger.error("Config written but apt-cacher-ng reload failed", exc_info=True)
+            raise HTTPException(500, "Config written but service reload failed; check server logs") from exc
 
         bus.emit(Event(
             "apt_cacher_ng.config.updated",
@@ -246,7 +247,8 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
         try:
             self._reload_service()
         except RuntimeError as exc:
-            raise HTTPException(500, str(exc)) from exc
+            self.logger.error("apt-cacher-ng reload failed", exc_info=True)
+            raise HTTPException(500, "Service reload failed; check server logs") from exc
         bus.emit(Event("apt_cacher_ng.service.reloaded", source=self.plugin_id, payload={}))
         return {"reloaded": True}
 
@@ -308,7 +310,8 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
             raise HTTPException(404, f"Cache directory not found: {self._cache_dir}")
         proc = self._run_cmd(["sudo", "find", str(self._cache_dir), "-type", "f", "-delete"])
         if proc.returncode != 0:
-            raise HTTPException(500, f"Cache flush failed: {proc.stderr.strip()}")
+            self.logger.error("Cache flush failed: %s", proc.stderr.strip())
+            raise HTTPException(500, "Cache flush failed; check server logs")
         bus.emit(Event(
             "apt_cacher_ng.cache.flushed",
             source=self.plugin_id,

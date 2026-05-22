@@ -155,7 +155,8 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
         args = self._sudo_prefix() + [postconf, "-e"] + [f"{k}={v}" for k, v in settings.items()]
         result = self._run_cmd(args)
         if result.returncode != 0:
-            raise HTTPException(500, f"postconf -e failed: {result.stderr.strip()}")
+            self.logger.error("postconf -e failed: %s", result.stderr.strip())
+            raise HTTPException(500, "Failed to apply Postfix settings; check server logs")
 
     def _postfix_running(self) -> bool:
         """Check the Postfix master PID file — no subprocess needed."""
@@ -274,7 +275,8 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
             raise HTTPException(503, "postqueue not found — is Postfix installed?")
         result = self._run_cmd([postqueue, "-f"], timeout=30)
         if result.returncode != 0:
-            raise HTTPException(500, f"postqueue -f failed: {result.stderr.strip()}")
+            self.logger.error("postqueue -f failed: %s", result.stderr.strip())
+            raise HTTPException(500, "Failed to flush mail queue; check server logs")
         bus.emit(Event("smtp.queue.flushed", source=self.plugin_id, payload={}))
         return {"flushed": True}
 
@@ -285,9 +287,11 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
         try:
             self._smtp_send(from_addr, recipients, msg_str)
         except smtplib.SMTPException as exc:
-            raise HTTPException(502, f"SMTP error: {exc}") from exc
+            self.logger.error("SMTP send failed: %s", exc)
+            raise HTTPException(502, "SMTP error while sending; check server logs") from exc
         except OSError as exc:
-            raise HTTPException(503, f"Cannot reach Postfix at {self._smtp_host}:{self._smtp_port}: {exc}") from exc
+            self.logger.error("Cannot reach Postfix at %s:%d: %s", self._smtp_host, self._smtp_port, exc)
+            raise HTTPException(503, "Cannot reach Postfix SMTP server; check server logs") from exc
         bus.emit(Event(
             "smtp.email.sent",
             source=self.plugin_id,
@@ -305,9 +309,11 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
         try:
             self._smtp_send(from_addr, [body.to], msg_str)
         except smtplib.SMTPException as exc:
-            raise HTTPException(502, f"SMTP error: {exc}") from exc
+            self.logger.error("SMTP test send failed: %s", exc)
+            raise HTTPException(502, "SMTP error while sending; check server logs") from exc
         except OSError as exc:
-            raise HTTPException(503, f"Cannot reach Postfix at {self._smtp_host}:{self._smtp_port}: {exc}") from exc
+            self.logger.error("Cannot reach Postfix at %s:%d: %s", self._smtp_host, self._smtp_port, exc)
+            raise HTTPException(503, "Cannot reach Postfix SMTP server; check server logs") from exc
         bus.emit(Event(
             "smtp.email.sent",
             source=self.plugin_id,
@@ -321,7 +327,8 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
             raise HTTPException(503, "postfix not found — is Postfix installed?")
         result = self._run_cmd(self._sudo_prefix() + [postfix, "reload"], timeout=30)
         if result.returncode != 0:
-            raise HTTPException(500, f"postfix reload failed: {result.stderr.strip()}")
+            self.logger.error("postfix reload failed: %s", result.stderr.strip())
+            raise HTTPException(500, "Postfix reload failed; check server logs")
         bus.emit(Event("smtp.postfix.reloaded", source=self.plugin_id, payload={}))
         return {"reloaded": True}
 

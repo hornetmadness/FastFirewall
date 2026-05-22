@@ -6,6 +6,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - All imports go at the module level — never inside functions or methods.
 
+### Error handling in plugins
+
+Never put internal details into `HTTPException` response bodies. Subprocess stderr, exception messages, and internal file paths must stay server-side.
+
+**Correct pattern — subprocess failure:**
+```python
+if result.returncode != 0:
+    self.logger.error("nft apply failed: %s", result.stderr.strip())
+    raise HTTPException(500, "Failed to apply firewall rules; check server logs")
+```
+
+**Correct pattern — caught exception:**
+```python
+except Exception as exc:
+    self.logger.error("Config reload failed", exc_info=True)
+    raise HTTPException(500, "Config reload failed; check server logs") from exc
+```
+
+**Wrong — leaks internals to the caller:**
+```python
+raise HTTPException(500, str(exc))                          # exception message
+raise HTTPException(500, f"nft failed: {result.stderr}")    # subprocess stderr
+```
+
+`4xx` errors (Not Found, Conflict, Validation) may and should include the specific reason — those describe a client mistake, not a server-side failure. Only `5xx` responses need sanitizing.
+
 ## Working style
 
 - Never ask the user to edit `test_*` files — make all test changes directly.
@@ -454,12 +480,12 @@ When adding `current_state` to an existing state file, set it to a copy of `desi
 
 ### Authentication
 
-Authentication is handled in `plugin_system/core/auth.py` and configured via the `auth:` section of `app_config.yaml`. Both **HTTP Basic** and **OAuth2 Bearer JWT** are accepted on every protected route — clients may use either.
+Authentication is handled in `ff_auth/auth.py` and configured via the `auth:` section of `app_config.yaml`. Both **HTTP Basic** and **OAuth2 Bearer JWT** are accepted on every protected route — clients may use either.
 
 Enforcement is a middleware in `app.py` (`enforce_auth`). Routes listed in `auth.exempt_paths` bypass it; defaults are `/token`, `/docs`, `/openapi.json`, `/redoc`.
 
 **Endpoints added by `app.py`:**
-- `POST /token` — OAuth2 password flow; accepts `username` + `password` form fields, returns `{"access_token": "...", "token_type": "bearer"}`
+- `POST /token` — OAuth2 password flow; accepts `username` + `password` form fields, returns `{"access_token": "...", "token_type": "bearer"}`. Rate-limited per client IP (see below).
 - `GET /auth/me` — returns `{"username": "...", "roles": [...]}` for the authenticated caller; also registers both security schemes in the OpenAPI `/docs` "Authorize" dialog
 - `GET /v1/macros` — returns all macro namespaces and their current resolved values as a structured dict; delegates to `manager_cli.get_macros(loader)` (same data as `--show-macros`)
 
@@ -478,6 +504,10 @@ curl -X POST http://localhost:8000/token \
 curl -H "Authorization: Bearer <token>" http://localhost:8000/auth/me
 ```
 
+**Brute-force protection on `POST /token`:**
+
+Failed login attempts are tracked per client IP using an in-memory sliding window. After `rate_limit.max_attempts` failures within `rate_limit.window_seconds` seconds, the endpoint returns `429 Too Many Requests` with a `Retry-After` header. The counter clears on a successful login or when the window expires. State is held in `_rl_attempts` (module-level dict in `ff_auth/auth.py`); it does not persist across restarts.
+
 **`app_config.yaml` auth options:**
 ```yaml
 auth:
@@ -486,6 +516,9 @@ auth:
   algorithm: HS256
   token_expire_minutes: 60
   exempt_paths: [/token, /docs, /openapi.json, /redoc]
+  rate_limit:
+    max_attempts: 5          # failures before 429
+    window_seconds: 300      # sliding window length
   users:
     - username: admin
       password: "admin"      # plaintext auto-hashed at startup
@@ -498,7 +531,7 @@ uv run python -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gen
 ```
 Paste the `$2b$…` output as the `password` value — the loader detects the prefix and skips re-hashing.
 
-**Key module:** `ff_auth/auth.py` — `setup(cfg)`, `enforce_auth` (middleware), `get_current_user` (FastAPI dependency), `create_token`, `authenticate_for_token`. The package `ff_auth/__init__.py` re-exports all public symbols so `app.py` imports from `ff_auth` directly.
+**Key module:** `ff_auth/auth.py` — `setup(cfg)`, `enforce_auth` (middleware), `get_current_user` (FastAPI dependency), `create_token`, `authenticate_for_token`, `is_rate_limited`, `record_login_failure`, `record_login_success`. The package `ff_auth/__init__.py` re-exports all public symbols so `app.py` imports from `ff_auth` directly.
 
 > Note: the directory on disk is `ff_auth` (underscore) — Python package names cannot contain hyphens.
 

@@ -28,9 +28,11 @@ class AuditPlugin(PluginBase):
 
     def setup(self):
         self._log_path = self.plugin_dir / "data" / self.config.get("log_file", "audit.log")
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._include_payload = self.config.get("include_payload", True)
         self._ignored = set(self.config.get("ignored_events", []))
         self.logger.info("Writing audit log to %r", self._log_path)
+        
 
     def teardown(self):
         self.logger.info("Shutting down audit log")

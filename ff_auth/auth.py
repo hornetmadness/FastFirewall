@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
@@ -42,9 +44,14 @@ class _State:
     token_expire_minutes: int = 60
     exempt_paths: set[str] = field(default_factory=lambda: {"/token"})
     users: dict[str, dict[str, Any]] = field(default_factory=dict)
+    rl_max_attempts: int = 5
+    rl_window_seconds: int = 300
 
 
 _st = _State()
+
+# Maps client IP → deque of failed-attempt timestamps (monotonic clock)
+_rl_attempts: dict[str, deque[float]] = {}
 
 
 def setup(cfg: "AuthConfig") -> None:
@@ -54,6 +61,8 @@ def setup(cfg: "AuthConfig") -> None:
     _st.algorithm = cfg.algorithm
     _st.token_expire_minutes = cfg.token_expire_minutes
     _st.exempt_paths = set(cfg.exempt_paths)
+    _st.rl_max_attempts = cfg.rate_limit.max_attempts
+    _st.rl_window_seconds = cfg.rate_limit.window_seconds
     _st.users.clear()
     for u in cfg.users:
         pw = u["password"]
@@ -62,7 +71,10 @@ def setup(cfg: "AuthConfig") -> None:
             "roles": u.get("roles", []),
         }
     if _st.enabled:
-        log.info("Auth enabled — %d user(s) loaded", len(_st.users))
+        log.info(
+            "Auth enabled — %d user(s) loaded, rate limit %d attempts / %ds",
+            len(_st.users), _st.rl_max_attempts, _st.rl_window_seconds,
+        )
 
 
 # ── internal helpers ──────────────────────────────────────────────────────────
@@ -113,6 +125,44 @@ def _user_from_header(authorization: str) -> AuthUser | None:
     if low.startswith("bearer "):
         return _decode_token(authorization[7:])
     return None
+
+
+# ── rate limiting ─────────────────────────────────────────────────────────────
+
+def _rl_purge(bucket: deque[float], now: float) -> None:
+    while bucket and now - bucket[0] > _st.rl_window_seconds:
+        bucket.popleft()
+
+
+def is_rate_limited(ip: str) -> bool:
+    """Return True if this IP has exhausted its allowed login attempts."""
+    bucket = _rl_attempts.get(ip)
+    if not bucket:
+        return False
+    _rl_purge(bucket, time.monotonic())
+    return len(bucket) >= _st.rl_max_attempts
+
+
+def record_login_failure(ip: str) -> None:
+    """Record a failed /token attempt for the given IP."""
+    now = time.monotonic()
+    if ip not in _rl_attempts:
+        _rl_attempts[ip] = deque()
+    bucket = _rl_attempts[ip]
+    _rl_purge(bucket, now)
+    bucket.append(now)
+    if len(bucket) >= _st.rl_max_attempts:
+        log.warning(
+            "Rate limit reached for %s — %d failures within %ds window",
+            ip, len(bucket), _st.rl_window_seconds,
+        )
+    else:
+        log.warning("Failed login attempt from %s (%d/%d)", ip, len(bucket), _st.rl_max_attempts)
+
+
+def record_login_success(ip: str) -> None:
+    """Clear the failure counter for an IP after a successful login."""
+    _rl_attempts.pop(ip, None)
 
 
 # ── public API ────────────────────────────────────────────────────────────────

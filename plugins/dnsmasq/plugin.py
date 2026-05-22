@@ -794,7 +794,8 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin):
         try:
             domains = self._fetch_blocklist_domains(body.url, body.format)
         except Exception as exc:
-            raise HTTPException(502, f"Failed to fetch blocklist from {body.url!r}: {exc}")
+            self.logger.error("Failed to fetch blocklist from %r: %s", body.url, exc)
+            raise HTTPException(502, f"Failed to fetch blocklist from {body.url!r}; check server logs")
         blocklist_id = str(uuid.uuid4())[:8]
         self._blocklists[blocklist_id] = {
             "name": body.name,
@@ -824,7 +825,8 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin):
         try:
             domains = self._fetch_blocklist_domains(bl["url"], bl.get("format", "hosts"))
         except Exception as exc:
-            raise HTTPException(502, f"Failed to refresh blocklist from {bl['url']!r}: {exc}")
+            self.logger.error("Failed to refresh blocklist from %r: %s", bl["url"], exc)
+            raise HTTPException(502, f"Failed to refresh blocklist from {bl['url']!r}; check server logs")
         bl["domains"] = domains
         bl["last_fetched"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         self._save_state()

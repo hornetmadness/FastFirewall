@@ -478,11 +478,13 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         enabled = [r for r in self._rules.values() if r.enabled]
         output = _compile_rules(enabled, self._default_filter, self._default_platform, self.logger, self._debug_dir)
         if output.startswith("#"):
-            raise HTTPException(503, f"Compile failed — aerleon did not produce clean output: {output.splitlines()[0]}")
+            self.logger.error("aerleon compile failed:\n%s", output)
+            raise HTTPException(503, "Compile failed — aerleon did not produce valid output; check server logs")
         try:
             self._execute_compiled_rules(output, self._compiled_output_path)
         except RuntimeError as exc:
-            raise HTTPException(500, str(exc)) from exc
+            self.logger.error("Failed to apply compiled firewall rules", exc_info=True)
+            raise HTTPException(500, "Failed to apply firewall rules; check server logs") from exc
         self._state_file.commit()
         bus.emit(Event(
             name="firewall.applied",
