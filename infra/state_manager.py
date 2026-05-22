@@ -1,6 +1,8 @@
 import json
 import logging
+import os
 import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -179,13 +181,26 @@ class PluginStateFile:
             return False
 
     def save(self, data: Any) -> bool:
-        """Write *data* as indented JSON. Returns True on success, False on error."""
+        """Write *data* as indented JSON atomically. Returns True on success, False on error.
+
+        Writes to a temp file in the same directory then renames it over the
+        target so a crash mid-write never leaves a partial file on disk.
+        """
         try:
             if _backup_enabled:
                 self._backup()
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            with self._path.open("w") as fh:
-                json.dump(data, fh, indent=2)
+            fd, tmp_name = tempfile.mkstemp(dir=self._path.parent, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    json.dump(data, fh, indent=2)
+                os.replace(tmp_name, self._path)
+            except Exception:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
             return True
         except Exception:
             self._log.error("Failed to save state to %r", self._path, exc_info=True)

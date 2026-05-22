@@ -36,7 +36,7 @@ from plugin_system.core.macros import macro_registry
 
 class AcngConfigUpdate(BaseModel):
     port: Optional[int] = Field(None, ge=1, le=65535, description="Listening port")
-    bind_address: Optional[str] = Field(None, description="Space-separated bind addresses; empty to bind all")
+    bind_address: Optional[str] = Field(None, max_length=1024, description="Space-separated bind addresses; empty to bind all")
     ex_threshold: Optional[int] = Field(None, ge=0, le=100, description="Disk space threshold percent; old files removed below this level")
     max_dl_speed_kb: Optional[int] = Field(None, ge=0, description="Max download speed in kB/s; 0 for unlimited")
     fetch_timeout: Optional[int] = Field(None, ge=1, le=3600, description="Fetch timeout in seconds")
@@ -46,7 +46,7 @@ class AcngConfigUpdate(BaseModel):
 
 
 class ProxyHostUpdate(BaseModel):
-    host: str = Field(..., min_length=1, description="Hostname or IP clients should use to reach this proxy")
+    host: str = Field(..., min_length=1, max_length=253, description="Hostname or IP clients should use to reach this proxy")
 
 
 # ── config key mapping ──────────────────────────────────────────────────────────
@@ -233,7 +233,8 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
             self._write_conf_file(content)
             self._reload_service()
         except Exception as exc:
-            raise HTTPException(500, f"Config written but apply failed: {exc}") from exc
+            self.logger.error("Config written but apt-cacher-ng reload failed", exc_info=True)
+            raise HTTPException(500, "Config written but service reload failed; check server logs") from exc
 
         bus.emit(Event(
             "apt_cacher_ng.config.updated",
@@ -246,7 +247,8 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
         try:
             self._reload_service()
         except RuntimeError as exc:
-            raise HTTPException(500, str(exc)) from exc
+            self.logger.error("apt-cacher-ng reload failed", exc_info=True)
+            raise HTTPException(500, "Service reload failed; check server logs") from exc
         bus.emit(Event("apt_cacher_ng.service.reloaded", source=self.plugin_id, payload={}))
         return {"reloaded": True}
 
@@ -308,7 +310,8 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
             raise HTTPException(404, f"Cache directory not found: {self._cache_dir}")
         proc = self._run_cmd(["sudo", "find", str(self._cache_dir), "-type", "f", "-delete"])
         if proc.returncode != 0:
-            raise HTTPException(500, f"Cache flush failed: {proc.stderr.strip()}")
+            self.logger.error("Cache flush failed: %s", proc.stderr.strip())
+            raise HTTPException(500, "Cache flush failed; check server logs")
         bus.emit(Event(
             "apt_cacher_ng.cache.flushed",
             source=self.plugin_id,

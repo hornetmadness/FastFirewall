@@ -126,6 +126,19 @@ The interactive docs at `/docs` have an **Authorize** button that handles both m
 
 Default credentials are `admin` / `admin`. **Change these before exposing the API to a network.** See [Configuration reference](#configuration-reference) for how to set users and generate a strong JWT secret.
 
+### Brute-force protection
+
+`POST /token` is rate-limited per client IP. After **5 failed attempts within a 5-minute sliding window**, the endpoint returns `429 Too Many Requests` with a `Retry-After: 300` header. The counter resets automatically when the window expires or when a login succeeds.
+
+Both limits are tunable in `app_config.yaml` under `auth.rate_limit`:
+
+```yaml
+auth:
+  rate_limit:
+    max_attempts: 5      # failures allowed before lockout
+    window_seconds: 300  # sliding window length
+```
+
 ---
 
 ## Plugin system
@@ -160,6 +173,47 @@ uv run python app.py --enable-plugin smtp
 ```
 
 This edits the `enabled` field in the plugin's `plugin.yaml` and exits. The change takes effect on the next server start.
+
+### API error responses
+
+FastFirewall does not include internal details in error responses. When a plugin operation fails (subprocess non-zero exit, service unreachable, etc.), the API returns a generic message:
+
+```json
+{"detail": "Postfix reload failed; check server logs"}
+```
+
+The full detail — stderr output, exception traceback, internal paths — is logged at `ERROR` level on the server side. To diagnose a failure, check the server console or the audit log (`plugins/audit/data/audit.log`).
+
+This applies to all `5xx` responses. `4xx` responses (404 Not Found, 409 Conflict, 422 Validation Error) do include the specific reason, since those describe a client-side problem rather than a server-side failure.
+
+### Input validation
+
+All request bodies are validated by Pydantic before reaching plugin code. String fields have maximum length constraints to prevent oversized payloads. A `422 Unprocessable Entity` is returned when any constraint is violated:
+
+```json
+{
+  "message": "Name: String should have at most 100 characters",
+  "source_errors": [...]
+}
+```
+
+Key limits across the API:
+
+| Field type | Limit |
+|---|---|
+| Names, labels, identifiers | 100 chars |
+| Comments, GECOS | 255 chars |
+| Hostnames, DNS names | 253 chars (RFC 1035) |
+| IP addresses | 39 chars (max IPv6) |
+| CIDR ranges | 43 chars (max IPv6/128) |
+| Linux interface names | 15 chars (IFNAMSIZ) |
+| File/socket paths | 4096 chars |
+| URLs (blocklists) | 2048 chars |
+| Email addresses | 254 chars (RFC 5321) |
+| Email subjects | 998 chars (RFC 2822) |
+| Email bodies | 65536 chars |
+| Sysctl values | 64 chars |
+| Cron commands | 4096 chars |
 
 ---
 
@@ -746,6 +800,9 @@ auth:
     - /docs
     - /openapi.json
     - /redoc
+  rate_limit:
+    max_attempts: 5       # failed /token attempts before 429
+    window_seconds: 300   # sliding window length in seconds
   users:
     - username: admin
       password: "admin"           # plaintext — hashed at startup

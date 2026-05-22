@@ -13,7 +13,8 @@
       "Bash(git -C /home/emathis/FastFirewall branch -a)",
       "Bash(git -C /home/emathis/FastFirewall status)",
       "Bash(git -C /home/emathis/FastFirewall diff --stat HEAD)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git stash *)"
     ]
   },
   "hooks": {
