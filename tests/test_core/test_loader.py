@@ -2,7 +2,7 @@ import sys
 import textwrap
 import pytest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from plugin_system.core import EventBus, PluginLoader, Service
 from plugin_system.core.loader import PluginError
@@ -837,3 +837,70 @@ def test_detect_os_pkg_no_manager_raises(loader):
          patch("plugin_system.core.loader.shutil.which", return_value=None):
         with pytest.raises(PluginError, match="No supported OS package manager"):
             loader._detect_os_pkg_op("p", ["curl"])
+
+
+# ---------------------------------------------------------------------------
+# Pending changes startup summary
+# ---------------------------------------------------------------------------
+
+def test_no_warning_when_no_pending_changes(tmp_path, loader, caplog):
+    make_plugin(tmp_path, "clean", "name: Clean\nid: clean\n", """
+        from plugin_system.core import PluginBase
+        class CleanPlugin(PluginBase):
+            def setup(self): pass
+    """)
+    import logging
+    with caplog.at_level(logging.WARNING, logger="plugin_system.core.loader"):
+        loader.load_directory(tmp_path)
+    assert "pending" not in caplog.text
+
+
+def test_warning_logged_for_plugins_with_pending_changes(tmp_path, loader, caplog):
+    make_plugin(tmp_path, "dirty", "name: Dirty\nid: dirty\n", """
+        from plugin_system.core import PluginBase
+        class DirtyPlugin(PluginBase):
+            def setup(self): pass
+    """)
+    loader.load_directory(tmp_path)
+    inst = loader.plugins["dirty"].instance
+    state_file = MagicMock()
+    state_file.pending_changes = True
+    inst._state_file = state_file
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="plugin_system.core.loader"):
+        loader._log_pending_changes()
+    assert "dirty" in caplog.text
+    assert "pending changes" in caplog.text
+
+
+def test_warning_lists_all_pending_plugins(tmp_path, loader, caplog):
+    for name in ("alpha", "beta"):
+        make_plugin(tmp_path, name, f"name: {name}\nid: {name}\n", """
+            from plugin_system.core import PluginBase
+            class P(PluginBase):
+                def setup(self): pass
+        """)
+    loader.load_directory(tmp_path)
+    for pid in ("alpha", "beta"):
+        state_file = MagicMock()
+        state_file.pending_changes = True
+        loader.plugins[pid].instance._state_file = state_file
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="plugin_system.core.loader"):
+        loader._log_pending_changes()
+    assert "alpha" in caplog.text
+    assert "beta" in caplog.text
+
+
+def test_plugins_without_state_file_ignored_in_pending_check(tmp_path, loader, caplog):
+    make_plugin(tmp_path, "stateless", "name: S\nid: stateless\n", """
+        from plugin_system.core import PluginBase
+        class StatelessPlugin(PluginBase):
+            def setup(self): pass
+    """)
+    import logging
+    with caplog.at_level(logging.WARNING, logger="plugin_system.core.loader"):
+        loader.load_directory(tmp_path)
+    assert "pending" not in caplog.text
