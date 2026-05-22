@@ -70,63 +70,82 @@ def test_resolve_string_none_result(reg):
     assert reg.resolve_string("$iface.lan.name") is None
 
 
-# ── cache behaviour ───────────────────────────────────────────────────────────
+# ── service_port cache ────────────────────────────────────────────────────────
 
-def test_cache_hit_returns_same_result(reg):
-    calls = []
-    def resolver(*s):
-        calls.append(s)
-        return [53]
-    reg.register_namespace("ns", resolver)
-    reg.resolve_ports("$ns.dns")
-    reg.resolve_ports("$ns.dns")
-    assert len(calls) == 1, "resolver should only be called once; second call should hit cache"
+def test_service_port_cache_hit(reg):
+    """resolve_ports for service_port should invoke _resolve_service_port only once."""
+    reg.set_service_ports({"dns": {"udp": [53]}})
+    first = reg.resolve_ports("$service_port.dns.udp")
+    second = reg.resolve_ports("$service_port.dns.udp")
+    assert first == second == [53]
+    assert ("ports", "$service_port.dns.udp") in reg._cache
 
 
-def test_cache_invalidated_on_register_namespace(reg):
-    calls = []
-    def resolver(*s):
-        calls.append(s)
-        return [53]
-    reg.register_namespace("ns", resolver)
-    reg.resolve_ports("$ns.dns")
-    assert len(calls) == 1
-    reg.register_namespace("ns", resolver)  # re-register, same resolver
-    reg.resolve_ports("$ns.dns")
-    assert len(calls) == 2, "cache should be cleared on register_namespace"
-
-
-def test_cache_invalidated_on_unregister_namespace(reg):
-    reg.register_namespace("ns", lambda *s: [80])
-    assert reg.resolve_ports("$ns.x") == [80]
-    reg.unregister_namespace("ns")
-    assert reg.resolve_ports("$ns.x") == [], "after unregister, macro should be unresolvable"
-
-
-def test_cache_invalidated_on_set_service_ports(reg):
+def test_service_port_cache_invalidated_on_set_service_ports(reg):
     reg.set_service_ports({"dns": {"udp": [53]}})
     assert reg.resolve_ports("$service_port.dns.udp") == [53]
     reg.set_service_ports({"dns": {"udp": [5353]}})
-    assert reg.resolve_ports("$service_port.dns.udp") == [5353], "cache should reflect updated service ports"
+    assert reg.resolve_ports("$service_port.dns.udp") == [5353], \
+        "cache must reflect updated service ports after set_service_ports()"
 
 
-def test_cache_separate_per_method(reg):
-    reg.register_namespace("ns", lambda *s: ["eth0"])
-    ports = reg.resolve_ports("$ns.lan")
-    raw = reg.resolve("$ns.lan")
-    string = reg.resolve_string("$ns.lan")
-    assert ports == []        # ["eth0"] can't be coerced to int list
-    assert raw == ["eth0"]
-    assert string == "['eth0']"
+def test_service_port_cache_invalidated_on_register_namespace(reg):
+    reg.set_service_ports({"dns": {"udp": [53]}})
+    reg.resolve_ports("$service_port.dns.udp")
+    assert len(reg._cache) == 1
+    reg.register_namespace("other", lambda *s: None)
+    assert len(reg._cache) == 0, "register_namespace should wipe the cache"
 
 
-def test_cache_not_populated_for_non_macro_strings(reg):
+def test_service_port_cache_invalidated_on_unregister_namespace(reg):
+    reg.set_service_ports({"dns": {"udp": [53]}})
+    reg.register_namespace("other", lambda *s: None)
+    reg.resolve_ports("$service_port.dns.udp")
+    assert len(reg._cache) == 1
+    reg.unregister_namespace("other")
+    assert len(reg._cache) == 0, "unregister_namespace should wipe the cache"
+
+
+# ── plugin-defined namespaces are NOT cached ──────────────────────────────────
+
+def test_plugin_namespace_resolve_ports_not_cached(reg):
+    """Plugin-defined namespace results must not be cached: their resolvers read live state."""
+    calls = []
+    def resolver(*s):
+        calls.append(s)
+        return [80]
+    reg.register_namespace("ns", resolver)
+    reg.resolve_ports("$ns.web")
+    reg.resolve_ports("$ns.web")
+    assert len(calls) == 2, "resolver must be called on every invocation — plugin state can change"
+    assert len(reg._cache) == 0
+
+
+def test_resolve_not_cached(reg):
+    calls = []
+    reg.register_namespace("ns", lambda *s: calls.append(s) or "eth0")
+    reg.resolve("$ns.lan.name")
+    reg.resolve("$ns.lan.name")
+    assert len(calls) == 2
+    assert len(reg._cache) == 0
+
+
+def test_resolve_string_not_cached(reg):
+    calls = []
+    reg.register_namespace("ns", lambda *s: calls.append(s) or "eth0")
+    reg.resolve_string("$ns.lan.name")
+    reg.resolve_string("$ns.lan.name")
+    assert len(calls) == 2
+    assert len(reg._cache) == 0
+
+
+def test_non_macro_strings_not_cached(reg):
     reg.resolve_ports("plain")
     reg.resolve("plain")
     reg.resolve_string("plain")
-    assert len(reg._cache) == 0, "non-macro strings should not pollute the cache"
+    assert len(reg._cache) == 0
 
 
-def test_cache_not_populated_for_int_literal(reg):
+def test_int_literal_not_cached(reg):
     reg.resolve_ports(8080)
-    assert len(reg._cache) == 0, "int literals bypass the cache path entirely"
+    assert len(reg._cache) == 0

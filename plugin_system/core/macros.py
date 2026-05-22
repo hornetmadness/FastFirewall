@@ -112,35 +112,37 @@ class MacroRegistry:
         - int            → [value]
         - literal string → []  (use int() on the caller side if needed)
         - macro string   → dispatch to namespace; [] if unresolvable.
+
+        Results for the ``service_port`` namespace are cached because those
+        values are static between set_service_ports() calls.  Plugin-defined
+        namespace resolvers may read live state that changes without a
+        register_namespace call, so their results are never cached.
         """
         if isinstance(value, int):
             return [value]
         m = _PARSE_RE.match(value)
         if m is None:
             return []
-        cache_key = ("ports", value)
-        if cache_key in self._cache:
-            return self._cache[cache_key]
         namespace, rest = m.group(1), m.group(2)
         if namespace == "service_port":
+            cache_key = ("ports", value)
+            if cache_key in self._cache:
+                return self._cache[cache_key]
             result: list[int] = _resolve_service_port(rest, self._service_ports)
-        else:
-            resolver = self._resolvers.get(namespace)
-            if resolver is None:
-                result = []
-            else:
-                raw = resolver(*rest.split("."))
-                if isinstance(raw, list):
-                    try:
-                        result = [int(x) for x in raw]
-                    except (TypeError, ValueError):
-                        result = []
-                elif isinstance(raw, int):
-                    result = [raw]
-                else:
-                    result = []
-        self._cache[cache_key] = result
-        return result
+            self._cache[cache_key] = result
+            return result
+        resolver = self._resolvers.get(namespace)
+        if resolver is None:
+            return []
+        raw = resolver(*rest.split("."))
+        if isinstance(raw, list):
+            try:
+                return [int(x) for x in raw]
+            except (TypeError, ValueError):
+                return []
+        if isinstance(raw, int):
+            return [raw]
+        return []
 
     def resolve(self, value: str) -> Any:
         """Resolve a macro and return the raw result without type coercion.
@@ -149,16 +151,11 @@ class MacroRegistry:
         m = _PARSE_RE.match(value)
         if m is None:
             return None
-        cache_key = ("raw", value)
-        if cache_key in self._cache:
-            return self._cache[cache_key]
         namespace, rest = m.group(1), m.group(2)
         resolver = self._resolvers.get(namespace)
         if resolver is None:
             return None
-        result = resolver(*rest.split("."))
-        self._cache[cache_key] = result
-        return result
+        return resolver(*rest.split("."))
 
     def resolve_string(self, value: str) -> Optional[str]:
         """
@@ -168,17 +165,12 @@ class MacroRegistry:
         m = _PARSE_RE.match(value)
         if m is None:
             return None
-        cache_key = ("string", value)
-        if cache_key in self._cache:
-            return self._cache[cache_key]
         namespace, rest = m.group(1), m.group(2)
         resolver = self._resolvers.get(namespace)
         if resolver is None:
             return None
         result = resolver(*rest.split("."))
-        resolved = str(result) if result is not None else None
-        self._cache[cache_key] = resolved
-        return resolved
+        return str(result) if result is not None else None
 
 
 macro_registry = MacroRegistry()
