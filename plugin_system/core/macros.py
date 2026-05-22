@@ -68,23 +68,33 @@ class MacroRegistry:
     from plugin.yaml declarations.  Plugins register additional namespaces
     by calling ``add_macro_namespace()`` inside ``setup()`` via the
     ``MacroProviderPlugin`` mixin.
+
+    Resolved macro values are cached in a dict keyed by (method, macro_str)
+    and invalidated whenever the registry changes (register/unregister/set).
     """
 
     def __init__(self) -> None:
         self._resolvers: dict[str, Callable[..., Any]] = {}
         self._service_ports: dict[str, dict[str, list[int]]] = {}
+        self._cache: dict[tuple[str, str], Any] = {}
+
+    def _invalidate(self) -> None:
+        self._cache.clear()
 
     def register_namespace(self, name: str, resolver: Callable[..., Any]) -> None:
         """Map *name* to *resolver* (called by the loader after each plugin setup)."""
         self._resolvers[name] = resolver
+        self._invalidate()
 
     def unregister_namespace(self, name: str) -> None:
         """Remove a namespace (called by the loader on plugin unload)."""
         self._resolvers.pop(name, None)
+        self._invalidate()
 
     def set_service_ports(self, service_ports: dict[str, dict[str, list[int]]]) -> None:
         """Called by the loader after all plugins are loaded."""
         self._service_ports = dict(service_ports)
+        self._invalidate()
 
     @property
     def namespaces(self) -> list[str]:
@@ -108,21 +118,29 @@ class MacroRegistry:
         m = _PARSE_RE.match(value)
         if m is None:
             return []
+        cache_key = ("ports", value)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
         namespace, rest = m.group(1), m.group(2)
         if namespace == "service_port":
-            return _resolve_service_port(rest, self._service_ports)
-        resolver = self._resolvers.get(namespace)
-        if resolver is None:
-            return []
-        result = resolver(*rest.split("."))
-        if isinstance(result, list):
-            try:
-                return [int(x) for x in result]
-            except (TypeError, ValueError):
-                return []
-        if isinstance(result, int):
-            return [result]
-        return []
+            result: list[int] = _resolve_service_port(rest, self._service_ports)
+        else:
+            resolver = self._resolvers.get(namespace)
+            if resolver is None:
+                result = []
+            else:
+                raw = resolver(*rest.split("."))
+                if isinstance(raw, list):
+                    try:
+                        result = [int(x) for x in raw]
+                    except (TypeError, ValueError):
+                        result = []
+                elif isinstance(raw, int):
+                    result = [raw]
+                else:
+                    result = []
+        self._cache[cache_key] = result
+        return result
 
     def resolve(self, value: str) -> Any:
         """Resolve a macro and return the raw result without type coercion.
@@ -131,11 +149,16 @@ class MacroRegistry:
         m = _PARSE_RE.match(value)
         if m is None:
             return None
+        cache_key = ("raw", value)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
         namespace, rest = m.group(1), m.group(2)
         resolver = self._resolvers.get(namespace)
         if resolver is None:
             return None
-        return resolver(*rest.split("."))
+        result = resolver(*rest.split("."))
+        self._cache[cache_key] = result
+        return result
 
     def resolve_string(self, value: str) -> Optional[str]:
         """
@@ -145,12 +168,17 @@ class MacroRegistry:
         m = _PARSE_RE.match(value)
         if m is None:
             return None
+        cache_key = ("string", value)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
         namespace, rest = m.group(1), m.group(2)
         resolver = self._resolvers.get(namespace)
         if resolver is None:
             return None
         result = resolver(*rest.split("."))
-        return str(result) if result is not None else None
+        resolved = str(result) if result is not None else None
+        self._cache[cache_key] = resolved
+        return resolved
 
 
 macro_registry = MacroRegistry()
