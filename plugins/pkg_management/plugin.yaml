@@ -1,0 +1,40 @@
+name: Package Management Plugin
+id: pkg_management
+version: "1.0.0"
+description: >
+  Manages OS packages, repositories, and system services — packages, repos,
+  and service start/stop/enable/disable — via pyinfra.  Routes mount at
+  /v1/pkg_management/.
+author: hornetmadness@gmail.com
+
+enabled: true
+
+plugin_requirements: ["smtp"]  # smtp recommended — handles smtp.send events from the upgrade endpoint
+py_requirements: []    # pyinfra is already a core dependency
+os_requirements: []
+
+service_ports:
+  pkg_management:
+    tcp: [-1]
+
+# Events consumed:
+#   pkg_management.add.package  – payload: {name, present?, latest?}
+#   pkg_management.add.repo     – payload: {name, ...RepoBody fields}
+#   pkg_management.add.service  – payload: {service, running?, enabled?}
+#
+# Events emitted:
+#   pkg_management.service.changed               – payload: {service, running, enabled}
+#   pkg_management.service.deleted               – payload: {service}
+#   pkg_management.package.changed               – payload: {package, present, latest, platform}
+#   pkg_management.package.updated               – payload: {package, platform}
+#   pkg_management.package.deleted               – payload: {package, platform}
+#   pkg_management.repo.changed                  – payload: {repo, platform, ...body fields}
+#   pkg_management.repo.deleted                  – payload: {repo, platform}
+#   pkg_management.package.upgrade-system.started – payload: {task_id, email, platform}
+#   pkg_management.package.upgrade-system.done    – payload: {platform, returncode, email}
+#   smtp.send                                    – payload: {to, subject, body}
+
+config:
+  state_file: pkg_management_state.json
+  ignore_state_on_boot: false
+  os_pkgmgr_max_cache_ttl_secs: 300   # seconds before the package index is considered stale; 0 = always refresh

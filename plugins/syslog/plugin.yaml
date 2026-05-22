@@ -11,7 +11,7 @@ version: 1.0.0
 os_requirements:
 - fluent-bit
 - logrotate
-plugin_requirements: []
+plugin_requirements: ["pkg_management"]
 py_requirements: []
 skip_host_os_port_check: true  # rsyslog/fluent-bit are already running; this plugin manages them
 
