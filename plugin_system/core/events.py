@@ -1,9 +1,36 @@
 """Pub/sub event bus for the plugin system.
 
-Plugins subscribe to named events via ``bus.subscribe`` or the decorator
-helpers in ``plugin_system.core.decorators``.  The module-level ``bus``
-singleton is the shared channel; import it directly rather than constructing
-a new ``EventBus``.
+The module-level ``bus`` singleton is the shared channel; import it directly:
+
+    from plugin_system.core.events import bus, Event
+
+Plugins subscribe via ``bus.subscribe`` / ``bus.unsubscribe`` or the decorator
+helpers in ``plugin_system.core.decorators`` (``@on``, ``@on_any``).
+
+Bound-method identity
+---------------------
+Python creates a new object each time a bound method is accessed via an
+attribute lookup, so ``self.method is self.method`` is ``False``.
+``unsubscribe`` uses ``is`` identity to remove handlers, so always store the
+reference in ``setup()`` and reuse it in ``teardown()``::
+
+    def setup(self):
+        self._h = self._on_event          # stable reference
+        bus.subscribe("some.event", self._h)
+
+    def teardown(self):
+        bus.unsubscribe("some.event", self._h)
+
+Service injection
+-----------------
+``emit`` / ``emit_async`` automatically set ``event.payload["services"]`` to
+the emitting plugin's declared service list (from ``plugin_services``) unless
+the caller already set that key.
+
+Error isolation
+---------------
+Exceptions raised by handlers are caught and logged; they never propagate to
+the emitter or abort remaining handlers.
 """
 from __future__ import annotations
 
@@ -34,7 +61,10 @@ Handler = Callable[[Event], Any]
 
 
 class EventBus:
-    """Central event bus. Plugins subscribe via decorators; the bus dispatches."""
+    """Central event bus shared across all plugins.
+
+    Do not instantiate directly — use the module-level ``bus`` singleton.
+    """
 
     def __init__(self) -> None:
         self._subscribers: dict[str, list[Handler]] = defaultdict(list)
@@ -52,7 +82,7 @@ class EventBus:
         logger.debug("Subscribed %s → %s", handler.__qualname__, event_name)
 
     def subscribe_all(self, handler: Handler) -> None:
-        """Register *handler* for every event (wildcard)."""
+        """Register *handler* for every event (wildcard). Prefer ``@on_any``."""
         self._wildcard.append(handler)
 
     def unsubscribe(self, event_name: str, handler: Handler) -> None:
@@ -73,11 +103,12 @@ class EventBus:
             event.payload.setdefault("services", self.plugin_services[event.source])
 
     def emit(self, event: Event) -> None:
-        """Emit synchronously.
+        """Emit *event* to all matching subscribers.
 
-        Async handlers are fire-and-forget: scheduled as tasks when a loop is
-        already running, or driven to completion with ``asyncio.run`` otherwise.
-        Prefer ``emit_async`` when you need to await handler results.
+        Sync handlers run inline.  Async handlers are fire-and-forget: scheduled
+        as tasks when a loop is already running, or driven to completion via
+        ``asyncio.run`` otherwise.  Prefer ``emit_async`` in async contexts when
+        you need to await handler results.
         """
         self._inject_services(event)
         handlers = list(self._subscribers.get(event.name, [])) + list(self._wildcard)
@@ -95,7 +126,7 @@ class EventBus:
                 logger.exception("Handler %s raised on event %s", handler.__qualname__, event.name)
 
     async def emit_async(self, event: Event) -> None:
-        """Emit and await all async handlers; run sync handlers inline."""
+        """Emit *event* and await every handler before returning."""
         self._inject_services(event)
         handlers = list(self._subscribers.get(event.name, [])) + list(self._wildcard)
         for handler in handlers:

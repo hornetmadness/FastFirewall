@@ -2,14 +2,14 @@ name: Host Plugin
 id: host
 version: "1.0.0"
 description: >
-  Manages basic host system configuration — hostname, system services,
-  sysctl kernel parameters, users, groups, OS packages and cron entries — via
-  pyinfra server.* operations.  Routes mount at /v1/host/.
+  Manages basic host system configuration — hostname, sysctl kernel
+  parameters, users, groups, and cron entries — via pyinfra server.*
+  operations.  Routes mount at /v1/host/.
 author: hornetmadness@gmail.com
 
 enabled: true
 
-plugin_requirements: ["smtp"]  # smtp recommended — handles smtp.send events from the upgrade endpoint
+plugin_requirements: []
 py_requirements: []    # pyinfra is already a core dependency
 os_requirements: []
 
@@ -24,13 +24,9 @@ service_ports:
     tcp: [-1]
   cron:
     tcp: [-1]
-  pkg_management:
-    tcp: [-1]
 
 # Events emitted:
 #   host.hostname.changed  – payload: {hostname}
-#   host.service.changed   – payload: {service, running, enabled}
-#   host.service.deleted   – payload: {service}
 #   host.sysctl.changed    – payload: {key, value, persist}
 #   host.sysctl.deleted    – payload: {key}
 #   host.user.changed      – payload: {user, shell, home_dir, system, comment}
@@ -43,7 +39,6 @@ service_ports:
 config:
   state_file: host_state.json
   ignore_state_on_boot: false
-  os_pkgmgr_max_cache_ttl_secs: 300   # seconds before the package index is considered stale; 0 = always refresh
 
   init:
     enable_init_script: false   # when true, ensures service_name is running/enabled on startup
