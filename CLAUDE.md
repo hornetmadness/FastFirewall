@@ -117,7 +117,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         # a plugin can register multiple namespaces
 
     def _resolve_interface_macro(self, *segments: str) -> Any:
-        # segments[0] = alias name, segments[1] = "name" | "address"
+        # segments[0] = alias name, segments[1] = "name" | "address" | "net_addr"
         if len(segments) < 2:
             return None
         device = self._aliases.get(segments[0])
@@ -127,6 +127,9 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             return device
         if segments[1] == "address":
             return [str(ipaddress.ip_interface(a).ip)
+                    for a in self._interfaces.get(device, {}).get("addresses", [])]
+        if segments[1] == "net_addr":
+            return [str(ipaddress.ip_interface(a).network)
                     for a in self._interfaces.get(device, {}).get("addresses", [])]
         return None
 
@@ -139,6 +142,10 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                      for a in self._interfaces.get(device, {}).get("addresses", [])]
             if addrs:
                 entries[f"{alias}.address"] = addrs
+            nets = [str(ipaddress.ip_interface(a).network)
+                    for a in self._interfaces.get(device, {}).get("addresses", [])]
+            if nets:
+                entries[f"{alias}.net_addr"] = nets
         return {"interface": entries}
 ```
 After `setup()` the loader calls `macro_registry.register_namespace(name, resolver)` for every namespace the plugin declared. On unload each namespace is unregistered. Both `ApiRouterPlugin` and `MacroProviderPlugin` use cooperative `__init__` (`super().__init__()`), so multiple mixins compose correctly.
@@ -183,7 +190,7 @@ The bus auto-injects the emitting plugin's `services` list into `event.payload` 
 
 ### Macro system
 
-`macro_registry` (`plugin_system/core/macros.py`) is the module-level singleton that stores all macro namespaces. Plugins and rules reference macros with `$namespace.segment[.segment...]` syntax (e.g. `$service_port.dns.udp`, `$interface.lan.name`, `$interface.lan.address`).
+`macro_registry` (`plugin_system/core/macros.py`) is the module-level singleton that stores all macro namespaces. Plugins and rules reference macros with `$namespace.segment[.segment...]` syntax (e.g. `$service_port.dns.udp`, `$interface.lan.name`, `$interface.lan.address`, `$interface.lan.net_addr`).
 
 **Built-in namespace — `service_port`**
 
