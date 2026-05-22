@@ -10,10 +10,6 @@ the shared ``macro_registry`` singleton before writing to the log, so each
 entry shows both the original macro and its resolved value:
 
   payload={'src_port': '$service_port.dns.udp', 'src_port_resolved': [53]}
-
-The registry is populated by the loader — no per-plugin event subscriptions
-or local registry copies are needed.  ``on_all_loaded`` demonstrates a direct
-resolution call once all namespaces are guaranteed to be registered.
 """
 import datetime
 from typing import Any
@@ -73,11 +69,6 @@ class AuditPlugin(PluginBase):
         self.logger.debug("Audit: %s", line)
         with open(self._log_path, "a") as fh:
             fh.write(line + "\n")
-
-    @on("plugins.all_loaded")
-    def on_all_loaded(self, event: Event) -> None:
-        resolved = macro_registry.resolve_string("$interface.lan1")
-        self.logger.info("$interface.lan1 → %s", resolved)
 
     @on("user.login", "user.logout")
     def on_auth_event(self, event: Event):
