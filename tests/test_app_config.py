@@ -2,6 +2,8 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from pydantic import ValidationError
+
 from app_config import AppConfig, AuthConfig, LoggingConfig, PluginsConfig, ServerConfig
 
 
@@ -23,7 +25,7 @@ def test_load_empty_yaml_gives_all_defaults(tmp_path):
     p = write_config(tmp_path, "")
     cfg = AppConfig.load(p)
     assert cfg.logging.level == "INFO"
-    assert cfg.logging.format == LoggingConfig.format
+    assert cfg.logging.format == LoggingConfig().format
     assert cfg.plugins.directory == "plugins"
     assert cfg.server.host == "0.0.0.0"
     assert cfg.server.port == 8000
@@ -281,3 +283,66 @@ auth:
     assert cfg.auth.token_expire_minutes == 120
     assert "/docs" in cfg.auth.exempt_paths
     assert cfg.auth.users[0]["roles"] == ["admin"]
+
+
+# ---------------------------------------------------------------------------
+# Validation errors (Pydantic catches bad values with clear messages)
+# ---------------------------------------------------------------------------
+
+def _raises_validation_error(tmp_path, yaml_content: str) -> ValidationError:
+    p = write_config(tmp_path, yaml_content)
+    with pytest.raises(SystemExit):
+        AppConfig.load(p)
+    # Also confirm model_validate raises directly (bypassing load's SystemExit)
+    import yaml as _yaml
+    raw = _yaml.safe_load(yaml_content) or {}
+    with pytest.raises(ValidationError) as exc_info:
+        AppConfig.model_validate(raw)
+    return exc_info.value
+
+
+def test_invalid_port_string(tmp_path):
+    exc = _raises_validation_error(tmp_path, "server:\n  port: 'not-a-port'\n")
+    assert "port" in str(exc)
+
+
+def test_invalid_port_out_of_range(tmp_path):
+    exc = _raises_validation_error(tmp_path, "server:\n  port: 99999\n")
+    assert "port" in str(exc)
+
+
+def test_invalid_token_expire_minutes(tmp_path):
+    exc = _raises_validation_error(tmp_path, "auth:\n  token_expire_minutes: 'sixty'\n")
+    assert "token_expire_minutes" in str(exc)
+
+
+def test_invalid_max_attempts_not_int(tmp_path):
+    exc = _raises_validation_error(tmp_path, "auth:\n  rate_limit:\n    max_attempts: 'many'\n")
+    assert "max_attempts" in str(exc)
+
+
+def test_invalid_reload_not_bool(tmp_path):
+    exc = _raises_validation_error(tmp_path, "server:\n  reload: 'yes-please'\n")
+    assert "reload" in str(exc)
+
+
+def test_invalid_auth_enabled_not_bool(tmp_path):
+    exc = _raises_validation_error(tmp_path, "auth:\n  enabled: 'maybe'\n")
+    assert "enabled" in str(exc)
+
+
+def test_valid_port_boundaries(tmp_path):
+    p = write_config(tmp_path, "server:\n  port: 1\n")
+    cfg = AppConfig.load(p)
+    assert cfg.server.port == 1
+
+    p = write_config(tmp_path, "server:\n  port: 65535\n")
+    cfg = AppConfig.load(p)
+    assert cfg.server.port == 65535
+
+
+def test_rate_limit_partial_override_keeps_other_default(tmp_path):
+    p = write_config(tmp_path, "auth:\n  rate_limit:\n    max_attempts: 3\n")
+    cfg = AppConfig.load(p)
+    assert cfg.auth.rate_limit.max_attempts == 3
+    assert cfg.auth.rate_limit.window_seconds == 300  # default preserved
