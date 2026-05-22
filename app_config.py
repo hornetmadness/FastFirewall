@@ -10,6 +10,8 @@ from typing import Any
 
 import yaml
 
+from request_context import install_filter
+
 _DEFAULT_PATH = Path(__file__).parent / "app_config.yaml"
 
 
@@ -136,6 +138,7 @@ class AppConfig:
         cfg._uvicorn_kwargs = {"host": cfg.server.host, "port": cfg.server.port, "reload": cfg.server.reload, "log_config": None, **extra}
 
         logging.basicConfig(level=cfg.logging.level, format=cfg.logging.format)
+        install_filter()
         return cfg
 
     def uvicorn_kwargs(self) -> dict[str, Any]:

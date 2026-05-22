@@ -497,7 +497,9 @@ def test_set_sysctl_emits_event(plugin, client):
     global_bus.subscribe("networking.sysctl.changed", received.append)
     try:
         client.put("/v1/networking/config/sysctl/net.ipv4.ip_forward", json={"value": "1"})
-        assert received[0].payload == {"key": "net.ipv4.ip_forward", "value": "1"}
+        payload = received[0].payload
+        assert payload["key"] == "net.ipv4.ip_forward"
+        assert payload["value"] == "1"
     finally:
         global_bus.unsubscribe("networking.sysctl.changed", received.append)
 

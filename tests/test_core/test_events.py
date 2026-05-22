@@ -1,6 +1,7 @@
 import asyncio
 import pytest
 from plugin_system.core.events import Event, EventBus
+from request_context import get_request_id, set_request_id
 
 
 @pytest.fixture
@@ -129,3 +130,48 @@ def test_wildcard_plus_specific_both_fire(bus):
     bus.emit(Event("named", "src"))
     assert "named" in results
     assert "wildcard" in results
+
+
+# ---------------------------------------------------------------------------
+# Request ID injection
+# ---------------------------------------------------------------------------
+
+def test_emit_injects_request_id_into_payload(bus):
+    set_request_id("test-req-1")
+    received = []
+    bus.subscribe("evt", lambda e: received.append(e.payload.get("request_id")))
+    try:
+        bus.emit(Event("evt", "src"))
+        assert received[0] == "test-req-1"
+    finally:
+        set_request_id("-")
+
+
+def test_emit_uses_dash_when_no_request_active(bus):
+    set_request_id("-")
+    received = []
+    bus.subscribe("evt", lambda e: received.append(e.payload.get("request_id")))
+    bus.emit(Event("evt", "src"))
+    assert received[0] == "-"
+
+
+def test_emit_does_not_override_explicit_request_id(bus):
+    set_request_id("ctx-id")
+    received = []
+    bus.subscribe("evt", lambda e: received.append(e.payload.get("request_id")))
+    try:
+        bus.emit(Event("evt", "src", payload={"request_id": "caller-set"}))
+        assert received[0] == "caller-set"
+    finally:
+        set_request_id("-")
+
+
+async def test_emit_async_injects_request_id(bus):
+    set_request_id("async-req-1")
+    received = []
+    bus.subscribe("evt", lambda e: received.append(e.payload.get("request_id")))
+    try:
+        await bus.emit_async(Event("evt", "src"))
+        assert received[0] == "async-req-1"
+    finally:
+        set_request_id("-")

@@ -20,6 +20,7 @@ from plugin_system import manager_cli
 from app_config import AppConfig
 from plugin_system.core import PluginLoader, bus
 from infra.state_manager import configure as configure_state
+from request_context import request_tracing_middleware
 from ff_auth import (
     AuthUser,
     authenticate_for_token,
@@ -52,6 +53,11 @@ app = FastAPI(
 @app.middleware("http")
 async def _auth_middleware(request: Request, call_next):
     return await enforce_auth(request, call_next)
+
+
+@app.middleware("http")
+async def _request_tracing(request: Request, call_next):
+    return await request_tracing_middleware(request, call_next)
 
 
 @app.post("/token", tags=["auth"], summary="Obtain a Bearer JWT")
