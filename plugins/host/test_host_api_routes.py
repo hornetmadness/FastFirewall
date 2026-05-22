@@ -60,6 +60,7 @@ def _make_plugin(tmp_path, config=None, system_repos=None):
     plugin.plugin_dir = tmp_path
     plugin.logger = logging.getLogger("test.host")
     plugin._pyinfra_run = MagicMock()
+    plugin._pyinfra_run_many = MagicMock(side_effect=lambda ops: [(True, None)] * len(ops))
     plugin.setup()
     plugin._pkg_mgr.list_system_repos = MagicMock(return_value=system_repos or {})
     plugin._pkg_mgr.list_system_packages = MagicMock(return_value={})
@@ -1718,6 +1719,7 @@ def _make_inst(tmp_path, config=None):
     plugin.plugin_dir = tmp_path
     plugin.logger = logging.getLogger("test.host")
     plugin._pyinfra_run = MagicMock()
+    plugin._pyinfra_run_many = MagicMock(side_effect=lambda ops: [(True, None)] * len(ops))
     return plugin, mod
 
 
@@ -1726,37 +1728,34 @@ def test_state_reapplied_on_boot_calls_pyinfra(tmp_path):
     _write_boot_state(tmp_path)
     plugin, _ = _make_inst(tmp_path)
     plugin.setup()
-    ops = [c[0][0] for c in plugin._pyinfra_run.call_args_list]
-    assert server_ops.service in ops
-    assert server_ops.sysctl in ops
-    assert server_ops.user in ops
-    assert server_ops.group in ops
-    assert server_ops.crontab in ops
+    # _apply_state batches all ops into a single _pyinfra_run_many call
+    assert plugin._pyinfra_run_many.call_count == 1
+    batch = plugin._pyinfra_run_many.call_args[0][0]
+    ops_called = [op for op, _ in batch]
+    assert server_ops.service in ops_called
+    assert server_ops.sysctl in ops_called
+    assert server_ops.user in ops_called
+    assert server_ops.group in ops_called
+    assert server_ops.crontab in ops_called
 
 
 def test_ignore_state_on_boot_skips_apply(tmp_path):
-    from pyinfra.operations import server as server_ops
     _write_boot_state(tmp_path)
     plugin, _ = _make_inst(tmp_path, config={"ignore_state_on_boot": True})
     plugin.setup()
-    ops = [c[0][0] for c in plugin._pyinfra_run.call_args_list]
-    assert server_ops.service not in ops
-    assert server_ops.sysctl not in ops
+    plugin._pyinfra_run_many.assert_not_called()
     assert plugin._state == {k: {} for k in plugin._EMPTY_STATE}
 
 
 def test_apply_state_does_not_crash_on_pyinfra_failure(tmp_path):
     _write_boot_state(tmp_path)
     plugin, _ = _make_inst(tmp_path)
-    plugin._pyinfra_run = MagicMock(side_effect=RuntimeError("pyinfra failed"))
+    plugin._pyinfra_run_many = MagicMock(side_effect=lambda ops: [(False, "pyinfra failed")] * len(ops))
     plugin.setup()  # must not raise
     assert "nginx" in plugin._state["services"]
 
 
 def test_empty_state_skips_apply_calls(tmp_path):
-    from pyinfra.operations import server as server_ops
     plugin, _ = _make_inst(tmp_path)
     plugin.setup()  # no state file — all categories empty
-    ops = [c[0][0] for c in plugin._pyinfra_run.call_args_list]
-    assert server_ops.service not in ops
-    assert server_ops.sysctl not in ops
+    plugin._pyinfra_run_many.assert_not_called()

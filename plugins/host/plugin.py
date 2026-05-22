@@ -32,14 +32,12 @@ import hashlib
 import io
 import json
 import os
-import pickle
 import pwd
 import re
 import shlex
 import shutil
 import socket
 import subprocess
-import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,7 +49,7 @@ from pyinfra.operations import files as files_ops
 from pyinfra.operations import server as server_ops
 from pyinfra.operations import systemd as systemd_ops
 
-from infra import PYINFRA_WORKER
+from infra import pyinfra_run_batch
 from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service
 from plugin_system.core.events import Event, bus
 from plugins.host._pkg_manager import (
@@ -184,79 +182,76 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
 
         applied: dict[str, Any] = {k: {} for k in self._EMPTY_STATE}
 
+        # Build one batch for all pyinfra-backed resource types so we only
+        # pay Python startup + pyinfra import cost once per boot apply.
+        tracked: list[tuple[str, str, Any]] = []   # (resource_type, item_key, item_value)
+        batch_ops: list[tuple[Any, dict[str, Any]]] = []
+
         for svc_name, v in self._state.get("services", {}).items():
-            try:
-                self._pyinfra_run(
-                    server_ops.service,
-                    name=f"Restore service {svc_name}",
-                    service=svc_name,
-                    running=v["running"],
-                    enabled=v["enabled"],
-                )
-                applied["services"][svc_name] = v
-            except Exception as exc:
-                self.logger.warning("Boot-time restore failed for service %r: %s", svc_name, exc)
+            tracked.append(("services", svc_name, v))
+            batch_ops.append((server_ops.service, {
+                "name": f"Restore service {svc_name}",
+                "service": svc_name,
+                "running": v["running"],
+                "enabled": v["enabled"],
+            }))
 
         for sysctl_key, v in self._state.get("sysctl", {}).items():
-            try:
-                self._pyinfra_run(
-                    server_ops.sysctl,
-                    name=f"Restore sysctl {sysctl_key}",
-                    key=sysctl_key,
-                    value=v["value"],
-                    persist=v["persist"],
-                )
-                applied["sysctl"][sysctl_key] = v
-            except Exception as exc:
-                self.logger.warning("Boot-time restore failed for sysctl %r: %s", sysctl_key, exc)
+            tracked.append(("sysctl", sysctl_key, v))
+            batch_ops.append((server_ops.sysctl, {
+                "name": f"Restore sysctl {sysctl_key}",
+                "key": sysctl_key,
+                "value": v["value"],
+                "persist": v["persist"],
+            }))
 
         for user_name, v in self._state.get("users", {}).items():
-            try:
-                user_kw: dict[str, Any] = {
-                    "name": f"Restore user {user_name}",
-                    "user": user_name,
-                    "shell": v["shell"],
-                    "system": v["system"],
-                }
-                if v.get("home_dir"):
-                    user_kw["home"] = v["home_dir"]
-                if v.get("comment"):
-                    user_kw["comment"] = v["comment"]
-                self._pyinfra_run(server_ops.user, **user_kw)
-                applied["users"][user_name] = v
-            except Exception as exc:
-                self.logger.warning("Boot-time restore failed for user %r: %s", user_name, exc)
+            user_kw: dict[str, Any] = {
+                "name": f"Restore user {user_name}",
+                "user": user_name,
+                "shell": v["shell"],
+                "system": v["system"],
+            }
+            if v.get("home_dir"):
+                user_kw["home"] = v["home_dir"]
+            if v.get("comment"):
+                user_kw["comment"] = v["comment"]
+            tracked.append(("users", user_name, v))
+            batch_ops.append((server_ops.user, user_kw))
 
         for group_name, v in self._state.get("groups", {}).items():
-            try:
-                group_kw: dict[str, Any] = {
-                    "name": f"Restore group {group_name}",
-                    "group": group_name,
-                    "system": v["system"],
-                }
-                if v.get("gid") is not None:
-                    group_kw["gid"] = v["gid"]
-                self._pyinfra_run(server_ops.group, **group_kw)
-                applied["groups"][group_name] = v
-            except Exception as exc:
-                self.logger.warning("Boot-time restore failed for group %r: %s", group_name, exc)
+            group_kw: dict[str, Any] = {
+                "name": f"Restore group {group_name}",
+                "group": group_name,
+                "system": v["system"],
+            }
+            if v.get("gid") is not None:
+                group_kw["gid"] = v["gid"]
+            tracked.append(("groups", group_name, v))
+            batch_ops.append((server_ops.group, group_kw))
 
         for cron_name, v in self._state.get("cron", {}).items():
-            try:
-                self._pyinfra_run(
-                    server_ops.crontab,
-                    name=f"Restore cron {cron_name}",
-                    command=v["command"],
-                    minute=v["minute"],
-                    hour=v["hour"],
-                    day_of_month=v["day_of_month"],
-                    month=v["month"],
-                    day_of_week=v["day_of_week"],
-                    user=v["user"],
-                )
-                applied["cron"][cron_name] = v
-            except Exception as exc:
-                self.logger.warning("Boot-time restore failed for cron %r: %s", cron_name, exc)
+            tracked.append(("cron", cron_name, v))
+            batch_ops.append((server_ops.crontab, {
+                "name": f"Restore cron {cron_name}",
+                "command": v["command"],
+                "minute": v["minute"],
+                "hour": v["hour"],
+                "day_of_month": v["day_of_month"],
+                "month": v["month"],
+                "day_of_week": v["day_of_week"],
+                "user": v["user"],
+            }))
+
+        if batch_ops:
+            results = self._pyinfra_run_many(batch_ops)
+            for (rtype, rkey, rval), (success, err) in zip(tracked, results):
+                if success:
+                    applied[rtype][rkey] = rval
+                else:
+                    self.logger.warning(
+                        "Boot-time restore failed for %s %r: %s", rtype, rkey, err
+                    )
 
         for pkg_name, v in self._state.get("packages", {}).items():
             try:
@@ -282,17 +277,22 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
             k: ("__stringio__", v.getvalue()) if isinstance(v, io.StringIO) else v
             for k, v in kwargs.items()
         }
-        payload = pickle.dumps((op.__module__, op.__name__, norm_kwargs))
-        proc = subprocess.run(
-            [sys.executable, str(PYINFRA_WORKER)],
-            input=payload,
-            capture_output=True,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"pyinfra '{op.__name__}' failed (exit {proc.returncode}):\n"
-                + proc.stderr.decode(errors="replace")
-            )
+        success, err = pyinfra_run_batch([(op.__module__, op.__name__, norm_kwargs)])[0]
+        if not success:
+            raise RuntimeError(f"pyinfra '{op.__name__}' failed:\n{err}")
+
+    def _pyinfra_run_many(
+        self, ops: list[tuple[Any, dict[str, Any]]]
+    ) -> list[tuple[bool, str | None]]:
+        """Run a batch of pyinfra operations in a single worker subprocess."""
+        batch = [
+            (op.__module__, op.__name__, {
+                k: ("__stringio__", v.getvalue()) if isinstance(v, io.StringIO) else v
+                for k, v in kw.items()
+            })
+            for op, kw in ops
+        ]
+        return pyinfra_run_batch(batch)
 
     # ── init system detection & service registration ───────────────────────────
 
