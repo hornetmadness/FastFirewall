@@ -83,7 +83,7 @@ Ten dicts/lists are kept in memory, populated from the state file by `_load_stat
 
 **`_build_blocklist_config()`** — iterates `_blocklists`, emitting one `address=/{domain}/#` line per blocked domain.
 
-**`_fetch_blocklist_domains(url, fmt)`** — downloads a blocklist via `urllib.request.urlopen`. Supports two formats:
+**`_fetch_blocklist_domains(url, fmt)`** — async; validates the URL with `_validate_blocklist_url` (async DNS check via `loop.getaddrinfo`), then downloads the content with `httpx.AsyncClient`. Supports two formats:
 - `"hosts"` — parses lines like `0.0.0.0 domain.com` or `127.0.0.1 domain.com`; skips `localhost`, `broadcasthost`, and `0.0.0.0` itself
 - `"domains"` — plain one-domain-per-line list; skips comment lines
 
@@ -214,4 +214,6 @@ Key mock targets:
 - `plugin._write_file_sudo` — prevents actual file writes
 - `plugin._run_systemctl` — controls `systemctl restart` exit code
 - `plugin._read_on_disk` — controls what the boot-time diff sees (return `None` to simulate missing file, or return the exact desired config string to simulate no change needed)
-- `plugin._fetch_blocklist_domains` — returns a list of domains without network I/O
+- `plugin._fetch_blocklist_domains` — since this is now `async`, `patch.object` auto-creates an `AsyncMock` in Python 3.8+; `return_value=[...]` is what `await` resolves to
+
+Direct-call tests for `_fetch_blocklist_domains` must be `async def` and mock both `_validate_blocklist_url` (as `AsyncMock`) and `httpx.AsyncClient`.

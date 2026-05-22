@@ -9,17 +9,18 @@ POST /apply to write /etc/dnsmasq.d/ff-managed.conf and restart dnsmasq.
 
 Routes mount at /v1/dnsmasq/.
 """
+import asyncio
 import datetime
 import ipaddress
 import json
 import os
 import re
-import socket
 import subprocess
 import tempfile
 import urllib.parse
-import urllib.request
 import uuid
+
+import httpx
 from typing import Annotated, Any, Literal, Optional
 
 from fastapi import HTTPException
@@ -186,7 +187,7 @@ class BlocklistCreate(BaseModel):
     format: Literal["hosts", "domains"] = "hosts"
 
 
-def _validate_blocklist_url(url: str) -> None:
+async def _validate_blocklist_url(url: str) -> None:
     """Reject non-http/https URLs and URLs that resolve to private/loopback addresses."""
     try:
         parsed = urllib.parse.urlparse(url)
@@ -198,7 +199,8 @@ def _validate_blocklist_url(url: str) -> None:
     if not hostname:
         raise HTTPException(422, "Blocklist URL must have a valid hostname")
     try:
-        infos = socket.getaddrinfo(hostname, None)
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(hostname, None)
     except OSError:
         raise HTTPException(422, "Blocklist URL hostname could not be resolved")
     for info in infos:
@@ -489,10 +491,17 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin):
 
     # ── blocklist fetcher ──────────────────────────────────────────────
 
-    def _fetch_blocklist_domains(self, url: str, fmt: str) -> list[str]:
-        _validate_blocklist_url(url)
-        with urllib.request.urlopen(url, timeout=30) as resp:
-            content = resp.read().decode("utf-8", errors="replace")
+    async def _fetch_blocklist_domains(self, url: str, fmt: str) -> list[str]:
+        await _validate_blocklist_url(url)
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise OSError(f"HTTP {exc.response.status_code}") from exc
+        except httpx.HTTPError as exc:
+            raise OSError(str(exc)) from exc
+        content = resp.text
         domains: list[str] = []
         for line in content.splitlines():
             line = line.strip()
@@ -790,9 +799,9 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin):
             ),
         }
 
-    def _add_blocklist(self, body: BlocklistCreate) -> dict[str, Any]:
+    async def _add_blocklist(self, body: BlocklistCreate) -> dict[str, Any]:
         try:
-            domains = self._fetch_blocklist_domains(body.url, body.format)
+            domains = await self._fetch_blocklist_domains(body.url, body.format)
         except Exception as exc:
             self.logger.error("Failed to fetch blocklist from %r: %s", body.url, exc)
             raise HTTPException(502, f"Failed to fetch blocklist from {body.url!r}; check server logs")
@@ -818,12 +827,12 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin):
                        payload={"blocklist_id": blocklist_id}))
         return {"deleted": blocklist_id}
 
-    def _refresh_blocklist(self, blocklist_id: str) -> dict[str, Any]:
+    async def _refresh_blocklist(self, blocklist_id: str) -> dict[str, Any]:
         if blocklist_id not in self._blocklists:
             raise HTTPException(404, f"Blocklist {blocklist_id!r} not found")
         bl = self._blocklists[blocklist_id]
         try:
-            domains = self._fetch_blocklist_domains(bl["url"], bl.get("format", "hosts"))
+            domains = await self._fetch_blocklist_domains(bl["url"], bl.get("format", "hosts"))
         except Exception as exc:
             self.logger.error("Failed to refresh blocklist from %r: %s", bl["url"], exc)
             raise HTTPException(502, f"Failed to refresh blocklist from {bl['url']!r}; check server logs")

@@ -15,9 +15,7 @@ import hashlib
 import io
 import json
 import os
-import pickle
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -27,7 +25,7 @@ from pydantic import BaseModel, Field
 from pyinfra.operations import files as files_ops
 from pyinfra.operations import server as server_ops
 
-from infra import PYINFRA_WORKER
+from infra import pyinfra_run_batch
 from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service
 from plugin_system.core.events import Event, bus
 
@@ -127,17 +125,9 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
             k: ("__stringio__", v.getvalue()) if isinstance(v, io.StringIO) else v
             for k, v in kwargs.items()
         }
-        payload = pickle.dumps((op.__module__, op.__name__, norm_kwargs))
-        proc = subprocess.run(
-            [sys.executable, str(PYINFRA_WORKER)],
-            input=payload,
-            capture_output=True,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"pyinfra '{op.__name__}' failed (exit {proc.returncode}):\n"
-                + proc.stderr.decode(errors="replace")
-            )
+        success, err = pyinfra_run_batch([(op.__module__, op.__name__, norm_kwargs)])[0]
+        if not success:
+            raise RuntimeError(f"pyinfra '{op.__name__}' failed:\n{err}")
 
     # ── service configuration ──────────────────────────────────────────────────
 

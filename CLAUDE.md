@@ -274,6 +274,8 @@ namespaces: list[str] = macro_registry.namespaces   # e.g. ["service_port", "int
 
 `resolve_ports` returns `[]` and `resolve_string` / `resolve` return `None` for unknown macros or malformed syntax — callers should treat these as "unresolvable" rather than errors.
 
+`resolve_ports` caches results for the `service_port` namespace (the hot path in firewall rule compilation) in an internal dict and invalidates it on `register_namespace`, `unregister_namespace`, and `set_service_ports`. Plugin-defined namespace results (e.g. `$interface.*`) are **not** cached because their resolvers read live plugin state that can change without a `register_namespace` call.
+
 **Testing with macros**
 
 Tests that exercise port-based rules must seed the registry before the call and clean up after:
@@ -321,16 +323,26 @@ Plugins can declare `py_requirements` (pip packages) and `os_requirements` (syst
 
 **Pyinfra worker subprocess**
 
-Plugins that write privileged files via pyinfra (e.g. host, syslog, apt_cacher_ng) must not call pyinfra directly from the FastAPI process — pyinfra's gevent monkey-patching conflicts with anyio. Instead they spawn a fresh subprocess:
+Plugins that write privileged files via pyinfra (e.g. host, syslog, apt_cacher_ng) must not call pyinfra directly from the FastAPI process — pyinfra's gevent monkey-patching conflicts with anyio. Instead they call `pyinfra_run_batch`, which serializes one or more operations and sends them to a single worker subprocess:
 
 ```python
-from infra import PYINFRA_WORKER   # Path to infra/pyinfra_worker.py
+from infra import pyinfra_run_batch
 
-payload = pickle.dumps((op.__module__, op.__name__, norm_kwargs))
-proc = subprocess.run([sys.executable, str(PYINFRA_WORKER)], input=payload, capture_output=True)
+norm_kwargs = {
+    k: ("__stringio__", v.getvalue()) if isinstance(v, io.StringIO) else v
+    for k, v in kwargs.items()
+}
+results = pyinfra_run_batch([(op.__module__, op.__name__, norm_kwargs)])
+success, err = results[0]
+if not success:
+    raise RuntimeError(f"pyinfra '{op.__name__}' failed:\n{err}")
 ```
 
-`infra/pyinfra_worker.py` is the single canonical worker. It reads `(op_module, op_name, kwargs)` from stdin, reconstructs any `io.StringIO` values, and runs the operation via pyinfra's local connector. The `PYINFRA_WORKER` path constant is exported from `infra/__init__.py`. Never create per-plugin copies of this worker.
+`infra/pyinfra_worker.py` is the single canonical worker. It reads a **list** of `(op_module, op_name, norm_kwargs)` tuples from stdin, runs each operation independently (a failure in one does not abort the rest), and writes a list of `(success, error_or_None)` results to stdout. The worker always exits 0; per-operation errors are reported in the result list, not via exit code.
+
+`pyinfra_run_batch(ops)` in `infra/__init__.py` is the shared entry point. It spawns the worker, handles catastrophic startup failure (non-zero exit → all ops failed), and returns the result list. Never create per-plugin subprocess logic — use `pyinfra_run_batch` directly.
+
+Plugins that apply many operations at boot (e.g. `HostPlugin._apply_state`) build a single batch list and call `_pyinfra_run_many`, so Python startup and the full pyinfra import happen once per boot cycle instead of once per operation.
 
 ### Testing
 
@@ -360,10 +372,12 @@ Use `tmp_path` for any file-backed state (e.g. `rules_file`, `state_file`) so te
 
 **Plugin test pattern — pyinfra mocking (host, syslog, apt_cacher_ng)**
 
-For plugins that call `_pyinfra_run`, replace it with `MagicMock` after instantiation and before `setup()`. Then assert on `call_args` to verify the correct pyinfra op and kwargs were used without touching the real system:
+For plugins that call `_pyinfra_run`, replace it with `MagicMock` after instantiation and before `setup()`. For the host plugin also mock `_pyinfra_run_many` (used by `_apply_state` to batch boot-time ops). Then assert on `call_args` to verify the correct pyinfra op and kwargs were used without touching the real system:
 
 ```python
 plugin._pyinfra_run = MagicMock()
+# host plugin only — _apply_state uses _pyinfra_run_many for batch boot ops
+plugin._pyinfra_run_many = MagicMock(side_effect=lambda ops: [(True, None)] * len(ops))
 plugin.setup()
 # ...
 args, kwargs = plugin._pyinfra_run.call_args

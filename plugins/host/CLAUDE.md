@@ -62,7 +62,9 @@ Groups store their member list in the state file:
 
 **`_desired_snapshot()`** — returns `json.loads(json.dumps(self._state))`: a normalized deep copy used as the argument to `save_desired()`.
 
-**`_apply_state()`** — re-applies `self._state` on boot via pyinfra. Tracks per-resource success into a local `applied` dict; calls `self._state_file.commit(applied)` at the end so only successfully applied resources appear in `current_state`.
+**`_apply_state()`** — re-applies `self._state` on boot via pyinfra. Collects all five pyinfra-backed resource types (services, sysctl, users, groups, cron) into a single batch and calls `_pyinfra_run_many` once, so Python startup and pyinfra import cost are paid exactly once. Each operation's result is tracked individually; `self._state_file.commit(applied)` is called at the end so only successfully applied resources appear in `current_state`.
+
+**`_pyinfra_run_many(ops)`** — runs a batch of `(op, kwargs)` pairs in a single worker subprocess via `pyinfra_run_batch`. Returns `list[(success, error_or_None)]`, one entry per input operation.
 
 **`_read_system_services()`** — reads live running service state via `systemctl`/`initctl`/`/etc/init.d` depending on the detected init system. Returns `{name: {running, enabled}}`.
 
@@ -74,7 +76,15 @@ Cron import (`POST /cron/{name}/import`) requires a `{"source_key": "..."}` body
 
 ## pyinfra
 
-All system mutations go through `self._pyinfra_run(op, **kwargs)`, which serializes the call, runs it in a subprocess via `_pyinfra_worker.py`, and raises `RuntimeError` on non-zero exit. In tests, replace this with `MagicMock` before calling `setup()`.
+All single-operation mutations go through `self._pyinfra_run(op, **kwargs)`, which delegates to `pyinfra_run_batch` with a one-item list and raises `RuntimeError` if the operation fails.
+
+Boot-time batch operations go through `self._pyinfra_run_many(ops)`, which takes a list of `(op, kwargs)` pairs, serializes them all, and dispatches a single `pyinfra_run_batch` call so Python startup and pyinfra import cost is paid once. Returns `list[(success, error_or_None)]`.
+
+In tests, replace both with `MagicMock` before calling `setup()`:
+```python
+plugin._pyinfra_run = MagicMock()
+plugin._pyinfra_run_many = MagicMock(side_effect=lambda ops: [(True, None)] * len(ops))
+```
 
 ## `_pkg_manager.py`
 
@@ -101,4 +111,4 @@ Tests in `test_host_api_routes.py`. Two fixture tiers:
 - **`client` / `plugin`** (session fixtures) — a single plugin instance with `_pyinfra_run` mocked, shared across most tests. Fast but stateful; tests that add resources see each other's state.
 - **`_make_plugin(tmp_path)` / `_make_client(plugin)`** — creates a fresh isolated instance per test. Use this for persistence, restart, and boot-apply tests.
 
-Boot-state tests write a `_BOOT_STATE` dict (with `desired_state` wrapper) via `_write_boot_state(tmp_path)`, then call `_make_inst(tmp_path)` to get a plugin that hasn't called `setup()` yet, so pyinfra call assertions can be made against `_pyinfra_run.call_args_list` after `plugin.setup()`.
+Boot-state tests write a `_BOOT_STATE` dict (with `desired_state` wrapper) via `_write_boot_state(tmp_path)`, then call `_make_inst(tmp_path)` to get a plugin that hasn't called `setup()` yet. `_make_inst` mocks both `_pyinfra_run` and `_pyinfra_run_many`. Since `_apply_state` batches all ops into one `_pyinfra_run_many` call, boot-time assertions inspect `_pyinfra_run_many.call_args[0][0]` (the batch list) rather than `_pyinfra_run.call_args_list`.

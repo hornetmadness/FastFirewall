@@ -12,7 +12,7 @@ import logging
 import subprocess
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -450,21 +450,35 @@ def test_delete_blocklist_not_found(client):
     assert r.status_code == 404
 
 
-def test_fetch_blocklist_domains_hosts_format(tmp_path):
+async def test_fetch_blocklist_domains_hosts_format(tmp_path):
     mod = _load_module()
     inst = mod.DnsmasqPlugin()
-    with patch("urllib.request.urlopen") as mock_open:
-        mock_open.return_value.__enter__.return_value.read.return_value = _HOSTS_CONTENT.encode()
-        domains = inst._fetch_blocklist_domains("http://x.com/hosts.txt", "hosts")
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.text = _HOSTS_CONTENT
+    mock_aclient = AsyncMock()
+    mock_aclient.get = AsyncMock(return_value=mock_resp)
+    mock_aclient.__aenter__ = AsyncMock(return_value=mock_aclient)
+    mock_aclient.__aexit__ = AsyncMock(return_value=False)
+    with patch("plugins.dnsmasq.plugin._validate_blocklist_url", new_callable=AsyncMock):
+        with patch("httpx.AsyncClient", return_value=mock_aclient):
+            domains = await inst._fetch_blocklist_domains("http://x.com/hosts.txt", "hosts")
     assert set(domains) == _HOSTS_EXPECTED
 
 
-def test_fetch_blocklist_domains_plain_format(tmp_path):
+async def test_fetch_blocklist_domains_plain_format(tmp_path):
     mod = _load_module()
     inst = mod.DnsmasqPlugin()
-    with patch("urllib.request.urlopen") as mock_open:
-        mock_open.return_value.__enter__.return_value.read.return_value = _DOMAINS_CONTENT.encode()
-        domains = inst._fetch_blocklist_domains("http://x.com/domains.txt", "domains")
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.text = _DOMAINS_CONTENT
+    mock_aclient = AsyncMock()
+    mock_aclient.get = AsyncMock(return_value=mock_resp)
+    mock_aclient.__aenter__ = AsyncMock(return_value=mock_aclient)
+    mock_aclient.__aexit__ = AsyncMock(return_value=False)
+    with patch("plugins.dnsmasq.plugin._validate_blocklist_url", new_callable=AsyncMock):
+        with patch("httpx.AsyncClient", return_value=mock_aclient):
+            domains = await inst._fetch_blocklist_domains("http://x.com/domains.txt", "domains")
     assert set(domains) == _DOMAINS_EXPECTED
 
 
