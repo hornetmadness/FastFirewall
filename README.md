@@ -186,6 +186,35 @@ The full detail — stderr output, exception traceback, internal paths — is lo
 
 This applies to all `5xx` responses. `4xx` responses (404 Not Found, 409 Conflict, 422 Validation Error) do include the specific reason, since those describe a client-side problem rather than a server-side failure.
 
+### Input validation
+
+All request bodies are validated by Pydantic before reaching plugin code. String fields have maximum length constraints to prevent oversized payloads. A `422 Unprocessable Entity` is returned when any constraint is violated:
+
+```json
+{
+  "message": "Name: String should have at most 100 characters",
+  "source_errors": [...]
+}
+```
+
+Key limits across the API:
+
+| Field type | Limit |
+|---|---|
+| Names, labels, identifiers | 100 chars |
+| Comments, GECOS | 255 chars |
+| Hostnames, DNS names | 253 chars (RFC 1035) |
+| IP addresses | 39 chars (max IPv6) |
+| CIDR ranges | 43 chars (max IPv6/128) |
+| Linux interface names | 15 chars (IFNAMSIZ) |
+| File/socket paths | 4096 chars |
+| URLs (blocklists) | 2048 chars |
+| Email addresses | 254 chars (RFC 5321) |
+| Email subjects | 998 chars (RFC 2822) |
+| Email bodies | 65536 chars |
+| Sysctl values | 64 chars |
+| Cron commands | 4096 chars |
+
 ---
 
 ## State files

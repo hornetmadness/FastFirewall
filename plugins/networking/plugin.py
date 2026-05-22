@@ -27,7 +27,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 import yaml
 from fastapi import HTTPException  # TODO: add structured logging throughout this plugin (currently uses self.logger only at boot)
@@ -52,7 +52,7 @@ def _validate_cidr(value: str) -> str:
 class LinkConfig(BaseModel):
     state: Optional[Literal["up", "down"]] = None
     mtu: Optional[int] = Field(default=None, ge=68, le=65535)
-    kind: Optional[str] = None  # vlan, bridge, bond, dummy, …
+    kind: Optional[str] = Field(default=None, max_length=16)  # vlan, bridge, bond, dummy, …
 
 
 class InterfaceUpdate(BaseModel):
@@ -100,13 +100,13 @@ class RouteCreate(BaseModel):
 
 
 class ImportInterfacesRequest(BaseModel):
-    names: Optional[list[str]] = None  # None means import all discovered interfaces
-    overwrite: bool = False             # if True, overwrite already-managed interfaces
+    names: Optional[list[Annotated[str, Field(max_length=15)]]] = None  # None means import all discovered interfaces
+    overwrite: bool = False                                              # if True, overwrite already-managed interfaces
 
 
 class ImportRoutesRequest(BaseModel):
-    destinations: Optional[list[str]] = None  # None means import all discovered routes
-    overwrite: bool = False                    # if True, overwrite already-managed routes
+    destinations: Optional[list[Annotated[str, Field(max_length=43)]]] = None  # None means import all discovered routes
+    overwrite: bool = False                                                     # if True, overwrite already-managed routes
 
 
 class AliasCreate(BaseModel):
@@ -158,7 +158,7 @@ class MtrRequest(BaseModel):
 
 
 class SysctlValue(BaseModel):
-    value: str
+    value: str = Field(max_length=64)
 
 
 # ── state diff ─────────────────────────────────────────────────────────────────

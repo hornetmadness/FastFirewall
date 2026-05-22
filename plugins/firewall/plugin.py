@@ -60,14 +60,14 @@ def _validate_port_field(v: object) -> object:
 
 class FirewallRule(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    name: str
+    name: str = Field(max_length=100)
     action: Literal["accept", "deny"] = "deny"
     protocol: Optional[Literal["tcp", "udp", "icmp", "esp", "ah", "any"]] = None
-    src_address: str = "any"
-    dst_address: str = "any"
+    src_address: str = Field(default="any", max_length=43)
+    dst_address: str = Field(default="any", max_length=43)
     src_port: Optional[Union[int, str]] = None
     dst_port: Optional[Union[int, str]] = None
-    comment: Optional[str] = None
+    comment: Optional[str] = Field(default=None, max_length=255)
     priority: int = 100
     enabled: bool = True
 
@@ -78,14 +78,14 @@ class FirewallRule(BaseModel):
 
 
 class RuleCreate(BaseModel):
-    name: str
+    name: str = Field(max_length=100)
     action: Literal["accept", "deny"] = "deny"
     protocol: Optional[Literal["tcp", "udp", "icmp", "esp", "ah", "any"]] = None
-    src_address: str = "any"
-    dst_address: str = "any"
+    src_address: str = Field(default="any", max_length=43)
+    dst_address: str = Field(default="any", max_length=43)
     src_port: Optional[Union[int, str]] = None
     dst_port: Optional[Union[int, str]] = None
-    comment: Optional[str] = None
+    comment: Optional[str] = Field(default=None, max_length=255)
     priority: int = 100
     enabled: bool = True
 
@@ -96,14 +96,14 @@ class RuleCreate(BaseModel):
 
 
 class RuleUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=100)
     action: Optional[Literal["accept", "deny"]] = None
     protocol: Optional[Literal["tcp", "udp", "icmp", "esp", "ah", "any"]] = None
-    src_address: Optional[str] = None
-    dst_address: Optional[str] = None
+    src_address: Optional[str] = Field(default=None, max_length=43)
+    dst_address: Optional[str] = Field(default=None, max_length=43)
     src_port: Optional[Union[int, str]] = None
     dst_port: Optional[Union[int, str]] = None
-    comment: Optional[str] = None
+    comment: Optional[str] = Field(default=None, max_length=255)
     priority: Optional[int] = None
     enabled: Optional[bool] = None
 
@@ -114,8 +114,8 @@ class RuleUpdate(BaseModel):
 
 
 class CompileRequest(BaseModel):
-    platform: str = "nftables"
-    filter_name: str = "fastfirewall"
+    platform: str = Field(default="nftables", max_length=32)
+    filter_name: str = Field(default="fastfirewall", max_length=64)
 
 
 class CompileResult(BaseModel):

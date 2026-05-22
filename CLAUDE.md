@@ -32,6 +32,34 @@ raise HTTPException(500, f"nft failed: {result.stderr}")    # subprocess stderr
 
 `4xx` errors (Not Found, Conflict, Validation) may and should include the specific reason — those describe a client mistake, not a server-side failure. Only `5xx` responses need sanitizing.
 
+### Pydantic model conventions
+
+Every request body field must have a `max_length` constraint. Use `Field(max_length=N)` — never leave a bare `str` without a bound. Standard limits:
+
+| Field type | Limit |
+|---|---|
+| Names, labels | `max_length=100` |
+| Comments, GECOS | `max_length=255` |
+| Hostnames / DNS names | `max_length=253` |
+| IP addresses | `max_length=39` |
+| CIDR ranges | `max_length=43` |
+| Linux interface names | `max_length=15` |
+| File / socket paths | `max_length=4096` |
+| URLs | `max_length=2048` |
+| Email addresses | `max_length=254` |
+| Sysctl values | `max_length=64` |
+| Short enum-like strings (modes, frequencies) | `max_length=8`–`32` |
+
+For `list[str]` fields, constrain the element type with `Annotated`:
+```python
+from typing import Annotated
+from pydantic import Field
+
+addresses: list[Annotated[str, Field(max_length=39)]] | None = None
+```
+
+Response-only models (never received as input) do not need `max_length`.
+
 ## Working style
 
 - Never ask the user to edit `test_*` files — make all test changes directly.

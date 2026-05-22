@@ -36,17 +36,17 @@ from plugin_system.core.events import Event, bus
 
 class FluentBitConfigUpdate(BaseModel):
     syslog_port: Optional[int] = Field(None, ge=1, le=65535, description="Network syslog listener port")
-    syslog_mode: Optional[str] = Field(None, description="Network mode: udp, tcp, tcp+udp")
-    syslog_unix_path: Optional[str] = Field(None, description="Unix socket path, or empty string to disable")
-    syslog_unix_mode: Optional[str] = Field(None, description="Unix socket mode: unix_udp or unix_tcp")
+    syslog_mode: Optional[str] = Field(None, max_length=8, description="Network mode: udp, tcp, tcp+udp")
+    syslog_unix_path: Optional[str] = Field(None, max_length=4096, description="Unix socket path, or empty string to disable")
+    syslog_unix_mode: Optional[str] = Field(None, max_length=16, description="Unix socket mode: unix_udp or unix_tcp")
     enable_systemd_input: Optional[bool] = Field(None, description="Whether to read the systemd journal")
 
 
 class LogrotateConfigUpdate(BaseModel):
     rotate: Optional[int] = Field(None, ge=1, le=365, description="Number of rotated files to keep")
-    frequency: Optional[str] = Field(None, description="Rotation frequency: daily, weekly, monthly")
+    frequency: Optional[str] = Field(None, max_length=16, description="Rotation frequency: daily, weekly, monthly")
     compress: Optional[bool] = Field(None, description="Compress rotated logs with gzip")
-    max_size: Optional[str] = Field(None, description="Rotate when file exceeds this size (e.g. 100M), empty to disable")
+    max_size: Optional[str] = Field(None, max_length=16, description="Rotate when file exceeds this size (e.g. 100M), empty to disable")
 
 
 # ── constants ─────────────────────────────────────────────────────────────────

@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, List, Optional, Union
 
 from fastapi import HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service, on
 from plugin_system.core.events import Event, bus
@@ -36,31 +36,31 @@ from plugin_system.core.events import Event, bus
 # ── Pydantic schemas ────────────────────────────────────────────────────────────
 
 class PostfixSettingsUpdate(BaseModel):
-    myhostname: Optional[str] = None
-    mydomain: Optional[str] = None
-    myorigin: Optional[str] = None
-    mynetworks: Optional[str] = None
-    inet_interfaces: Optional[str] = None
-    relayhost: Optional[str] = None
-    smtp_tls_security_level: Optional[str] = None
+    myhostname: Optional[str] = Field(default=None, max_length=253)
+    mydomain: Optional[str] = Field(default=None, max_length=253)
+    myorigin: Optional[str] = Field(default=None, max_length=253)
+    mynetworks: Optional[str] = Field(default=None, max_length=1024)
+    inet_interfaces: Optional[str] = Field(default=None, max_length=256)
+    relayhost: Optional[str] = Field(default=None, max_length=253)
+    smtp_tls_security_level: Optional[str] = Field(default=None, max_length=32)
     smtp_sasl_auth_enable: Optional[bool] = None
-    smtp_sasl_password_maps: Optional[str] = None
+    smtp_sasl_password_maps: Optional[str] = Field(default=None, max_length=512)
     message_size_limit: Optional[int] = None
     mailbox_size_limit: Optional[int] = None
 
 
 class SendEmailRequest(BaseModel):
     to: Union[str, List[str]]
-    subject: str
-    body: str
-    from_addr: Optional[str] = None
+    subject: str = Field(max_length=998)
+    body: str = Field(max_length=65536)
+    from_addr: Optional[str] = Field(default=None, max_length=254)
     html: bool = False
 
 
 class TestEmailRequest(BaseModel):
-    to: str
-    subject: str = "FastFirewall Test Email"
-    body: Optional[str] = None
+    to: str = Field(max_length=254)
+    subject: str = Field(default="FastFirewall Test Email", max_length=998)
+    body: Optional[str] = Field(default=None, max_length=65536)
 
 
 # ── Plugin ──────────────────────────────────────────────────────────────────────

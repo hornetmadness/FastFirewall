@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import BackgroundTasks, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from pyinfra.operations import files as files_ops
 from pyinfra.operations import server as server_ops
 from pyinfra.operations import systemd as systemd_ops
@@ -64,7 +64,7 @@ from plugins.host._pkg_manager import (
 # ── Pydantic schemas ───────────────────────────────────────────────────────────
 
 class HostnameBody(BaseModel):
-    hostname: str
+    hostname: str = Field(max_length=253)
 
 
 class ServiceBody(BaseModel):
@@ -73,15 +73,15 @@ class ServiceBody(BaseModel):
 
 
 class SysctlBody(BaseModel):
-    value: str
+    value: str = Field(max_length=64)
     persist: bool = True
 
 
 class UserBody(BaseModel):
-    shell: str = "/bin/bash"
-    home_dir: Optional[str] = None
+    shell: str = Field(default="/bin/bash", max_length=255)
+    home_dir: Optional[str] = Field(default=None, max_length=4096)
     system: bool = False
-    comment: Optional[str] = None
+    comment: Optional[str] = Field(default=None, max_length=255)
 
 
 class GroupBody(BaseModel):
@@ -101,26 +101,26 @@ class GroupMemberBody(BaseModel):
 
 
 class CronBody(BaseModel):
-    command: str
-    minute: str = "*"
-    hour: str = "*"
-    day_of_month: str = "*"
-    month: str = "*"
-    day_of_week: str = "*"
-    user: str = "root"
+    command: str = Field(max_length=4096)
+    minute: str = Field(default="*", max_length=64)
+    hour: str = Field(default="*", max_length=64)
+    day_of_month: str = Field(default="*", max_length=64)
+    month: str = Field(default="*", max_length=64)
+    day_of_week: str = Field(default="*", max_length=64)
+    user: str = Field(default="root", max_length=32)
 
 
 class UpgradeBody(BaseModel):
-    email: str
+    email: str = Field(max_length=254)
 
 
 class CronImportBody(BaseModel):
-    source_key: str
+    source_key: str = Field(max_length=200)
 
 
 class RepoImportBody(BaseModel):
-    id: str
-    alias: str
+    id: str = Field(max_length=100)
+    alias: str = Field(max_length=100)
 
 
 # ── Plugin ─────────────────────────────────────────────────────────────────────

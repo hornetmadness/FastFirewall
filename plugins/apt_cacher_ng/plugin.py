@@ -36,7 +36,7 @@ from plugin_system.core.macros import macro_registry
 
 class AcngConfigUpdate(BaseModel):
     port: Optional[int] = Field(None, ge=1, le=65535, description="Listening port")
-    bind_address: Optional[str] = Field(None, description="Space-separated bind addresses; empty to bind all")
+    bind_address: Optional[str] = Field(None, max_length=1024, description="Space-separated bind addresses; empty to bind all")
     ex_threshold: Optional[int] = Field(None, ge=0, le=100, description="Disk space threshold percent; old files removed below this level")
     max_dl_speed_kb: Optional[int] = Field(None, ge=0, description="Max download speed in kB/s; 0 for unlimited")
     fetch_timeout: Optional[int] = Field(None, ge=1, le=3600, description="Fetch timeout in seconds")
@@ -46,7 +46,7 @@ class AcngConfigUpdate(BaseModel):
 
 
 class ProxyHostUpdate(BaseModel):
-    host: str = Field(..., min_length=1, description="Hostname or IP clients should use to reach this proxy")
+    host: str = Field(..., min_length=1, max_length=253, description="Hostname or IP clients should use to reach this proxy")
 
 
 # ── config key mapping ──────────────────────────────────────────────────────────
