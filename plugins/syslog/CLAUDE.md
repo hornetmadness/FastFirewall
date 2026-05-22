@@ -49,6 +49,12 @@ Unlike the host/smtp plugins, this plugin stores individual scalar fields (`_sys
 
 On boot: `load_desired(default={})` returns the overrides dict, which is merged with `self.config` (`{**self.config, **overrides}`) to produce the effective configuration.
 
+## Bootstrap — fluent-bit repo
+
+The syslog plugin's `__init__` emits `pkg_management.add.repo` to register the fluent-bit apt repo **before the loader installs `os_requirements`**. This is necessary because fluent-bit is not in Debian's default sources. The repo, GPG key URL, and key destination path are read from the constants at the top of `plugin.py` (`_FB_KEY_URL`, `_FB_KEY_DEST`, `_FB_REPO_URL`, `_FB_REPO_FILE`) and can be overridden via `plugin.yaml` config keys. The OS codename is detected via `platform.freedesktop_os_release()`, defaulting to `trixie`.
+
+`fluent-bit` and `logrotate` are declared in `os_requirements`; the loader installs them after `__init__` returns.
+
 ## Key methods
 
 **`_save_overrides()`** — builds a snapshot dict from the current scalar fields and calls `self._state_file.save_desired(...)`. Because the mutation model is `"immediate"`, this also auto-commits `current = desired`.
@@ -95,6 +101,10 @@ On boot: `load_desired(default={})` returns the overrides dict, which is merged 
 | `log_dir` | `/var/log/fastfirewall` | directory where fluent-bit writes logs |
 | `fastfirewall_conf` | `/etc/fluent-bit/conf.d/fastfirewall.conf` | rendered fluent-bit config path |
 | `fluent_bit_main_conf` | `/etc/fluent-bit/fluent-bit.conf` | main config checked for `conf.d` include |
+| `fluent_bit_key_url` | `https://packages.fluentbit.io/fluentbit.key` | GPG key URL for the fluent-bit apt repo |
+| `fluent_bit_key_dest` | `/usr/share/keyrings/fluentbit-keyring.gpg` | destination path for the dearmored key |
+| `fluent_bit_repo_url` | `https://packages.fluentbit.io/debian` | base URL of the fluent-bit apt repo |
+| `fluent_bit_repo_filename` | `fluent-bit` | `.list` filename under `/etc/apt/sources.list.d/` |
 | `ignore_state_on_boot` | `false` | skip loading overrides and re-applying config on startup |
 | `syslog_port` | `514` | base-level port (overridable at runtime) |
 | `syslog_mode` | `udp` | base-level mode (overridable at runtime) |
@@ -111,6 +121,8 @@ On boot: `load_desired(default={})` returns the overrides dict, which is merged 
 ## Testing
 
 Tests in `test_syslog_plugin.py`. pyinfra calls are mocked via `plugin._pyinfra_run = MagicMock()` before `setup()`. `subprocess.run` is patched with `unittest.mock.patch` for all tests that trigger systemctl, journalctl, or logrotate calls.
+
+Because `__init__` emits `pkg_management.add.repo` on the global bus, test helpers that construct the plugin must ensure no `pkg_management` handler is subscribed, or they must instantiate the plugin before `pkg_management` subscribes. In practice, since tests do not load `pkg_management`, the event fires with no subscribers and is silently dropped.
 
 ```python
 plugin._pyinfra_run = MagicMock()

@@ -1,10 +1,16 @@
 FROM python:3.14-slim
 
-# Install iptables and runtime deps
+# Install runtime deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    iptables \
+    nftables \
     iproute2 \
-    && rm -rf /var/lib/apt/lists/*
+    iputils-ping \
+    sudo \
+    libcap2-bin \
+    procps \
+    gpg \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod 1777 /tmp
 
 WORKDIR /app
 

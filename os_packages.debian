@@ -1,0 +1,20 @@
+# OS packages required by FastFirewall core
+# Excludes plugin-specific os_requirements (dnsmasq, fluent-bit, logrotate,
+# postfix, mtr, apt-cacher-ng).
+
+# Network / firewall
+#nftables        # nft rule management (firewall plugin)
+#iproute2        # ip(8) for interface management (networking plugin)
+#iputils-ping    # ping for network diagnostics (networking plugin)
+
+# Privilege / capabilities
+sudo            # privileged operations across all plugins
+libcap2-bin     # setcap — grants cap_net_admin/cap_net_raw to Python binary
+
+# System utilities
+procps          # sysctl(8) for kernel parameter management (host plugin)
+gpg             # GPG dearmoring for apt repo keys (pkg_management plugin)
+
+
+# CLI Install
+# cat os_packages.debian | grep -Ev '^#|^$' | awk '{print $1}' | xargs -I% sudo apt install -y %

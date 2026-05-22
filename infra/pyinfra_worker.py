@@ -52,6 +52,7 @@ for op_module, op_name, norm_kwargs in ops:
     try:
         results.append(_run_one(op_module, op_name, norm_kwargs))
     except Exception as exc:
-        results.append((False, str(exc)))
+        msg = str(exc).strip() or type(exc).__name__
+        results.append((False, msg))
 
 sys.stdout.buffer.write(pickle.dumps(results))

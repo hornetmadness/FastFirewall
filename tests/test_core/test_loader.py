@@ -768,6 +768,47 @@ def test_only_expands_to_include_transitive_deps(tmp_path, bus):
     assert loaded.index("infra") < loaded.index("service")
 
 
+def test_load_plugin_auto_loads_dep_from_sibling_directory(tmp_path, loader):
+    """load_plugin() should discover and load an unloaded dep from path.parent."""
+    make_plugin(tmp_path, "base", "name: Base\nid: base\n", "# empty\n")
+    make_plugin(tmp_path, "consumer", """
+        name: Consumer
+        id: consumer
+        plugin_requirements: [base]
+    """, "# empty\n")
+    # Call load_plugin on consumer WITHOUT first loading base — it should auto-load base.
+    loader.load_plugin(tmp_path / "consumer")
+    assert "base" in loader.plugins
+    assert "consumer" in loader.plugins
+
+
+def test_load_plugin_auto_loads_transitive_deps(tmp_path, loader):
+    """Auto-loading recurses through the full dep chain."""
+    make_plugin(tmp_path, "a", "name: A\nid: a\n", "# empty\n")
+    make_plugin(tmp_path, "b", "name: B\nid: b\nplugin_requirements: [a]\n", "# empty\n")
+    make_plugin(tmp_path, "c", "name: C\nid: c\nplugin_requirements: [b]\n", "# empty\n")
+    loader.load_plugin(tmp_path / "c")
+    assert "a" in loader.plugins
+    assert "b" in loader.plugins
+    assert "c" in loader.plugins
+
+
+def test_load_directory_skips_dependent_when_dep_fails(tmp_path, bus):
+    """When a dep fails to load, load_directory should skip dependents gracefully."""
+    make_plugin(tmp_path, "bad_dep", "name: Bad\nid: bad_dep\n", "raise RuntimeError('boom')\n")
+    make_plugin(tmp_path, "consumer", """
+        name: Consumer
+        id: consumer
+        plugin_requirements: [bad_dep]
+    """, "# empty\n")
+    make_plugin(tmp_path, "unrelated", "name: U\nid: unrelated\n", "# empty\n")
+    loader = PluginLoader(bus=bus)
+    loaded = loader.load_directory(tmp_path)
+    assert "bad_dep" not in loaded
+    assert "consumer" not in loaded
+    assert "unrelated" in loaded
+
+
 def test_bad_yaml_plugin_is_skipped_gracefully(tmp_path, bus):
     loader = PluginLoader(bus=bus)
     make_plugin(tmp_path, "good", "name: Good\nid: good\n", "# empty\n")

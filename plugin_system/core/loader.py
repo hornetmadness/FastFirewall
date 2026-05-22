@@ -144,6 +144,7 @@ class PluginLoader:
         self._plugins: dict[str, LoadedPlugin] = {}
         self._service_registry: dict[Service, str] = {}  # service → plugin_id
         self._port_registry: dict[tuple[str, int], str] = {}  # (proto, port) → plugin_id
+        self._loading: set[str] = set()  # plugin ids currently mid-load (cycle detection)
         self.ignore_state_on_boot: bool = False
 
     # ------------------------------------------------------------------
@@ -545,13 +546,24 @@ class PluginLoader:
         # ── 7. Load in resolved order ──────────────────────────────────────
         loaded: list[str] = []
         errored: list[tuple[str, str]] = []
+        failed: set[str] = set()  # plugins that failed or were skipped due to dep failure
         for pid in load_order:
+            failed_dep = next(
+                (d for d in active[pid]["requirements"] if d in failed), None
+            )
+            if failed_dep is not None:
+                msg = f"required dependency {failed_dep!r} failed to load"
+                self.logger.warning("Skipping plugin %r: %s", pid, msg)
+                errored.append((pid, msg))
+                failed.add(pid)
+                continue
             try:
                 loaded_id = self.load_plugin(active[pid]["path"], skip_requirements=skip_requirements)
                 loaded.append(loaded_id)
             except Exception as exc:
                 self.logger.exception("Failed to load plugin from %s", active[pid]["path"])
                 errored.append((pid, str(exc)))
+                failed.add(pid)
 
         total = len(loaded) + len(errored) + len(disabled)
         self.logger.info(
@@ -711,11 +723,28 @@ class PluginLoader:
                 plugin_id,
                 ", ".join(meta["plugin_requirements"]),
             )
-        for dep in meta["plugin_requirements"]:
-            if dep not in self._plugins:
-                raise PluginError(
-                    f"Plugin {plugin_id!r} requires {dep!r} which is not loaded"
-                )
+        self._loading.add(plugin_id)
+        try:
+            for dep in meta["plugin_requirements"]:
+                if dep not in self._plugins:
+                    if dep in self._loading:
+                        raise PluginError(
+                            f"Circular dependency: {plugin_id!r} requires {dep!r} "
+                            f"which is already being loaded"
+                        )
+                    dep_path = path.parent / dep
+                    if dep_path.is_dir() and (dep_path / YAML_FILENAME).exists():
+                        self.logger.info(
+                            "Auto-loading required dependency %r for plugin %r",
+                            dep, plugin_id,
+                        )
+                        self.load_plugin(dep_path, skip_requirements=skip_requirements)
+                    else:
+                        raise PluginError(
+                            f"Plugin {plugin_id!r} requires {dep!r} which is not loaded"
+                        )
+        finally:
+            self._loading.discard(plugin_id)
 
         # --- install python requirements via pyinfra + pipx -----------
         if py_requirements and not skip_requirements:

@@ -28,6 +28,13 @@ _request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 _req_log = logging.getLogger("request")
 
 _filter_installed = False
+_old_log_record_factory = logging.getLogRecordFactory()
+
+
+def _log_record_factory(*args, **kwargs) -> logging.LogRecord:
+    record = _old_log_record_factory(*args, **kwargs)
+    record.request_id = _request_id_var.get()  # type: ignore[attr-defined]
+    return record
 
 
 def get_request_id() -> str:
@@ -49,11 +56,17 @@ class RequestIdFilter(logging.Filter):
 
 
 def install_filter() -> None:
-    """Add RequestIdFilter to the root logger (idempotent)."""
+    """Install request_id injection into every LogRecord via setLogRecordFactory (idempotent).
+
+    Using a log-record factory rather than a logger filter ensures request_id
+    is present on records emitted by any child logger — logger-level filters
+    are not evaluated during propagation, so addFilter on the root logger alone
+    does not cover child loggers.
+    """
     global _filter_installed
     if _filter_installed:
         return
-    logging.getLogger().addFilter(RequestIdFilter())
+    logging.setLogRecordFactory(_log_record_factory)
     _filter_installed = True
 
 
