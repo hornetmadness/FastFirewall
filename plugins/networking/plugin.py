@@ -246,6 +246,11 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 str(ipaddress.ip_interface(a).ip)
                 for a in self._interfaces.get(device, {}).get("addresses", [])
             ]
+        if field == "net_addr":
+            return [
+                str(ipaddress.ip_interface(a).network)
+                for a in self._interfaces.get(device, {}).get("addresses", [])
+            ]
         return None
 
     def macro_snapshot(self) -> dict[str, dict[str, Any]]:
@@ -258,6 +263,12 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             ]
             if addrs:
                 entries[f"{alias}.address"] = addrs
+            nets = [
+                str(ipaddress.ip_interface(a).network)
+                for a in self._interfaces.get(device, {}).get("addresses", [])
+            ]
+            if nets:
+                entries[f"{alias}.net_addr"] = nets
         return {"interface": entries}
 
     def _ensure_default_aliases(self) -> None:

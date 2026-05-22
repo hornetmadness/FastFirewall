@@ -61,6 +61,16 @@ Additional routes: `GET /status`, `GET /interfaces`, `GET /interfaces/{name}`, `
 
 **`_run_ifstate(*args)`** — runs `sudo uv run ifstatecli <args>` as a subprocess.
 
+**`_resolve_interface_macro(*segments)`** — resolver for the `interface` macro namespace. `segments[0]` is the alias name, `segments[1]` is the field:
+
+| Field | Returns |
+|---|---|
+| `name` | OS interface name string (e.g. `"enp0s25"`) |
+| `address` | List of host IPs without prefix length (e.g. `["192.168.1.1"]`) |
+| `net_addr` | List of network addresses with prefix length (e.g. `["192.168.1.0/24"]`) |
+
+Example: `$interface.lan.net_addr` → `["192.168.1.0/24"]`
+
 ## `GET /config/diff`
 
 Returns a structured diff between the last applied state (`current_snapshot`) and the current desired state. Response: `{pending_changes: bool, diff: {...}}`. The `diff` is computed by `_diff_state(current, desired)`. If nothing has ever been applied (`current_snapshot` is `None`), treats current as `{}`.
