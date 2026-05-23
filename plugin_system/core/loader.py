@@ -88,6 +88,20 @@ from .services import Service
 YAML_FILENAME = "plugin.yaml"
 MODULE_FILENAME = "plugin.py"
 
+# Debian/Ubuntu installs apt Python packages (e.g. python3-nftables) to the system
+# dist-packages, which the project venv does not search. Append these directories once
+# so os_requirements that provide Python modules are importable by plugin code.
+_SYSTEM_DIST_PACKAGES = (
+    "/usr/lib/python3/dist-packages",
+    "/usr/local/lib/python3/dist-packages",
+)
+
+
+def _ensure_system_dist_packages() -> None:
+    for path in _SYSTEM_DIST_PACKAGES:
+        if Path(path).is_dir() and path not in sys.path:
+            sys.path.append(path)
+
 
 class PluginError(Exception):
     pass
@@ -566,10 +580,12 @@ class PluginLoader:
                 failed.add(pid)
 
         total = len(loaded) + len(errored) + len(disabled)
-        self.logger.info(
-            "Plugin loading complete: %d/%d loaded, %d errored, %d disabled",
-            len(loaded), total, len(errored), len(disabled),
-        )
+        res = f"Plugin loading complete: {len(loaded)}/{total} loaded, {len(errored)} errored, {len(disabled)} disabled"
+        if len(errored) > 0:
+            self.logger.error(res)
+        else:
+            self.logger.info(res)
+
         if loaded:
             self.logger.info("  Loaded:   %s", ", ".join(loaded))
         if errored:
@@ -966,6 +982,7 @@ class PluginLoader:
         )
 
     def _import_module(self, plugin_id: str, module_path: Path):
+        _ensure_system_dist_packages()
         module_name = f"_plugin_{plugin_id}"
         # Remove stale cached module so reloads work
         sys.modules.pop(module_name, None)

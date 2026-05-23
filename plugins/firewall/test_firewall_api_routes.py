@@ -21,6 +21,14 @@ from plugin_system.core.events import Event, bus as global_bus
 
 PLUGIN_PY = Path(__file__).parent / "plugin.py"
 
+# python3-nftables is a system package not present in the uv venv.
+# Stub it out so plugin.py can be imported; individual tests that need
+# specific apply/check behaviour mock _apply_nft_script / _validate_nft_script
+# on the instance instead.
+_nft_stub = MagicMock()
+_nft_stub.Nftables.return_value.cmd.return_value = (1, "", "nftables not available in test env")
+sys.modules.setdefault("nftables", _nft_stub)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -46,8 +54,7 @@ def _make_app(tmp_path):
     inst.plugin_dir = tmp_path
     inst.logger = logging.getLogger("test.firewall")
     inst.config = {
-        "rules_file": "rules.json",
-        "default_platform": "nftables",
+        "state_file": "rules.json",
         "default_filter_name": "test-fw",
     }
     inst.setup()
@@ -100,7 +107,7 @@ def test_status_pending_changes_true_after_create(tmp_path):
     # Write a state that has both desired and current set (simulates a prior successful apply)
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "rules.json").write_text(
-        json.dumps({"desired_state": _BOOT_RULE, "current_state": _BOOT_RULE})
+        json.dumps({"desired_state": _BOOT_STATE, "current_state": _BOOT_STATE})
     )
     client = TestClient(_make_app(tmp_path))
     # Adding a rule diverges desired from the committed current
@@ -110,10 +117,10 @@ def test_status_pending_changes_true_after_create(tmp_path):
 
 def test_status_pending_changes_false_after_boot_apply(tmp_path):
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "rules.json").write_text(json.dumps({"desired_state": _BOOT_RULE}))
+    (tmp_path / "data" / "rules.json").write_text(json.dumps({"desired_state": _BOOT_STATE}))
     inst, mod = _make_inst(tmp_path)
-    inst._execute_compiled_rules = MagicMock()
-    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+    inst._apply_nft_script = MagicMock()
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
@@ -146,6 +153,44 @@ def test_list_rules_sorted_by_priority(client):
     assert names.index("high") < names.index("mid") < names.index("low")
 
 
+def test_list_rules_applied_false_before_apply(client):
+    # Fresh install — nftables stub always fails, so no committed snapshot exists
+    rules = client.get("/v1/firewall/rules").json()["rules"]
+    assert all(r["applied"] is False for r in rules)
+
+
+def test_list_rules_applied_true_after_apply(tmp_path):
+    inst, mod = _make_inst(tmp_path)
+    inst._apply_nft_script = MagicMock()
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+        inst.setup()
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    client = TestClient(app)
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+        client.post("/v1/firewall/apply")
+    rules = client.get("/v1/firewall/rules").json()["rules"]
+    assert all(r["applied"] is True for r in rules)
+
+
+def test_list_rules_new_rule_applied_false_until_apply(tmp_path):
+    inst, mod = _make_inst(tmp_path)
+    inst._apply_nft_script = MagicMock()
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+        inst.setup()
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    client = TestClient(app)
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+        client.post("/v1/firewall/apply")
+    new = _create_rule(client, name="pending-rule")
+    rules_by_id = {r["id"]: r for r in client.get("/v1/firewall/rules").json()["rules"]}
+    assert rules_by_id[new["id"]]["applied"] is False
+    for rule_id, rule in rules_by_id.items():
+        if rule_id != new["id"]:
+            assert rule["applied"] is True
+
+
 def test_list_rules_enabled_only_filter(client):
     _create_rule(client, name="active",   enabled=True)
     _create_rule(client, name="inactive", enabled=False)
@@ -166,8 +211,14 @@ def test_create_rule_response_contains_id(client):
     assert "id" in _create_rule(client)
 
 
+def test_create_rule_response_applied_false(client):
+    data = _create_rule(client, name="new-rule")
+    assert data["applied"] is False
+
+
 def test_create_rule_defaults(client):
     data = _create_rule(client, name="default-rule")
+    assert data["chain"] == "input"
     assert data["action"] == "deny"
     assert data["src_address"] == "any"
     assert data["dst_address"] == "any"
@@ -203,6 +254,13 @@ def test_get_rule_by_id(client):
     assert r.json()["name"] == "findme"
 
 
+def test_get_rule_includes_applied_field(client):
+    rule = _create_rule(client, name="check-applied")
+    data = client.get(f"/v1/firewall/rules/{rule['id']}").json()
+    assert "applied" in data
+    assert data["applied"] is False
+
+
 def test_get_rule_404_for_unknown_id(client):
     assert client.get("/v1/firewall/rules/does-not-exist").status_code == 404
 
@@ -232,6 +290,13 @@ def test_update_rule_can_disable(client):
     assert data["enabled"] is False
 
 
+def test_update_rule_includes_applied_field(client):
+    rule = _create_rule(client, name="update-applied")
+    data = client.put(f"/v1/firewall/rules/{rule['id']}", json={"priority": 50}).json()
+    assert "applied" in data
+    assert data["applied"] is False
+
+
 def test_update_rule_404_for_unknown_id(client):
     assert client.put("/v1/firewall/rules/ghost", json={"name": "x"}).status_code == 404
 
@@ -259,95 +324,103 @@ def test_delete_rule_404_for_unknown_id(client):
 
 
 # ---------------------------------------------------------------------------
-# Platforms
+# Check (dry-run validate)
 # ---------------------------------------------------------------------------
 
-def test_list_platforms_returns_known_platforms(client):
-    platforms = client.get("/v1/firewall/platforms").json()["platforms"]
-    for expected in ("cisco", "juniper", "nftables"):
-        assert expected in platforms
+def test_check_returns_success_true_on_valid_script(tmp_path):
+    inst, _ = _make_inst(tmp_path)
+    inst._validate_nft_script = MagicMock(return_value=(True, ""))
+    inst.setup()
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    r = TestClient(app).post("/v1/firewall/check")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["success"] is True
+    assert data["output"] == ""
+    assert data["rule_count"] == 2  # 2 defaults
+
+
+def test_check_returns_success_false_on_validation_error(tmp_path):
+    inst, _ = _make_inst(tmp_path)
+    inst._validate_nft_script = MagicMock(return_value=(False, "Error: table not found"))
+    inst.setup()
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    r = TestClient(app).post("/v1/firewall/check")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["success"] is False
+    assert "Error" in data["output"]
 
 
 # ---------------------------------------------------------------------------
 # Apply
 # ---------------------------------------------------------------------------
 
-def test_apply_calls_execute_compiled_rules(tmp_path):
+def test_apply_calls_apply_nft_script(tmp_path):
     inst, mod = _make_inst(tmp_path)
-    inst._execute_compiled_rules = MagicMock()
-    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+    inst._apply_nft_script = MagicMock()
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
     _create_rule(TestClient(app), name="allow-ssh")
-    inst._execute_compiled_rules.reset_mock()
-    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+    inst._apply_nft_script.reset_mock()
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         r = TestClient(app).post("/v1/firewall/apply")
     assert r.status_code == 200
-    inst._execute_compiled_rules.assert_called_once_with(_CLEAN_OUTPUT, inst._compiled_output_path)
+    inst._apply_nft_script.assert_called_once_with(_CLEAN_SCRIPT)
 
 
 def test_apply_commits_state(tmp_path):
     inst, mod = _make_inst(tmp_path)
-    inst._execute_compiled_rules = MagicMock()
-    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+    inst._apply_nft_script = MagicMock()
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
     client = TestClient(app)
     _create_rule(client, name="rule")
-    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         client.post("/v1/firewall/apply")
     assert client.get("/v1/firewall/status").json()["pending_changes"] is False
 
 
 def test_apply_returns_rule_count(tmp_path):
     inst, mod = _make_inst(tmp_path)
-    inst._execute_compiled_rules = MagicMock()
-    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+    inst._apply_nft_script = MagicMock()
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
     client = TestClient(app)
     _create_rule(client, name="r1", enabled=True)
     _create_rule(client, name="r2", enabled=False)
-    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         data = client.post("/v1/firewall/apply").json()
     assert data["rule_count"] == 3  # 2 defaults (enabled) + r1 (enabled)
     assert data["success"] is True
 
 
-def test_apply_returns_503_when_aerleon_unavailable(tmp_path):
-    inst, mod = _make_inst(tmp_path)
-    inst._execute_compiled_rules = MagicMock()
-    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
-        inst.setup()
-    app = FastAPI()
-    app.include_router(inst.router, prefix="/v1/firewall")
-    _create_rule(TestClient(app), name="r")
-    with patch.object(mod, "_compile_rules", return_value="# aerleon CLI not found"):
-        r = TestClient(app).post("/v1/firewall/apply")
-    assert r.status_code == 503
-
-
 def test_apply_returns_500_on_nft_failure(tmp_path):
     inst, mod = _make_inst(tmp_path)
-    inst._execute_compiled_rules = MagicMock(side_effect=RuntimeError("nft failed"))
-    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+    inst._apply_nft_script = MagicMock(side_effect=RuntimeError("nft failed"))
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
     _create_rule(TestClient(app), name="r")
-    inst._execute_compiled_rules.side_effect = RuntimeError("nft failed")
-    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+    inst._apply_nft_script.side_effect = RuntimeError("nft failed")
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         r = TestClient(app).post("/v1/firewall/apply")
     assert r.status_code == 500
 
 
 def test_apply_emits_event(tmp_path):
     inst, mod = _make_inst(tmp_path)
-    inst._execute_compiled_rules = MagicMock()
-    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+    inst._apply_nft_script = MagicMock()
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
@@ -355,7 +428,7 @@ def test_apply_emits_event(tmp_path):
     received: list = []
     global_bus.subscribe("firewall.applied", received.append)
     try:
-        with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+        with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
             TestClient(app).post("/v1/firewall/apply")
         assert len(received) == 1
         assert received[0].payload["success"] is True
@@ -369,63 +442,78 @@ def test_apply_emits_event(tmp_path):
 
 def test_compile_returns_correct_shape(client):
     _create_rule(client, name="allow-https", action="accept", protocol="tcp", dst_port=443)
-    r = client.post("/v1/firewall/compile", json={"platform": "nftables", "filter_name": "test-fw"})
+    r = client.post("/v1/firewall/compile", json={"filter_name": "test-fw"})
     assert r.status_code == 200
     data = r.json()
-    assert data["platform"] == "nftables"
     assert data["filter_name"] == "test-fw"
     assert data["rule_count"] == 3  # 2 defaults + 1 added
     assert data["output"] != ""
+
+
+def test_compile_output_contains_nft_syntax(client):
+    r = client.post("/v1/firewall/compile", json={"filter_name": "myfirewall"})
+    assert r.status_code == 200
+    output = r.json()["output"]
+    assert "table inet myfirewall" in output
+    assert "add chain inet myfirewall input" in output
+    assert "add chain inet myfirewall forward" in output
+    assert "add chain inet myfirewall output" in output
 
 
 def test_compile_counts_only_enabled_rules(client):
     _create_rule(client, name="on",  enabled=True)
     _create_rule(client, name="off", enabled=False)
     # 2 defaults (enabled) + "on" (enabled) = 3; "off" (disabled) excluded
-    assert client.post("/v1/firewall/compile", json={"platform": "cisco", "filter_name": "fw"}).json()["rule_count"] == 3
+    assert client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["rule_count"] == 3
 
 
 def test_compile_with_no_rules_still_responds(client):
-    r = client.post("/v1/firewall/compile", json={"platform": "cisco", "filter_name": "fw"})
+    r = client.post("/v1/firewall/compile", json={"filter_name": "fw"})
     assert r.status_code == 200
     assert r.json()["rule_count"] == 2  # 2 defaults
 
 
 # ---------------------------------------------------------------------------
-# Policy YAML
+# Discard
 # ---------------------------------------------------------------------------
 
-def test_policy_json_contains_rule_name(client):
-    _create_rule(client, name="ssh-rule", action="accept", protocol="tcp", dst_port=22)
-    r = client.get("/v1/firewall/policy?platform=cisco&filter_name=test")
+def test_discard_returns_409_when_no_snapshot(tmp_path):
+    # Fresh install — no committed snapshot yet
+    r = TestClient(_make_app(tmp_path)).post("/v1/firewall/discard")
+    assert r.status_code == 409
+
+
+def test_discard_reverts_pending_rule_additions(tmp_path):
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "rules.json").write_text(
+        json.dumps({"desired_state": _BOOT_STATE, "current_state": _BOOT_STATE})
+    )
+    client = TestClient(_make_app(tmp_path))
+    # Add an extra rule (makes desired != current)
+    extra = _create_rule(client, name="should-disappear")
+    assert client.get("/v1/firewall/rules").json()["count"] == 2
+    # Discard reverts to the committed snapshot
+    r = client.post("/v1/firewall/discard")
     assert r.status_code == 200
-    assert r.headers["content-type"].startswith("application/json")
-    assert "ssh-rule" in r.text
+    assert r.json()["discarded"] is True
+    ids = [x["id"] for x in client.get("/v1/firewall/rules").json()["rules"]]
+    assert extra["id"] not in ids
 
 
-def test_policy_json_default_platform_is_nftables(client):
-    r = client.get("/v1/firewall/policy")
-    targets = r.json()["filters"][0]["header"]["targets"]
-    assert "nftables" in targets
-
-
-def test_policy_default_format_is_json(client):
-    r = client.get("/v1/firewall/policy")
-    assert r.headers["content-type"].startswith("application/json")
-
-
-def test_policy_yaml_format(client):
-    r = client.get("/v1/firewall/policy?format=yaml")
-    assert r.status_code == 200
-    assert r.headers["content-type"].startswith("text/yaml")
-
-
-def test_policy_always_includes_default_deny(client):
-    assert "default-deny" in client.get("/v1/firewall/policy").text
-
-
-def test_policy_yaml_always_includes_default_deny(client):
-    assert "default-deny" in client.get("/v1/firewall/policy?format=yaml").text
+def test_discard_clears_pending_changes(tmp_path):
+    inst, mod = _make_inst(tmp_path)
+    inst._apply_nft_script = MagicMock()
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+        inst.setup()
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    client = TestClient(app)
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+        client.post("/v1/firewall/apply")
+    _create_rule(client, name="pending-rule")
+    assert client.get("/v1/firewall/status").json()["pending_changes"] is True
+    client.post("/v1/firewall/discard")
+    assert client.get("/v1/firewall/status").json()["pending_changes"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -468,8 +556,7 @@ def _make_inst(tmp_path, config=None):
     inst.plugin_dir = tmp_path
     inst.logger = logging.getLogger("test.firewall")
     inst.config = {
-        "rules_file": "rules.json",
-        "default_platform": "nftables",
+        "state_file": "rules.json",
         "default_filter_name": "test-fw",
         **(config or {}),
     }
@@ -481,45 +568,45 @@ def _make_inst(tmp_path, config=None):
 # ---------------------------------------------------------------------------
 
 _BOOT_RULE = [{"id": "r1", "name": "allow-http", "action": "accept"}]
-_CLEAN_OUTPUT = "*filter\n-P INPUT ACCEPT\nCOMMIT\n"
+_BOOT_CHAINS = {"input": {"policy": "drop", "priority": 0}, "forward": {"policy": "drop", "priority": 0}, "output": {"policy": "accept", "priority": 0}}
+_BOOT_STATE = {"rules": _BOOT_RULE, "chains": _BOOT_CHAINS}
+_CLEAN_SCRIPT = (
+    "add table inet test-fw\n"
+    "flush table inet test-fw\n"
+    "add chain inet test-fw input { type filter hook input priority 0; policy drop; }\n"
+    "add chain inet test-fw forward { type filter hook forward priority 0; policy drop; }\n"
+    "add chain inet test-fw output { type filter hook output priority 0; policy accept; }\n"
+    "add rule inet test-fw input ct state established,related accept\n"
+    "add rule inet test-fw forward ct state established,related accept"
+)
 
 
 def test_rules_applied_to_nft_on_boot(tmp_path):
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "rules.json").write_text(json.dumps({"desired_state": _BOOT_RULE}))
+    (tmp_path / "data" / "rules.json").write_text(json.dumps({"desired_state": _BOOT_STATE}))
     inst, mod = _make_inst(tmp_path)
-    inst._execute_compiled_rules = MagicMock()
-    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+    inst._apply_nft_script = MagicMock()
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         inst.setup()
-    inst._execute_compiled_rules.assert_called_once_with(_CLEAN_OUTPUT, inst._compiled_output_path)
+    inst._apply_nft_script.assert_called_once_with(_CLEAN_SCRIPT)
 
 
 def test_ignore_state_on_boot_skips_load_and_apply(tmp_path):
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "rules.json").write_text(json.dumps(_BOOT_RULE))
     inst, _ = _make_inst(tmp_path, config={"ignore_state_on_boot": True})
-    inst._execute_compiled_rules = MagicMock()
+    inst._apply_nft_script = MagicMock()
     inst.setup()
-    inst._execute_compiled_rules.assert_not_called()
+    inst._apply_nft_script.assert_not_called()
     assert inst._rules == {}
-
-
-def test_apply_state_skips_when_aerleon_unavailable(tmp_path):
-    (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "rules.json").write_text(json.dumps({"desired_state": _BOOT_RULE}))
-    inst, _ = _make_inst(tmp_path)
-    inst._execute_compiled_rules = MagicMock()
-    inst.setup()  # aerleon not installed → _compile_rules returns "# ..." → skips apply
-    inst._execute_compiled_rules.assert_not_called()
-    assert "r1" in inst._rules  # rules still loaded
 
 
 def test_apply_state_does_not_crash_on_nft_failure(tmp_path):
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "rules.json").write_text(json.dumps({"desired_state": _BOOT_RULE}))
+    (tmp_path / "data" / "rules.json").write_text(json.dumps({"desired_state": _BOOT_STATE}))
     inst, mod = _make_inst(tmp_path)
-    inst._execute_compiled_rules = MagicMock(side_effect=RuntimeError("iptables-restore failed: permission denied"))
-    with patch.object(mod, "_compile_rules", return_value=_CLEAN_OUTPUT):
+    inst._apply_nft_script = MagicMock(side_effect=RuntimeError("nft failed"))
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         inst.setup()  # must not raise
     assert "r1" in inst._rules
 
@@ -616,9 +703,7 @@ def test_create_rule_allows_same_name_different_content(client):
 
 
 def test_fresh_install_seeds_default_rules(tmp_path):
-    mod = _load_module()
-    app = _make_app(tmp_path)
-    client = TestClient(app)
+    client = TestClient(_make_app(tmp_path))
     rules = client.get("/v1/firewall/rules").json()["rules"]
     names = {r["name"] for r in rules}
     assert "allow-ssh" in names
@@ -630,7 +715,8 @@ def test_fresh_install_persists_state_file(tmp_path):
     state_file = tmp_path / "data" / "rules.json"
     assert state_file.exists()
     data = json.loads(state_file.read_text())
-    assert len(data["desired_state"]) == 2
+    assert len(data["desired_state"]["rules"]) == 2
+    assert "chains" in data["desired_state"]
 
 
 def test_existing_state_file_not_reseeded(tmp_path):
@@ -656,28 +742,33 @@ def test_update_rule_rejects_malformed_macro(client):
     assert r.status_code == 422
 
 
-def test_macro_resolved_to_port_in_policy():
+def _default_chains(mod):
+    return {name: mod.ChainConfig(**cfg) for name, cfg in mod._DEFAULT_CHAINS.items()}
+
+
+def test_macro_resolved_to_port_in_script():
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
     macro_registry.set_service_ports({"dns": {"udp": [53]}})
     try:
         rule = mod.FirewallRule(name="allow-dns", action="accept", protocol="udp", dst_port="$service_port.dns.udp")
-        policy = mod._build_policy([rule], "test", "nftables", logging.getLogger("test"))
-        term = next(t for t in policy["filters"][0]["terms"] if t["name"] == "allow-dns")
-        assert term["destination-port"] == ["53"]
+        script = mod._compile_to_script([rule], "test", _default_chains(mod), logging.getLogger("test"))
+        assert "udp dport 53" in script
     finally:
         macro_registry.set_service_ports({})
 
 
-def test_macro_multi_port_all_appear_in_policy():
+def test_macro_multi_port_all_appear_in_script():
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
     macro_registry.set_service_ports({"smtp": {"tcp": [25, 587, 465]}})
     try:
         rule = mod.FirewallRule(name="allow-smtp", action="accept", protocol="tcp", dst_port="$service_port.smtp.tcp")
-        policy = mod._build_policy([rule], "test", "nftables", logging.getLogger("test"))
-        term = next(t for t in policy["filters"][0]["terms"] if t["name"] == "allow-smtp")
-        assert len(term["destination-port"]) == 3
+        script = mod._compile_to_script([rule], "test", _default_chains(mod), logging.getLogger("test"))
+        # All three ports should appear as a set expression
+        assert "25" in script
+        assert "465" in script
+        assert "587" in script
     finally:
         macro_registry.set_service_ports({})
 
@@ -686,11 +777,12 @@ def test_macro_rule_skipped_when_registry_empty():
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
     macro_registry.set_service_ports({})
-    rule = mod.FirewallRule(name="needs-dns", action="accept", dst_port="$service_port.dns.udp")
-    policy = mod._build_policy([rule], "test", "nftables", logging.getLogger("test"))
-    term_names = [t["name"] for t in policy["filters"][0]["terms"]]
-    assert "needs-dns" not in term_names
-    assert "default-deny" in term_names
+    # protocol="udp" required so port resolution is attempted; without protocol, ports are skipped
+    rule = mod.FirewallRule(name="needs-dns", action="accept", protocol="udp", dst_port="$service_port.dns.udp")
+    script = mod._compile_to_script([rule], "test", _default_chains(mod), logging.getLogger("test"))
+    # Rule is skipped — no dport statement for the rule, but script still has the table/chain
+    assert "needs-dns" not in script
+    assert "table inet test" in script
 
 
 def test_status_includes_macros(tmp_path):
@@ -762,3 +854,227 @@ def test_interface_macro_resolve_string():
 def test_interface_macro_unknown_namespace_returns_none():
     from plugin_system.core.macros import macro_registry
     assert macro_registry.resolve_string("$unknown.FOO") is None
+
+
+# ---------------------------------------------------------------------------
+# Multi-chain support
+# ---------------------------------------------------------------------------
+
+def test_create_rule_with_forward_chain(client):
+    data = _create_rule(client, name="fwd-rule", chain="forward")
+    assert data["chain"] == "forward"
+
+
+def test_create_rule_with_output_chain(client):
+    data = _create_rule(client, name="out-rule", chain="output")
+    assert data["chain"] == "output"
+
+
+def test_forward_rule_appears_in_forward_chain(client):
+    _create_rule(client, name="allow-fwd", chain="forward", action="accept", protocol="tcp", dst_port=443)
+    output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
+    assert "fw forward" in output
+    assert "allow-fwd" in output
+
+
+def test_update_rule_chain(client):
+    rule = _create_rule(client, name="move-me", chain="input")
+    data = client.put(f"/v1/firewall/rules/{rule['id']}", json={"chain": "forward"}).json()
+    assert data["chain"] == "forward"
+
+
+# ---------------------------------------------------------------------------
+# reject action
+# ---------------------------------------------------------------------------
+
+def test_create_rule_reject_action(client):
+    data = _create_rule(client, name="reject-rule", action="reject")
+    assert data["action"] == "reject"
+
+
+def test_reject_rule_compiles_to_reject_verdict():
+    mod = _load_module()
+    rule = mod.FirewallRule(name="block-telnet", action="reject", protocol="tcp", dst_port=23)
+    expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
+    assert expr is not None
+    assert expr.endswith("reject")
+
+
+# ---------------------------------------------------------------------------
+# IPv6 address matching
+# ---------------------------------------------------------------------------
+
+def test_ipv6_src_address_uses_ip6_saddr():
+    mod = _load_module()
+    rule = mod.FirewallRule(name="v6-rule", action="accept", src_address="2001:db8::/32")
+    expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
+    assert expr is not None
+    assert "ip6 saddr 2001:db8::/32" in expr
+    assert "ip saddr" not in expr
+
+
+def test_ipv4_src_address_uses_ip_saddr():
+    mod = _load_module()
+    rule = mod.FirewallRule(name="v4-rule", action="accept", src_address="10.0.0.0/8")
+    expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
+    assert expr is not None
+    assert "ip saddr 10.0.0.0/8" in expr
+
+
+def test_ipv6_dst_address_uses_ip6_daddr():
+    mod = _load_module()
+    rule = mod.FirewallRule(name="v6-dst", action="accept", dst_address="fd00::1")
+    expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
+    assert expr is not None
+    assert "ip6 daddr fd00::1" in expr
+
+
+# ---------------------------------------------------------------------------
+# Stateful connection tracking
+# ---------------------------------------------------------------------------
+
+def test_compile_output_contains_ct_state_input(client):
+    output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
+    assert "fw input ct state established,related accept" in output
+
+
+def test_compile_output_contains_ct_state_forward(client):
+    output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
+    assert "fw forward ct state established,related accept" in output
+
+
+# ---------------------------------------------------------------------------
+# Protocol matching — meta l4proto
+# ---------------------------------------------------------------------------
+
+def test_icmp_protocol_uses_meta_l4proto():
+    mod = _load_module()
+    rule = mod.FirewallRule(name="allow-icmp", action="accept", protocol="icmp")
+    expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
+    assert expr is not None
+    assert "meta l4proto icmp" in expr
+    assert "ip protocol" not in expr
+
+
+def test_icmpv6_protocol_compiles_to_ipv6_icmp():
+    mod = _load_module()
+    rule = mod.FirewallRule(name="allow-icmpv6", action="accept", protocol="icmpv6")
+    expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
+    assert expr is not None
+    assert "meta l4proto ipv6-icmp" in expr
+
+
+# ---------------------------------------------------------------------------
+# Chain management endpoints
+# ---------------------------------------------------------------------------
+
+def test_list_chains_returns_three_chains(client):
+    r = client.get("/v1/firewall/chains")
+    assert r.status_code == 200
+    data = r.json()
+    assert set(data["chains"].keys()) == {"input", "forward", "output"}
+
+
+def test_list_chains_includes_table(client):
+    data = client.get("/v1/firewall/chains").json()
+    assert "inet" in data["table"]
+    assert "test-fw" in data["table"]
+
+
+def test_get_chain_returns_policy(client):
+    data = client.get("/v1/firewall/chains/input").json()
+    assert data["name"] == "input"
+    assert data["policy"] == "drop"
+
+
+def test_get_chain_output_defaults_accept(client):
+    data = client.get("/v1/firewall/chains/output").json()
+    assert data["policy"] == "accept"
+
+
+def test_list_chains_applied_false_before_apply(client):
+    chains = client.get("/v1/firewall/chains").json()["chains"]
+    assert all(cfg["applied"] is False for cfg in chains.values())
+
+
+def test_get_chain_applied_false_before_apply(client):
+    data = client.get("/v1/firewall/chains/input").json()
+    assert data["applied"] is False
+
+
+def test_update_chain_applied_false_after_policy_change(tmp_path):
+    inst, mod = _make_inst(tmp_path)
+    inst._apply_nft_script = MagicMock()
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+        inst.setup()
+    app = FastAPI()
+    app.include_router(inst.router, prefix="/v1/firewall")
+    client = TestClient(app)
+    with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+        client.post("/v1/firewall/apply")
+    # All chains applied=True after apply
+    chains = client.get("/v1/firewall/chains").json()["chains"]
+    assert all(cfg["applied"] is True for cfg in chains.values())
+    # Changing a chain policy makes it applied=False
+    data = client.put("/v1/firewall/chains/forward", json={"policy": "accept"}).json()
+    assert data["applied"] is False
+    # Other chains remain applied=True
+    chains = client.get("/v1/firewall/chains").json()["chains"]
+    assert chains["input"]["applied"] is True
+    assert chains["forward"]["applied"] is False
+
+
+def test_get_chain_404_for_unknown(client):
+    assert client.get("/v1/firewall/chains/nonexistent").status_code == 404
+
+
+def test_update_chain_policy(client):
+    data = client.put("/v1/firewall/chains/forward", json={"policy": "accept"}).json()
+    assert data["name"] == "forward"
+    assert data["policy"] == "accept"
+
+
+def test_update_chain_policy_roundtrips(client):
+    client.put("/v1/firewall/chains/output", json={"policy": "drop"})
+    data = client.get("/v1/firewall/chains/output").json()
+    assert data["policy"] == "drop"
+
+
+def test_update_chain_policy_affects_compiled_output(client):
+    client.put("/v1/firewall/chains/forward", json={"policy": "accept"})
+    output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
+    assert "forward" in output
+    assert "policy accept" in output
+
+
+def test_update_chain_policy_affects_ct_state(client):
+    # When forward policy is accept, ct state rule should NOT be injected for forward
+    client.put("/v1/firewall/chains/forward", json={"policy": "accept"})
+    output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
+    lines = output.splitlines()
+    forward_ct = [l for l in lines if "forward ct state" in l]
+    assert len(forward_ct) == 0
+
+
+def test_update_chain_404_for_unknown(client):
+    assert client.put("/v1/firewall/chains/ghost", json={"policy": "drop"}).status_code == 404
+
+
+def test_update_chain_priority(client):
+    data = client.put("/v1/firewall/chains/input", json={"priority": 10}).json()
+    assert data["priority"] == 10
+
+
+# ---------------------------------------------------------------------------
+# Table endpoint
+# ---------------------------------------------------------------------------
+
+def test_get_table_returns_name_and_family(client):
+    data = client.get("/v1/firewall/table").json()
+    assert data["name"] == "test-fw"
+    assert data["family"] == "inet"
+
+
+def test_get_table_lists_chains(client):
+    data = client.get("/v1/firewall/table").json()
+    assert set(data["chains"]) == {"input", "forward", "output"}
