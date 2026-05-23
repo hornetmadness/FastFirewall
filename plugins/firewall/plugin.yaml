@@ -1,13 +1,10 @@
 name: Firewall Plugin
 id: firewall
 version: "1.0.0"
-description: Manages firewall rules as a persistent JSON store and compiles them to platform-specific ACL configs via aerleon.
+description: Manages firewall rules as a persistent JSON store and compiles them to nftables via a sudo wrapper script (nft_apply).
 author: hornetmadness@gmail.com
 enabled: true
 plugin_requirements: ["host", "networking"]
-py_requirements:
-  - aerleon
-  - pyyaml
 os_requirements:
   - nftables
 
@@ -16,9 +13,6 @@ service_ports:
     tcp: [-1]
 
 config:
-  rules_file: firewall_rules.json
-  default_platform: nftables
+  state_file: firewall_state.json
   default_filter_name: fastfirewall
-  auto_compile: false
   ignore_state_on_boot: false
-  debug: true

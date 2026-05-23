@@ -1,0 +1,15 @@
+# FastFirewall sudoers snippet — only needed if FastFirewall runs as a
+# non-root user outside of Docker (e.g. a dedicated service account).
+#
+# In Docker the process already runs as root (cap_net_admin + cap_net_raw
+# are granted to the Python binary), so sudo is not required there.
+#
+# To install:
+#   sudo cp tools/sudoers-fastfirewall.example /etc/sudoers.d/fastfirewall
+#   sudo chmod 440 /etc/sudoers.d/fastfirewall
+#
+# Replace <user> with the account running app.py (e.g. fastfirewall, www-data).
+# The wrapper path must match the absolute path to plugins/firewall/nft_cmd
+# on your system.
+
+<user> ALL=(root) NOPASSWD: /path/to/FastFirewall/plugins/firewall/nft_cmd

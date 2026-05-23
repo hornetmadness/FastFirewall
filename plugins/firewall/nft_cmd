@@ -1,0 +1,14 @@
+#!/bin/bash
+# FastFirewall nftables apply wrapper.
+# Reads an nft script from stdin and applies it via the nft CLI.
+# Intended to be invoked via sudo — see /etc/sudoers.d/fastfirewall.
+#
+# Usage: fastfirewall-nft-apply [--check]
+#   (no flag)  Apply the script to the live kernel ruleset.
+#   --check    Validate the script without modifying the kernel.
+set -euo pipefail
+if [[ "${1:-}" == "--check" ]]; then
+    exec nft --check -f -
+else
+    exec nft -f -
+fi

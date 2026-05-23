@@ -621,6 +621,3 @@ Paste the `$2b$…` output as the `password` value — the loader detects the pr
 
 > Note: the directory on disk is `ff_auth` (underscore) — Python package names cannot contain hyphens.
 
-### Docker
-
-The `Dockerfile` uses Python 3.14-slim + uv. The image grants `cap_net_admin` and `cap_net_raw` to the Python binary (required for iptables) and runs as root. Entry point: `uv run python app.py`.

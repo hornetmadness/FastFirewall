@@ -266,23 +266,14 @@ def _host_of(cidr: str) -> str:
 
 
 def _print_firewall_debug_hint(client: FFClient) -> None:
-    """After a failed apply, print the aerleon recompile command if debug_dir is available."""
+    """After a failed apply, print the compiled nft output path if available."""
     try:
         status = client.get("/v1/firewall/status")
     except FFError:
         return
-    debug_dir = status.get("debug_dir")
     compiled_output = status.get("compiled_output")
-    if debug_dir:
-        _print_warn(f"Aerleon inputs written to: {debug_dir}")
-        _print_warn(
-            f"To recompile manually: uv run aerleon"
-            f" --policy-file {debug_dir}/policy.yaml"
-            f" --base-directory {debug_dir}"
-            f" --output-directory {debug_dir}"
-        )
     if compiled_output:
-        _print_warn(f"Last compiled output: {compiled_output}")
+        _print_warn(f"Last compiled nft script: {compiled_output}")
 
 
 def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
@@ -293,6 +284,7 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
     rules: list[dict[str, Any]] = [
         {
             "name": "allow-icmp",
+            "chain": "input",
             "action": "accept",
             "protocol": "icmp",
             "comment": "Allow ICMP (ping)",
@@ -300,6 +292,7 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
         },
         {
             "name": "allow-dns-udp-from-lan",
+            "chain": "input",
             "action": "accept",
             "protocol": "udp",
             "src_address": lan_subnet,
@@ -309,6 +302,7 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
         },
         {
             "name": "allow-dns-tcp-from-lan",
+            "chain": "input",
             "action": "accept",
             "protocol": "tcp",
             "src_address": lan_subnet,
@@ -318,6 +312,7 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
         },
         {
             "name": "allow-dhcp-from-lan",
+            "chain": "input",
             "action": "accept",
             "protocol": "udp",
             "src_address": lan_subnet,
@@ -327,9 +322,20 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
         },
     ]
 
+    if fw.get("allow_lan_forwarding", False):
+        rules.append({
+            "name": "allow-lan-forward",
+            "chain": "forward",
+            "action": "accept",
+            "src_address": lan_subnet,
+            "comment": "Allow LAN clients to forward through gateway",
+            "priority": 50,
+        })
+
     if fw.get("allow_ssh_from_lan", True):
         rules.append({
             "name": "allow-ssh-from-lan",
+            "chain": "input",
             "action": "accept",
             "protocol": "tcp",
             "src_address": lan_subnet,
@@ -341,6 +347,7 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
     if fw.get("allow_http_from_lan", True):
         rules.append({
             "name": "allow-http-from-lan",
+            "chain": "input",
             "action": "accept",
             "protocol": "tcp",
             "src_address": lan_subnet,
@@ -352,6 +359,7 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
     if fw.get("allow_https_from_lan", True):
         rules.append({
             "name": "allow-https-from-lan",
+            "chain": "input",
             "action": "accept",
             "protocol": "tcp",
             "src_address": lan_subnet,
@@ -362,6 +370,7 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
 
     rules.append({
         "name": "deny-all",
+        "chain": "input",
         "action": "deny",
         "comment": "Default deny — must be last",
         "priority": 1000,
@@ -374,7 +383,7 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
     _check_before_apply(client, "/v1/firewall/check", "success", "firewall")
     _print_step("Applying firewall rules")
     try:
-        result = client.post("/v1/firewall/apply", description="Apply firewall rules to iptables")
+        result = client.post("/v1/firewall/apply", description="Apply firewall rules to nftables")
         if result.get("success"):
             _print_ok(f"Firewall applied — {result.get('rule_count', '?')} rules active")
         else:
@@ -556,42 +565,8 @@ def run_gateway(client: FFClient, cfg: dict[str, Any]) -> None:
         _apply_firewall_rules(client, fw_cfg)
 
     # 10. Host user
-    username = user_cfg.get("username") if user_cfg else None
-    if username:
-        _print_step(f"Creating user '{username}'")
-        user_body: dict[str, Any] = {"shell": user_cfg.get("shell", "/bin/bash")}
-        if user_cfg.get("home_dir"):
-            user_body["home_dir"] = user_cfg["home_dir"]
-        if user_cfg.get("comment"):
-            user_body["comment"] = user_cfg["comment"]
-        client.post(
-            f"/v1/host/users/{username}",
-            user_body,
-            description=f"Create user {username}",
-        )
-        _print_ok(f"User '{username}' created (shell: {user_body['shell']})")
-
-        if user_cfg.get("sudo"):
-            _print_step(f"Adding '{username}' to sudo group")
-            try:
-                client.post(
-                    "/v1/host/groups/sudo/import",
-                    description="Import sudo group into FF management",
-                )
-                _print_ok("sudo group imported into FF management")
-            except FFError:
-                pass  # sudo group may not exist on this distro (e.g. wheel-based systems)
-            groups = client.get("/v1/host/groups", description="Verify sudo group is FF-managed")
-            sudo_managed = groups.get("groups", {}).get("sudo", {}).get("ff_managed", False)
-            if sudo_managed:
-                client.post(
-                    "/v1/host/groups/sudo/members",
-                    {"username": username},
-                    description=f"Add {username} to sudo group",
-                )
-                _print_ok(f"Added '{username}' to sudo group")
-            else:
-                _print_warn(f"sudo group not found — add '{username}' to sudo manually: usermod -aG sudo {username}")
+    if user_cfg:
+        _apply_host_user(client, user_cfg)
 
     _print_header("Gateway setup complete!")
     if aliases:
@@ -603,6 +578,51 @@ def run_gateway(client: FFClient, cfg: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shared: host user creation
+# ---------------------------------------------------------------------------
+
+
+def _apply_host_user(client: FFClient, user_cfg: dict[str, Any]) -> None:
+    username = user_cfg.get("username")
+    if not username:
+        return
+    _print_step(f"Creating user '{username}'")
+    user_body: dict[str, Any] = {"shell": user_cfg.get("shell", "/bin/bash")}
+    if user_cfg.get("home_dir"):
+        user_body["home_dir"] = user_cfg["home_dir"]
+    if user_cfg.get("comment"):
+        user_body["comment"] = user_cfg["comment"]
+    client.post(
+        f"/v1/host/users/{username}",
+        user_body,
+        description=f"Create user {username}",
+    )
+    _print_ok(f"User '{username}' created (shell: {user_body['shell']})")
+
+    if user_cfg.get("sudo"):
+        _print_step(f"Adding '{username}' to sudo group")
+        try:
+            client.post(
+                "/v1/host/groups/sudo/import",
+                description="Import sudo group into FF management",
+            )
+            _print_ok("sudo group imported into FF management")
+        except FFError:
+            pass  # sudo group may not exist on this distro (e.g. wheel-based systems)
+        groups = client.get("/v1/host/groups", description="Verify sudo group is FF-managed")
+        sudo_managed = groups.get("groups", {}).get("sudo", {}).get("ff_managed", False)
+        if sudo_managed:
+            client.post(
+                "/v1/host/groups/sudo/members",
+                {"username": username},
+                description=f"Add {username} to sudo group",
+            )
+            _print_ok(f"Added '{username}' to sudo group")
+        else:
+            _print_warn(f"sudo group not found — add '{username}' to sudo manually: usermod -aG sudo {username}")
+
+
+# ---------------------------------------------------------------------------
 # Scenario: firewall only
 # ---------------------------------------------------------------------------
 
@@ -610,6 +630,8 @@ def run_gateway(client: FFClient, cfg: dict[str, Any]) -> None:
 def run_firewall_only(client: FFClient, cfg: dict[str, Any]) -> None:
     _print_header("Firewall-Only Setup")
     _apply_firewall_rules(client, cfg.get("firewall", {}))
+    if cfg.get("user"):
+        _apply_host_user(client, cfg["user"])
     _print_header("Firewall setup complete!")
 
 
@@ -690,6 +712,8 @@ def run_dns_dhcp(client: FFClient, cfg: dict[str, Any]) -> None:
     else:
         _print_warn(f"dnsmasq apply result: {result}")
 
+    if cfg.get("user"):
+        _apply_host_user(client, cfg["user"])
     _print_header("DNS + DHCP setup complete!")
 
 
@@ -880,16 +904,21 @@ def interactive_wizard(args: argparse.Namespace) -> dict[str, Any]:
         cfg["dns"] = _gather_dns()
         cfg["dhcp"] = _gather_dhcp()
         cfg["firewall"] = _gather_firewall()
-        cfg["user"] = _gather_user()
+        if _prompt_yn("Create a new host user?", True):
+            cfg["user"] = _gather_user()
 
     elif scenario == "firewall":
         cfg["firewall"] = _gather_firewall()
+        if _prompt_yn("Create a new host user?", False):
+            cfg["user"] = _gather_user()
 
     elif scenario == "dns-dhcp":
         lan_address = _prompt("LAN address (CIDR, used for DNS/DHCP binding)", "192.168.0.1/24")
         cfg["network"] = {"lan": {"address": lan_address}}
         cfg["dns"] = _gather_dns()
         cfg["dhcp"] = _gather_dhcp()
+        if _prompt_yn("Create a new host user?", False):
+            cfg["user"] = _gather_user()
 
     if not args.save:
         print()
