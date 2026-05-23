@@ -2,7 +2,7 @@
 Firewall Plugin
 ───────────────
 Manages firewall rules as a persistent JSON store and compiles them to
-nftables config via the nftables Python module (libnftables).  Routes mount at /v1/firewall/.
+nftables scripts applied via a sudo wrapper (nft_apply).  Routes mount at /v1/firewall/.
 
 Events emitted:
   firewall.rule.added    – payload: {rule_id, name}
@@ -21,9 +21,9 @@ import hashlib
 import ipaddress
 import json
 import os
+import subprocess
 from typing import Any, Literal, Optional, Union
 
-import nftables  # type: ignore[import-untyped]  # system package, no stubs
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, field_validator
 
@@ -114,7 +114,7 @@ class CompileRequest(BaseModel):
 
 class CompileResult(BaseModel):
     filter_name: str
-    output: str
+    output: list[str]
     rule_count: int
 
 
@@ -203,14 +203,21 @@ def _compile_to_script(
     for chain_name in ("input", "forward"):
         if chain_name in chains and chains[chain_name].policy == "drop":
             lines.append(f"add rule inet {filter_name} {chain_name} ct state established,related accept")
+    seen_exprs: set[str] = set()
     for rule in sorted(rules, key=lambda r: r.priority):
         if rule.chain not in chains:
             logger.warning("Skipping rule %r: chain %r not defined", rule.name, rule.chain)
             continue
         expr = _rule_to_nft_expr(rule, logger)
-        if expr is not None:
-            label = json.dumps(rule.comment or rule.name)
-            lines.append(f"add rule inet {filter_name} {rule.chain} {expr} comment {label}")
+        if expr is None:
+            continue
+        dedup_key = f"{rule.chain}:{expr}"
+        if dedup_key in seen_exprs:
+            logger.warning("Skipping duplicate rule %r: identical nft expression already emitted", rule.name)
+            continue
+        seen_exprs.add(dedup_key)
+        label = json.dumps(rule.comment or rule.name)
+        lines.append(f"add rule inet {filter_name} {rule.chain} {expr} comment {label}")
     return "\n".join(lines)
 
 
@@ -259,6 +266,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             mutation_model="deferred",
         )
         self._default_filter = self.config.get("default_filter_name", "fastfirewall")
+        self._nft_wrapper = self.config.get("nft_wrapper") or str(self.plugin_dir / "nft_cmd")
         self._rules: dict[str, FirewallRule] = {}
         self._chains: dict[str, ChainConfig] = {
             name: ChainConfig(**cfg) for name, cfg in _DEFAULT_CHAINS.items()
@@ -322,17 +330,24 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
     # ── nftables integration ───────────────────────────────────────────
 
     def _apply_nft_script(self, script: str) -> None:
-        nft = nftables.Nftables()
-        rc, _, error = nft.cmd(script)
-        if rc != 0:
-            self.logger.error("nft apply failed (rc=%d): %s", rc, error.strip())
+        result = subprocess.run(
+            ["sudo", self._nft_wrapper],
+            input=script,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            self.logger.error("nft apply failed (rc=%d): %s", result.returncode, result.stderr.strip())
             raise RuntimeError("nft command failed")
 
     def _validate_nft_script(self, script: str) -> tuple[bool, str]:
-        nft = nftables.Nftables()
-        nft.set_dry_run(True)
-        rc, _, error = nft.cmd(script)
-        return rc == 0, error.strip()
+        result = subprocess.run(
+            ["sudo", self._nft_wrapper, "--check"],
+            input=script,
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0, result.stderr.strip()
 
     # ── route registration ─────────────────────────────────────────────
 
@@ -355,14 +370,18 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     # ── rule CRUD ──────────────────────────────────────────────────────
 
+    def _snapshot_rule_map(self) -> dict[str, dict]:
+        """Return {rule_id: rule_dict} from the last committed snapshot, or {} if never applied."""
+        snapshot = self._state_file.current_snapshot
+        return {r["id"]: r for r in snapshot["rules"]} if snapshot else {}
+
     def _list_rules(self, enabled_only: bool = False) -> dict:
         rules = sorted(self._rules.values(), key=lambda r: r.priority)
         if enabled_only:
             rules = [r for r in rules if r.enabled]
-        snapshot = self._state_file.current_snapshot
-        applied_ids: set[str] = {r["id"] for r in snapshot["rules"]} if snapshot else set()
+        snap = self._snapshot_rule_map()
         return {
-            "rules": [{**r.model_dump(), "applied": r.id in applied_ids} for r in rules],
+            "rules": [{**r.model_dump(), "applied": snap.get(r.id) == r.model_dump()} for r in rules],
             "count": len(rules),
         }
 
@@ -378,17 +397,15 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             source=self.plugin_id,
             payload={"rule_id": rule.id, "name": rule.name},
         ))
-        snapshot = self._state_file.current_snapshot
-        applied_ids: set[str] = {r["id"] for r in snapshot["rules"]} if snapshot else set()
-        return {**rule.model_dump(), "applied": rule.id in applied_ids}
+        snap = self._snapshot_rule_map()
+        return {**rule.model_dump(), "applied": snap.get(rule.id) == rule.model_dump()}
 
     def _get_rule(self, rule_id: str) -> dict:
         rule = self._rules.get(rule_id)
         if not rule:
             raise HTTPException(404, f"Rule {rule_id!r} not found")
-        snapshot = self._state_file.current_snapshot
-        applied_ids: set[str] = {r["id"] for r in snapshot["rules"]} if snapshot else set()
-        return {**rule.model_dump(), "applied": rule.id in applied_ids}
+        snap = self._snapshot_rule_map()
+        return {**rule.model_dump(), "applied": snap.get(rule.id) == rule.model_dump()}
 
     def _update_rule(self, rule_id: str, body: RuleUpdate) -> dict:
         rule = self._rules.get(rule_id)
@@ -403,9 +420,8 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             source=self.plugin_id,
             payload={"rule_id": rule_id, "changes": list(updates.keys())},
         ))
-        snapshot = self._state_file.current_snapshot
-        applied_ids: set[str] = {r["id"] for r in snapshot["rules"]} if snapshot else set()
-        return {**updated.model_dump(), "applied": updated.id in applied_ids}
+        snap = self._snapshot_rule_map()
+        return {**updated.model_dump(), "applied": snap.get(updated.id) == updated.model_dump()}
 
     def _delete_rule(self, rule_id: str) -> dict:
         if rule_id not in self._rules:
@@ -470,6 +486,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         return {
             "success": success,
             "rule_count": len(enabled),
+            "chain_count": len(self._chains),
             "output": error if not success else "",
         }
 
@@ -494,6 +511,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         return {
             "success": True,
             "rule_count": len(enabled),
+            "chain_count": len(self._chains),
             "pending_changes": self._state_file.pending_changes,
         }
 
@@ -507,7 +525,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         ))
         return CompileResult(
             filter_name=body.filter_name,
-            output=script,
+            output=script.splitlines(),
             rule_count=len(enabled),
         )
 

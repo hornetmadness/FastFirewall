@@ -1,13 +1,12 @@
 name: Firewall Plugin
 id: firewall
 version: "1.0.0"
-description: Manages firewall rules as a persistent JSON store and compiles them to nftables via the nftables Python module (libnftables).
+description: Manages firewall rules as a persistent JSON store and compiles them to nftables via a sudo wrapper script (nft_apply).
 author: hornetmadness@gmail.com
 enabled: true
 plugin_requirements: ["host", "networking"]
 os_requirements:
   - nftables
-  - python3-nftables
 
 service_ports:
   firewall:

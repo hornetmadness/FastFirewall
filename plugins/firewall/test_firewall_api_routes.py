@@ -21,14 +21,6 @@ from plugin_system.core.events import Event, bus as global_bus
 
 PLUGIN_PY = Path(__file__).parent / "plugin.py"
 
-# python3-nftables is a system package not present in the uv venv.
-# Stub it out so plugin.py can be imported; individual tests that need
-# specific apply/check behaviour mock _apply_nft_script / _validate_nft_script
-# on the instance instead.
-_nft_stub = MagicMock()
-_nft_stub.Nftables.return_value.cmd.return_value = (1, "", "nftables not available in test env")
-sys.modules.setdefault("nftables", _nft_stub)
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -454,10 +446,10 @@ def test_compile_output_contains_nft_syntax(client):
     r = client.post("/v1/firewall/compile", json={"filter_name": "myfirewall"})
     assert r.status_code == 200
     output = r.json()["output"]
-    assert "table inet myfirewall" in output
-    assert "add chain inet myfirewall input" in output
-    assert "add chain inet myfirewall forward" in output
-    assert "add chain inet myfirewall output" in output
+    assert any("table inet myfirewall" in line for line in output)
+    assert any("add chain inet myfirewall input" in line for line in output)
+    assert any("add chain inet myfirewall forward" in line for line in output)
+    assert any("add chain inet myfirewall output" in line for line in output)
 
 
 def test_compile_counts_only_enabled_rules(client):
@@ -873,8 +865,8 @@ def test_create_rule_with_output_chain(client):
 def test_forward_rule_appears_in_forward_chain(client):
     _create_rule(client, name="allow-fwd", chain="forward", action="accept", protocol="tcp", dst_port=443)
     output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
-    assert "fw forward" in output
-    assert "allow-fwd" in output
+    assert any("fw forward" in line for line in output)
+    assert any("allow-fwd" in line for line in output)
 
 
 def test_update_rule_chain(client):
@@ -935,12 +927,12 @@ def test_ipv6_dst_address_uses_ip6_daddr():
 
 def test_compile_output_contains_ct_state_input(client):
     output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
-    assert "fw input ct state established,related accept" in output
+    assert any("fw input ct state established,related accept" in line for line in output)
 
 
 def test_compile_output_contains_ct_state_forward(client):
     output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
-    assert "fw forward ct state established,related accept" in output
+    assert any("fw forward ct state established,related accept" in line for line in output)
 
 
 # ---------------------------------------------------------------------------
@@ -1043,16 +1035,15 @@ def test_update_chain_policy_roundtrips(client):
 def test_update_chain_policy_affects_compiled_output(client):
     client.put("/v1/firewall/chains/forward", json={"policy": "accept"})
     output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
-    assert "forward" in output
-    assert "policy accept" in output
+    assert any("forward" in line for line in output)
+    assert any("policy accept" in line for line in output)
 
 
 def test_update_chain_policy_affects_ct_state(client):
     # When forward policy is accept, ct state rule should NOT be injected for forward
     client.put("/v1/firewall/chains/forward", json={"policy": "accept"})
     output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
-    lines = output.splitlines()
-    forward_ct = [l for l in lines if "forward ct state" in l]
+    forward_ct = [line for line in output if "forward ct state" in line]
     assert len(forward_ct) == 0
 
 

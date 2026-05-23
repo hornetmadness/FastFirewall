@@ -54,6 +54,7 @@ dhcp:
 
 firewall:
   lan_subnet: "192.168.0.0/24"
+  allow_lan_forwarding: true    # allow LAN clients to route through this gateway
   allow_ssh_from_lan: true
   allow_http_from_lan: true
   allow_https_from_lan: true
