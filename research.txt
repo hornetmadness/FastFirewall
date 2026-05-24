@@ -1,2 +1,3 @@
 L2-4 NLB https://www.skudonet.com/knowledge-base/nftlb/what-is-nftlb/
 Install from GIT https://github.com/alexrochas/apt-git
+security hardening via pyinfra https://github.com/KalvadTech/infraninja/tree/main
