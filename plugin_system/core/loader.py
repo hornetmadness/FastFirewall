@@ -59,6 +59,7 @@ import logging
 import platform
 import shutil
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -983,15 +984,26 @@ class PluginLoader:
 
     def _import_module(self, plugin_id: str, module_path: Path):
         _ensure_system_dist_packages()
-        module_name = f"_plugin_{plugin_id}"
-        # Remove stale cached module so reloads work
-        sys.modules.pop(module_name, None)
+        pkg_name = f"_plugin_{plugin_id}"
+        mod_name = f"{pkg_name}.plugin"
 
-        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        # Remove stale cached modules so reloads work
+        for key in [k for k in sys.modules if k == pkg_name or k.startswith(pkg_name + ".")]:
+            sys.modules.pop(key)
+
+        # Register the plugin directory as a package so relative imports in
+        # plugin.py (e.g. `from .libs.blocklist import BlocklistMixin`) resolve.
+        pkg = types.ModuleType(pkg_name)
+        pkg.__path__ = [str(module_path.parent)]  # type: ignore[attr-defined]
+        pkg.__package__ = pkg_name
+        sys.modules[pkg_name] = pkg
+
+        spec = importlib.util.spec_from_file_location(mod_name, module_path)
         if spec is None or spec.loader is None:
             raise PluginError(f"Cannot create module spec for {module_path}")
 
         module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
+        module.__package__ = pkg_name
+        sys.modules[mod_name] = module
         spec.loader.exec_module(module)  # type: ignore[attr-defined]
         return module

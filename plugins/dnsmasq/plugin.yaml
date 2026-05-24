@@ -50,6 +50,9 @@ config:
   state_file: dnsmasq_state.json
   config_path: /etc/dnsmasq.d/ff-managed.conf
   blocklist_path: /etc/dnsmasq.d/ff-blocklist.conf
-  lease_file: /var/lib/dnsmasq/dnsmasq.leases
+  dhcp:
+    lease_file: /var/lib/dnsmasq/dnsmasq.leases
+  pxe:
+    data_dir: /srv/tftp
   ignore_state_on_boot: false
   debug: false
