@@ -293,20 +293,27 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         try:
             self.logger.info("Applying networking config on boot: %d interface(s), %d route(s), %d sysctl(s)",
                              len(self._interfaces), len(self._routes), len(self._sysctl))
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
-                fh.write(self._build_ifstate_yaml())
-                tmp = fh.name
-            try:
-                result = self._run_ifstate("-c", tmp, "apply")
-            finally:
+            if self._interfaces or self._routes:
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
+                    fh.write(self._build_ifstate_yaml())
+                    tmp = fh.name
                 try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-            if result.returncode == 0:
-                self.logger.info("Re-applied networking config on boot")
-            else:
-                self.logger.warning("Boot-time networking apply returned non-zero: %s", result.stderr.strip())
+                    result = self._run_ifstate("-c", tmp, "apply")
+                finally:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                if result.returncode == 0:
+                    self.logger.info("Re-applied networking config on boot")
+                else:
+                    self.logger.warning("Boot-time networking apply returned non-zero: %s", result.stderr.strip())
+            if self._sysctl:
+                sysctl_errors = self._apply_sysctl()
+                if sysctl_errors:
+                    self.logger.warning("Boot-time sysctl errors: %s", sysctl_errors)
+                else:
+                    self.logger.info("Applied %d sysctl setting(s) on boot", len(self._sysctl))
         except Exception as exc:
             self.logger.warning("Could not re-apply networking config on boot: %s", exc)
 
@@ -361,7 +368,10 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 if iface.get("addresses"):
                     entry["addresses"] = iface["addresses"]
                 link = {k: v for k, v in (iface.get("link") or {}).items() if v is not None}
-                if link:
+                # ifstate requires 'kind' in the link block; omit it for interfaces
+                # whose link type is not declared (e.g. bootstrap sends {state: up}
+                # without a kind — ifstate would reject it with a schema error).
+                if link and "kind" in link:
                     entry["link"] = link
                 config["interfaces"][name] = entry
 
@@ -375,10 +385,26 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 routes_list.append(r)
             config["routing"] = {"routes": routes_list}
 
-        if self._sysctl:
-            config["sysctl"] = dict(self._sysctl)
+        # sysctl is NOT passed to ifstate — ifstate's schema only allows structured
+        # keys (all/default/mpls/mptcp), not kernel dot-notation paths like
+        # net.ipv4.ip_forward.  Sysctl is applied directly via _apply_sysctl().
 
         return yaml.dump(config, default_flow_style=False, sort_keys=False) if config else "{}\n"
+
+    # ── sysctl apply ──────────────────────────────────────────────────
+
+    def _apply_sysctl(self) -> list[str]:
+        """Apply self._sysctl via `sysctl -w`.  Returns a list of error strings."""
+        errors: list[str] = []
+        for key, value in self._sysctl.items():
+            result = subprocess.run(
+                ["sudo", "sysctl", "-w", f"{key}={value}"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                self.logger.error("sysctl -w %s=%s failed: %s", key, value, result.stderr.strip())
+                errors.append(f"{key}: {result.stderr.strip()}")
+        return errors
 
     # ── ifstate CLI wrapper ────────────────────────────────────────────
 
@@ -707,31 +733,46 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         desired = self._desired_snapshot()
         changes = _diff_state(self._state_file.current_snapshot or {}, desired)
         config_yaml = self._build_ifstate_yaml()
+        output: list[str] = []
+        errors: list[str] = []
+        success = True
         tmp = None
         try:
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
-                fh.write(config_yaml)
-                tmp = fh.name
-            uv = shutil.which("uv") or "uv"
-            cmd = f"sudo {uv} run ifstatecli -c {tmp} apply"
-            if debug:
-                self.logger.info("[debug] apply config: %s", tmp)
-                self.logger.info("[debug] cmd: %s", cmd)
-            result = self._run_ifstate("-c", tmp, "apply")
-            output = (result.stdout + result.stderr).strip().splitlines()
-            errors = [ln for ln in output if "fail" in ln.lower() or "error" in ln.lower()]
-            if debug:
-                self.logger.info("[debug] returncode=%d", result.returncode)
-                self.logger.info("[debug] output=%r", output)
-            success = result.returncode == 0
+            # Apply interfaces and routes via ifstatecli (only when there is
+            # something to apply — an empty YAML would still be a valid no-op,
+            # but skipping avoids a needless sudo round-trip).
+            if self._interfaces or self._routes:
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
+                    fh.write(config_yaml)
+                    tmp = fh.name
+                uv = shutil.which("uv") or "uv"
+                if debug:
+                    self.logger.info("[debug] apply config: %s", tmp)
+                    self.logger.info("[debug] cmd: sudo %s run ifstatecli -c %s apply", uv, tmp)
+                result = self._run_ifstate("-c", tmp, "apply")
+                output = (result.stdout + result.stderr).strip().splitlines()
+                errors = [ln for ln in output if "fail" in ln.lower() or "error" in ln.lower()]
+                if debug:
+                    self.logger.info("[debug] returncode=%d", result.returncode)
+                    self.logger.info("[debug] output=%r", output)
+                success = result.returncode == 0
+
+            # Apply sysctl directly — ifstate's schema does not accept kernel
+            # dot-notation keys (e.g. net.ipv4.ip_forward).
+            if self._sysctl:
+                sysctl_errors = self._apply_sysctl()
+                if sysctl_errors:
+                    errors.extend(sysctl_errors)
+                    success = False
+
             if success:
                 self._state_file.commit(desired)
             bus.emit(Event(
                 name="networking.applied",
                 source=self.plugin_id,
-                payload={"success": success, "returncode": result.returncode},
+                payload={"success": success, "returncode": 0 if success else 1},
             ))
-            resp: dict[str, Any] = {"success": success, "returncode": result.returncode, "changes": changes, "output": output}
+            resp: dict[str, Any] = {"success": success, "returncode": 0 if success else 1, "changes": changes, "output": output}
             if errors:
                 resp["errors"] = errors
             if debug:

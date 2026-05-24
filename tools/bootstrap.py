@@ -49,6 +49,7 @@ class FFClient:
 
     Pass simulate=True to log calls without authenticating or making any real
     HTTP requests.  Used to pre-build the export file before the apply prompt.
+    Pass verbose=True to print each request and response to stdout.
     """
 
     def __init__(
@@ -58,10 +59,12 @@ class FFClient:
         password: str,
         export_path: str | None = None,
         simulate: bool = False,
+        verbose: bool = False,
     ) -> None:
         self.host = host.rstrip("/")
         self._export_path = export_path
         self._simulate = simulate
+        self._verbose = verbose
         self._log: list[dict[str, Any]] = []
         if not simulate:
             self._session = requests.Session()
@@ -102,6 +105,12 @@ class FFClient:
                 entry["body"] = body
             self._log.append(entry)
 
+        if self._verbose:
+            print(f"\n  --> {method} {path}")
+            if body is not None:
+                for line in json.dumps(body, indent=4).splitlines():
+                    print(f"      {line}")
+
         if self._simulate:
             # Return enough for scenario code to keep running without errors.
             return {"success": True, "valid": True, "returncode": 0, "output": ""}
@@ -110,6 +119,16 @@ class FFClient:
             resp = self._session.request(method, url, json=body, timeout=30)
         except requests.ConnectionError:
             raise FFError(f"Connection lost during {method} {path}")
+
+        if self._verbose:
+            print(f"  <-- {resp.status_code}")
+            try:
+                resp_data = resp.json()
+                for line in json.dumps(resp_data, indent=4).splitlines():
+                    print(f"      {line}")
+            except Exception:
+                if resp.text:
+                    print(f"      {resp.text[:500]}")
 
         if not resp.ok:
             try:
@@ -1045,6 +1064,7 @@ def replay_session(
     host: str | None,
     username: str | None,
     password: str | None,
+    verbose: bool = False,
 ) -> None:
     _print_header(f"Replaying {replay_path}")
 
@@ -1064,7 +1084,7 @@ def replay_session(
     actual_username = username or _prompt("Username", "admin")
     actual_password = password or _prompt("Password", secret=True)
 
-    client = FFClient(actual_host, actual_username, actual_password)
+    client = FFClient(actual_host, actual_username, actual_password, verbose=verbose)
 
     print(f"\n  Replaying {len(entries)} requests against {actual_host}\n")
 
@@ -1082,8 +1102,13 @@ def replay_session(
 
         print(f"  [{i}/{len(entries)}] {method} {path}  — {description}")
         try:
-            client.request(method, path, body, description=description)
-            _print_ok("OK")
+            result = client.request(method, path, body, description=description)
+            if result.get("success") is False:
+                _print_warn(f"Request succeeded but reported failure: {result}")
+                if not _prompt_yn("Continue despite failure?", True):
+                    sys.exit(1)
+            else:
+                _print_ok("OK")
         except FFError as exc:
             _print_warn(str(exc))
             if not _prompt_yn("Continue despite error?", True):
@@ -1123,6 +1148,9 @@ def main() -> None:
 
               # Apply against a different server
               uv run tools/bootstrap.py --apply my-setup.json --host http://10.0.0.1:8000
+
+              # Show every API request and response
+              uv run tools/bootstrap.py --config tools/examples/firewall.yaml --verbose
         """),
     )
     parser.add_argument("--config", metavar="FILE",
@@ -1136,12 +1164,15 @@ def main() -> None:
     parser.add_argument("--username", "-u", metavar="USER", help="API username")
     parser.add_argument("--password", "-p", metavar="PASS",
                         help="API password (avoid on shared systems; prefer the interactive prompt)")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Print each API request and response")
 
     args = parser.parse_args()
 
     try:
         if args.apply:
-            replay_session(args.apply, args.host, args.username, args.password)
+            replay_session(args.apply, args.host, args.username, args.password,
+                           verbose=args.verbose)
             return
 
         if args.config:
@@ -1171,6 +1202,7 @@ def main() -> None:
             host,
             server.get("username", "admin"),
             server.get("password", "admin"),
+            verbose=args.verbose,
         )
         _run_scenario(client, cfg)
 
