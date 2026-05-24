@@ -22,7 +22,7 @@ import ipaddress
 import json
 import os
 import subprocess
-from typing import Any, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -101,11 +101,13 @@ class RuleUpdate(BaseModel):
 class ChainConfig(BaseModel):
     policy: Literal["accept", "drop"] = "drop"
     priority: int = 0
+    preamble: list[str] = []
 
 
 class ChainUpdate(BaseModel):
     policy: Optional[Literal["accept", "drop"]] = None
     priority: Optional[int] = None
+    preamble: Optional[list[Annotated[str, Field(max_length=512)]]] = None
 
 
 class CompileRequest(BaseModel):
@@ -199,10 +201,9 @@ def _compile_to_script(
             f"add chain inet {filter_name} {chain_name} "
             f"{{ type filter hook {chain_name} priority {cfg.priority}; policy {cfg.policy}; }}"
         )
-    # stateful tracking — inject on drop-policy input/forward chains before user rules
-    for chain_name in ("input", "forward"):
-        if chain_name in chains and chains[chain_name].policy == "drop":
-            lines.append(f"add rule inet {filter_name} {chain_name} ct state established,related accept")
+    for chain_name, cfg in chains.items():
+        for expr in cfg.preamble:
+            lines.append(f"add rule inet {filter_name} {chain_name} {expr}")
     seen_exprs: set[str] = set()
     for rule in sorted(rules, key=lambda r: r.priority):
         if rule.chain not in chains:
@@ -226,9 +227,9 @@ def _rule_hash(data: dict) -> str:
 
 
 _DEFAULT_CHAINS: dict[str, dict] = {
-    "input":   {"policy": "drop",   "priority": 0},
-    "forward": {"policy": "drop",   "priority": 0},
-    "output":  {"policy": "accept", "priority": 0},
+    "input":   {"policy": "drop",   "priority": 0, "preamble": ["iif lo accept", "ct state established,related accept"]},
+    "forward": {"policy": "drop",   "priority": 0, "preamble": ["ct state established,related accept"]},
+    "output":  {"policy": "accept", "priority": 0, "preamble": []},
 }
 
 _DEFAULT_RULES: list[RuleCreate] = [
@@ -271,8 +272,8 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         self._chains: dict[str, ChainConfig] = {
             name: ChainConfig(**cfg) for name, cfg in _DEFAULT_CHAINS.items()
         }
+        self._load_state()
         if not self.config.get("ignore_state_on_boot", False):
-            self._load_state()
             self._apply_state()
         self.logger.info("Loaded %d rules from %r", len(self._rules), self._state_file.path)
         self._register_routes()
