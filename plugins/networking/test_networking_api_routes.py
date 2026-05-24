@@ -540,6 +540,16 @@ def test_get_config_yaml_includes_interfaces_and_routes(client):
     assert config["routing"]["routes"][0]["to"] == "default"
 
 
+def test_get_config_yaml_link_defaults_to_physical(client):
+    # ifstate requires 'link' with 'kind' on every interface.
+    # When the API caller omits 'kind' (e.g. bootstrap sends {link: {state: up}}),
+    # _build_ifstate_yaml must default kind to "physical" to pass schema validation.
+    client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
+    config = yaml.safe_load(client.get("/v1/networking/config").text)
+    assert config["interfaces"]["eth0"]["link"]["kind"] == "physical"
+    assert config["interfaces"]["eth0"]["link"]["state"] == "up"
+
+
 def test_get_config_yaml_excludes_sysctl(client):
     # sysctl is applied directly via `sysctl -w`, not through ifstatecli.
     # The ifstate YAML config must NOT include a sysctl block (ifstate's schema

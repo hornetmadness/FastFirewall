@@ -368,11 +368,12 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 if iface.get("addresses"):
                     entry["addresses"] = iface["addresses"]
                 link = {k: v for k, v in (iface.get("link") or {}).items() if v is not None}
-                # ifstate requires 'kind' in the link block; omit it for interfaces
-                # whose link type is not declared (e.g. bootstrap sends {state: up}
-                # without a kind — ifstate would reject it with a schema error).
-                if link and "kind" in link:
-                    entry["link"] = link
+                # ifstate requires 'link' on every interface entry and 'kind' within it.
+                # Default to "physical" when kind is not explicitly set — this covers
+                # standard NICs configured by the bootstrap without a type declaration.
+                if "kind" not in link:
+                    link["kind"] = "physical"
+                entry["link"] = link
                 config["interfaces"][name] = entry
 
         if self._routes:
