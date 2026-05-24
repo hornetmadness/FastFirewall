@@ -568,6 +568,7 @@ _CLEAN_SCRIPT = (
     "add chain inet test-fw input { type filter hook input priority 0; policy drop; }\n"
     "add chain inet test-fw forward { type filter hook forward priority 0; policy drop; }\n"
     "add chain inet test-fw output { type filter hook output priority 0; policy accept; }\n"
+    "add rule inet test-fw input iif lo accept\n"
     "add rule inet test-fw input ct state established,related accept\n"
     "add rule inet test-fw forward ct state established,related accept"
 )
@@ -583,14 +584,22 @@ def test_rules_applied_to_nft_on_boot(tmp_path):
     inst._apply_nft_script.assert_called_once_with(_CLEAN_SCRIPT)
 
 
-def test_ignore_state_on_boot_skips_load_and_apply(tmp_path):
+def test_ignore_state_on_boot_skips_apply(tmp_path):
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "rules.json").write_text(json.dumps(_BOOT_RULE))
+    (tmp_path / "data" / "rules.json").write_text(
+        json.dumps({"desired_state": {"rules": _BOOT_RULE, "chains": _BOOT_CHAINS}})
+    )
     inst, _ = _make_inst(tmp_path, config={"ignore_state_on_boot": True})
     inst._apply_nft_script = MagicMock()
     inst.setup()
     inst._apply_nft_script.assert_not_called()
-    assert inst._rules == {}
+    assert "r1" in inst._rules
+
+
+def test_ignore_state_on_boot_still_creates_state_file(tmp_path):
+    inst, _ = _make_inst(tmp_path, config={"ignore_state_on_boot": True})
+    inst.setup()
+    assert (tmp_path / "data" / "rules.json").exists()
 
 
 def test_apply_state_does_not_crash_on_nft_failure(tmp_path):
@@ -925,6 +934,16 @@ def test_ipv6_dst_address_uses_ip6_daddr():
 # Stateful connection tracking
 # ---------------------------------------------------------------------------
 
+def test_compile_output_contains_iif_lo_accept_in_input(client):
+    output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
+    assert any("fw input iif lo accept" in line for line in output)
+
+
+def test_compile_iif_lo_not_in_forward_chain(client):
+    output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
+    assert not any("fw forward iif lo accept" in line for line in output)
+
+
 def test_compile_output_contains_ct_state_input(client):
     output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
     assert any("fw input ct state established,related accept" in line for line in output)
@@ -1039,12 +1058,26 @@ def test_update_chain_policy_affects_compiled_output(client):
     assert any("policy accept" in line for line in output)
 
 
-def test_update_chain_policy_affects_ct_state(client):
-    # When forward policy is accept, ct state rule should NOT be injected for forward
-    client.put("/v1/firewall/chains/forward", json={"policy": "accept"})
+def test_chain_response_includes_preamble(client):
+    data = client.get("/v1/firewall/chains/input").json()
+    assert "preamble" in data
+    assert "iif lo accept" in data["preamble"]
+    assert "ct state established,related accept" in data["preamble"]
+
+
+def test_update_chain_preamble(client):
+    data = client.put("/v1/firewall/chains/forward", json={"preamble": []}).json()
+    assert data["preamble"] == []
     output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
-    forward_ct = [line for line in output if "forward ct state" in line]
-    assert len(forward_ct) == 0
+    assert not any("fw forward ct state" in line for line in output)
+
+
+def test_update_chain_policy_leaves_preamble_unchanged(client):
+    # Changing policy does not automatically modify the preamble
+    original = client.get("/v1/firewall/chains/forward").json()["preamble"]
+    client.put("/v1/firewall/chains/forward", json={"policy": "accept"})
+    updated = client.get("/v1/firewall/chains/forward").json()["preamble"]
+    assert updated == original
 
 
 def test_update_chain_404_for_unknown(client):
