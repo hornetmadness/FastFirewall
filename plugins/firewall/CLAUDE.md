@@ -220,9 +220,6 @@ The wrapper path defaults to `plugin_dir / "nft_cmd"` and can be overridden with
 | `firewall.compiled` | `{rule_count}` |
 | `firewall.applied` | `{rule_count, success}` |
 
-## Events consumed
-
-`firewall.compile` — payload may include `filter_name` override; triggers a compile (no apply) and logs the result.
 
 ## Testing
 

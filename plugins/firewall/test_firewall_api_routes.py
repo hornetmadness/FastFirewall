@@ -20,6 +20,11 @@ from fastapi.testclient import TestClient
 from plugin_system.core.events import Event, bus as global_bus
 
 PLUGIN_PY = Path(__file__).parent / "plugin.py"
+_PLUGIN_DIR = str(Path(__file__).parent)
+if _PLUGIN_DIR not in sys.path:
+    sys.path.insert(0, _PLUGIN_DIR)
+
+from models import LogConfig, RateLimit  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -1235,7 +1240,7 @@ def test_create_rule_with_rate_limit(client):
 def test_rate_limit_compiles_to_limit_expr():
     mod = _load_module()
     rule = mod.FirewallRule(name="r", action="accept", protocol="tcp", dst_port=22,
-                            rate_limit=mod.RateLimit(rate=10, unit="second"))
+                            rate_limit=RateLimit(rate=10, unit="second"))
     expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
     assert expr is not None
     assert "limit rate 10/second" in expr
@@ -1244,7 +1249,7 @@ def test_rate_limit_compiles_to_limit_expr():
 def test_rate_limit_over_flag():
     mod = _load_module()
     rule = mod.FirewallRule(name="r", action="deny",
-                            rate_limit=mod.RateLimit(rate=100, unit="second", over=True))
+                            rate_limit=RateLimit(rate=100, unit="second", over=True))
     expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
     assert expr is not None
     assert "limit rate over 100/second" in expr
@@ -1253,7 +1258,7 @@ def test_rate_limit_over_flag():
 def test_rate_limit_with_burst():
     mod = _load_module()
     rule = mod.FirewallRule(name="r", action="accept",
-                            rate_limit=mod.RateLimit(rate=10, unit="second", burst=20, burst_unit="packets"))
+                            rate_limit=RateLimit(rate=10, unit="second", burst=20, burst_unit="packets"))
     expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
     assert expr is not None
     assert "burst 20 packets" in expr
@@ -1262,7 +1267,7 @@ def test_rate_limit_with_burst():
 def test_rate_limit_byte_unit():
     mod = _load_module()
     rule = mod.FirewallRule(name="r", action="accept",
-                            rate_limit=mod.RateLimit(rate=10, unit="mbytes"))
+                            rate_limit=RateLimit(rate=10, unit="mbytes"))
     expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
     assert expr is not None
     assert "limit rate 10 mbytes/second" in expr
@@ -1271,7 +1276,7 @@ def test_rate_limit_byte_unit():
 def test_rate_limit_comes_before_verdict():
     mod = _load_module()
     rule = mod.FirewallRule(name="r", action="accept",
-                            rate_limit=mod.RateLimit(rate=5, unit="second"))
+                            rate_limit=RateLimit(rate=5, unit="second"))
     expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
     assert expr is not None
     assert expr.index("limit rate") < expr.index("accept")
@@ -1291,7 +1296,7 @@ def test_create_rule_with_log_config(client):
 def test_log_compiles_to_log_statement():
     mod = _load_module()
     rule = mod.FirewallRule(name="r", action="deny",
-                            log=mod.LogConfig(prefix="DROP: ", level="warn"))
+                            log=LogConfig(prefix="DROP: ", level="warn"))
     expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
     assert expr is not None
     assert 'log prefix "DROP: " level warn' in expr
@@ -1300,7 +1305,7 @@ def test_log_compiles_to_log_statement():
 def test_log_comes_before_verdict():
     mod = _load_module()
     rule = mod.FirewallRule(name="r", action="deny",
-                            log=mod.LogConfig(prefix="X: ", level="warn"))
+                            log=LogConfig(prefix="X: ", level="warn"))
     expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
     assert expr is not None
     assert expr.index("log prefix") < expr.index("drop")
@@ -1309,7 +1314,7 @@ def test_log_comes_before_verdict():
 def test_log_with_nflog_group():
     mod = _load_module()
     rule = mod.FirewallRule(name="r", action="accept",
-                            log=mod.LogConfig(prefix="FWD: ", level="info", group=1))
+                            log=LogConfig(prefix="FWD: ", level="info", group=1))
     expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
     assert expr is not None
     assert "group 1" in expr
@@ -1318,7 +1323,7 @@ def test_log_with_nflog_group():
 def test_log_with_flags():
     mod = _load_module()
     rule = mod.FirewallRule(name="r", action="accept",
-                            log=mod.LogConfig(prefix="X: ", level="warn", flags="all"))
+                            log=LogConfig(prefix="X: ", level="warn", flags="all"))
     expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
     assert expr is not None
     assert "flags all" in expr
@@ -1327,7 +1332,7 @@ def test_log_with_flags():
 def test_log_with_snaplen():
     mod = _load_module()
     rule = mod.FirewallRule(name="r", action="deny",
-                            log=mod.LogConfig(prefix="X: ", level="warn", snaplen=256))
+                            log=LogConfig(prefix="X: ", level="warn", snaplen=256))
     expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
     assert expr is not None
     assert "snaplen 256" in expr
@@ -2086,7 +2091,7 @@ def test_ingress_rule_compiles_rate_limit():
     mod = _load_module()
     from _nft.compiler import _ingress_rule_to_nft_expr
     rule = mod.IngressRule(name="r", device="eth0", action="deny",
-                           rate_limit=mod.RateLimit(rate=100, unit="second", over=True))
+                           rate_limit=RateLimit(rate=100, unit="second", over=True))
     expr = _ingress_rule_to_nft_expr(rule, logging.getLogger("test"))
     assert expr is not None
     assert "limit rate over 100/second" in expr
@@ -2810,7 +2815,7 @@ def test_meta_fields_ordering_before_rate_limit():
     from _nft.compiler import _rule_to_nft_expr
     rule = mod.FirewallRule(
         name="r", action="accept", mark=5,
-        rate_limit=mod.RateLimit(rate=10, unit="second"),
+        rate_limit=RateLimit(rate=10, unit="second"),
     )
     expr = _rule_to_nft_expr(rule, logging.getLogger("test"))
     assert expr.index("meta mark") < expr.index("limit rate")
