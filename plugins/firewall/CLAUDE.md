@@ -18,11 +18,44 @@ Manages firewall rules and compiles them to nftables scripts applied via a sudo 
 | `GET` | `/chains` | List chains and their policies |
 | `GET` | `/chains/{name}` | Get a single chain |
 | `PUT` | `/chains/{name}` | Update chain policy or priority |
+| `GET` | `/sets` | List named sets |
+| `POST` | `/sets` | Create a named set |
+| `GET` | `/sets/{name}` | Get a named set |
+| `DELETE` | `/sets/{name}` | Delete a named set |
+| `POST` | `/sets/{name}/elements` | Add elements to a set |
+| `DELETE` | `/sets/{name}/elements` | Remove elements from a set |
+| `GET` | `/nat/rules` | List NAT rules |
+| `POST` | `/nat/rules` | Create a NAT rule |
+| `GET` | `/nat/rules/{rule_id}` | Get a NAT rule |
+| `PUT` | `/nat/rules/{rule_id}` | Update a NAT rule |
+| `DELETE` | `/nat/rules/{rule_id}` | Delete a NAT rule |
+| `GET` | `/custom-chains` | List custom (non-hook) chains |
+| `POST` | `/custom-chains` | Create a custom chain |
+| `GET` | `/custom-chains/{name}` | Get a custom chain |
+| `DELETE` | `/custom-chains/{name}` | Delete a custom chain |
+| `GET` | `/flowtables` | List flowtables |
+| `POST` | `/flowtables` | Create a flowtable |
+| `GET` | `/flowtables/{name}` | Get a flowtable |
+| `DELETE` | `/flowtables/{name}` | Delete a flowtable |
+| `GET` | `/ingress/rules` | List ingress (netdev) rules |
+| `POST` | `/ingress/rules` | Create an ingress rule |
+| `GET` | `/ingress/rules/{rule_id}` | Get an ingress rule |
+| `PUT` | `/ingress/rules/{rule_id}` | Update an ingress rule |
+| `DELETE` | `/ingress/rules/{rule_id}` | Delete an ingress rule |
+| `GET` | `/maps` | List verdict maps |
+| `POST` | `/maps` | Create a verdict map |
+| `GET` | `/maps/{name}` | Get a verdict map |
+| `DELETE` | `/maps/{name}` | Delete a verdict map |
+| `POST` | `/maps/{name}/entries` | Add entries to a verdict map |
+| `DELETE` | `/maps/{name}/entries` | Remove entries from a verdict map by key |
+| `GET` | `/counters` | Live counter values from kernel |
+| `POST` | `/counters/{name}/reset` | Atomically reset a named counter |
 | `GET` | `/table` | Show current table name, family, and chain list |
 | `POST` | `/check` | Dry-run validate (no apply) |
 | `POST` | `/apply` | Compile and apply rules to nftables |
 | `POST` | `/compile` | Compile rules to nft script (preview only) |
 | `POST` | `/discard` | Revert pending changes to last applied state |
+| `GET` | `/live-state` | Current kernel ruleset as parsed JSON |
 | `GET` | `/status` | Plugin status |
 
 ## Rule fields
@@ -30,13 +63,29 @@ Manages firewall rules and compiles them to nftables scripts applied via a sudo 
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `name` | `str` | required | max 100 chars |
-| `chain` | `"input" \| "forward" \| "output"` | `"input"` | which chain the rule targets |
-| `action` | `"accept" \| "deny" \| "reject"` | `"deny"` | `reject` sends ICMP unreachable; `deny` silently drops |
+| `chain` | `str` | `"input"` | hook chain or custom chain name |
+| `action` | `"accept" \| "deny" \| "reject" \| "jump" \| "return"` | `"deny"` | `reject` sends ICMP unreachable; `deny` silently drops |
+| `jump_target` | `str` | `null` | required when `action` is `"jump"` |
 | `protocol` | `"tcp" \| "udp" \| "icmp" \| "icmpv6" \| "esp" \| "ah" \| "any"` | `null` | |
 | `src_address` | `str` | `"any"` | IPv4 CIDR, IPv6 CIDR, or `"any"` |
 | `dst_address` | `str` | `"any"` | IPv4 CIDR, IPv6 CIDR, or `"any"` |
+| `src_address_set` | `str` | `null` | reference to a named set via `@setname` |
+| `dst_address_set` | `str` | `null` | reference to a named set via `@setname` |
+| `src_interface` | `str` | `null` | `iif` match (max 15 chars) |
+| `dst_interface` | `str` | `null` | `oif` match (max 15 chars) |
 | `src_port` | `int \| macro` | `null` | TCP/UDP only |
 | `dst_port` | `int \| macro` | `null` | TCP/UDP only |
+| `src_port_range` | `[int, int]` | `null` | TCP/UDP port range, e.g. `[1024, 65535]` |
+| `dst_port_range` | `[int, int]` | `null` | TCP/UDP port range |
+| `dst_port_vmap` | `str` | `null` | verdict map name; emits `tcp/udp dport vmap @name` as the verdict |
+| `src_port_vmap` | `str` | `null` | verdict map name; emits `tcp/udp sport vmap @name` as the verdict |
+| `tcp_flags` | `list[flag]` | `null` | TCP flag match: `syn`, `ack`, `fin`, `rst`, `urg`, `psh`, `ece`, `cwr` |
+| `tcp_flags_mask` | `list[flag]` | `null` | mask for `tcp_flags`; if set, emits `tcp flags & (mask) == (flags)` |
+| `icmp_type` | `int \| str` | `null` | ICMP type, e.g. `"echo-request"` or `8` |
+| `ct_state` | `list[state]` | `null` | CT state match: `new`, `established`, `related`, `invalid`, `untracked` |
+| `counter_name` | `str` | `null` | named counter; emits `counter name <n>` before verdict |
+| `rate_limit` | `RateLimit` | `null` | rate-limiting; emits `limit rate [over] N/unit [burst M packets]` |
+| `log` | `LogConfig` | `null` | logging; emits `log prefix "..." level ...` before verdict |
 | `comment` | `str` | `null` | max 255 chars |
 | `priority` | `int` | `100` | lower = matched first |
 | `enabled` | `bool` | `true` | disabled rules are compiled out |
@@ -132,7 +181,7 @@ Compiles the ruleset, writes it to `data/<filter_name>.nft`, and applies it via 
 
 ## `POST /compile`
 
-Compiles the current ruleset to a preview script without applying it. Returns `{filter_name, rule_count, output}` where `output` is a `list[str]` — one nft statement per element.
+Compiles the current ruleset to a preview script without applying it. Writes the script to `data/<filter_name>.nft` and returns `{filter_name, rule_count, output, output_path}` where `output` is a `list[str]` — one nft statement per element, and `output_path` is the absolute path to the written file.
 
 ## `POST /discard`
 

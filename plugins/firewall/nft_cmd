@@ -3,12 +3,19 @@
 # Reads an nft script from stdin and applies it via the nft CLI.
 # Intended to be invoked via sudo — see /etc/sudoers.d/fastfirewall.
 #
-# Usage: fastfirewall-nft-apply [--check]
-#   (no flag)  Apply the script to the live kernel ruleset.
-#   --check    Validate the script without modifying the kernel.
+# Usage: nft_cmd [--check] [--list <family> <table>]
+#   (no flag)          Apply the script from stdin to the live kernel ruleset.
+#   --check            Validate the script from stdin without modifying the kernel.
+#   --list <fam> <tbl> Print the named table as JSON to stdout (read-only).
 set -euo pipefail
 if [[ "${1:-}" == "--check" ]]; then
     exec nft --check -f -
+elif [[ "${1:-}" == "--list" ]]; then
+    exec nft -j list table "${2}" "${3}"
+elif [[ "${1:-}" == "--list-counters" ]]; then
+    exec nft -j list counters table "${2}" "${3}"
+elif [[ "${1:-}" == "--reset-counter" ]]; then
+    exec nft -j reset counter "${2}" "${3}" "${4}"
 else
     exec nft -f -
 fi

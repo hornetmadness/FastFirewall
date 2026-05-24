@@ -5,12 +5,11 @@
 #   - IPv4 forwarding
 #   - Internal DNS (dnsmasq) with an upstream resolver
 #   - DHCP scope for the LAN segment
-#   - Firewall rules (allow LAN traffic, deny unsolicited WAN ingress)
-#   - A new admin user (sudo must be configured manually after)
+#   - Firewall rules (allow LAN traffic, masquerade NAT, deny unsolicited WAN ingress)
+#   - A new admin user
 #
 # Run with:
 #   uv run tools/bootstrap.py --config tools/examples/gateway.yaml
-#   uv run tools/bootstrap.py --config tools/examples/gateway.yaml --export my-setup.json
 
 server:
   host: "http://localhost:8000"
@@ -36,7 +35,6 @@ dns:
   upstream:
     - "8.8.8.8"
     - "1.1.1.1"
-  # Optional static DNS records
   records:
     - type: "A"
       name: "gateway.home.lan"
@@ -50,14 +48,85 @@ dhcp:
   end: "192.168.0.200"
   lease_time: "24h"
   # gateway and dns default to the LAN address above (192.168.0.1)
-  # netmask: "255.255.255.0"   # optional; dnsmasq infers from range if omitted
+  # netmask: "255.255.255.0"
 
 firewall:
   lan_subnet: "192.168.0.0/24"
   allow_lan_forwarding: true    # allow LAN clients to route through this gateway
+  masquerade: true              # NAT masquerade on WAN — required for LAN internet access
   allow_ssh_from_lan: true
   allow_http_from_lan: true
   allow_https_from_lan: true
+
+  # Named sets — create address sets that rules can reference with src_address_set / dst_address_set.
+  # Useful for blocklists or trusted host groups that can be updated without changing rules.
+  # sets:
+  #   - name: "blocked_ips"
+  #     type: "ipv4_addr"
+  #     flags: ["interval"]          # "interval" lets you use CIDRs in the set
+  #     elements: ["198.51.100.0/24", "203.0.113.50"]
+  #   - name: "trusted_hosts"
+  #     type: "ipv4_addr"
+  #     elements: ["192.168.0.10", "192.168.0.11"]
+
+  # Extra filter rules (verbatim — all rule fields are supported).
+  # These are appended after the built-in scenario rules above.
+  # rules:
+  #   - name: "block-bad-ips"
+  #     chain: "input"
+  #     action: "deny"
+  #     src_address_set: "@blocked_ips"
+  #     priority: 5                   # run before the allow rules
+  #   - name: "allow-icmpv6"
+  #     chain: "input"
+  #     action: "accept"
+  #     protocol: "icmpv6"
+  #     priority: 11
+  #   - name: "log-and-deny-invalid"
+  #     chain: "input"
+  #     action: "deny"
+  #     ct_state: ["invalid"]
+  #     log: {prefix: "INVALID: ", level: "warn"}
+  #     priority: 8
+
+  # Ingress rules — applied at the netdev hook (per physical device, before routing).
+  # Use these for early-drop before packets hit the filter table.
+  # ingress:
+  #   - name: "drop-invalid-wan"
+  #     device: "eth0"
+  #     action: "deny"
+  #     ct_state: ["invalid"]
+  #     priority: 10
+  #   - name: "rate-limit-syn-wan"
+  #     device: "eth0"
+  #     protocol: "tcp"
+  #     tcp_flags: ["syn"]
+  #     action: "deny"
+  #     rate_limit: {rate: 200, unit: "second", over: true}
+  #     comment: "SYN flood protection on WAN"
+  #     priority: 20
+
+  # Extra NAT rules — DNAT port-forwarding, SNAT, etc.
+  # The masquerade rule above is added automatically; list additional rules here.
+  # nat:
+  #   - name: "dnat-http"
+  #     chain: "prerouting"
+  #     type: "dnat"
+  #     protocol: "tcp"
+  #     dst_port: 80
+  #     to_address: "192.168.0.10"
+  #     to_port: 80
+  #     comment: "Forward port 80 to internal web server"
+  #     priority: 100
+  #   - name: "dnat-https"
+  #     chain: "prerouting"
+  #     type: "dnat"
+  #     protocol: "tcp"
+  #     dst_port: 443
+  #     to_address: "192.168.0.10"
+  #     to_port: 443
+  #     comment: "Forward port 443 to internal web server"
+  #     priority: 101
 
 user:
   username: "netadmin"
