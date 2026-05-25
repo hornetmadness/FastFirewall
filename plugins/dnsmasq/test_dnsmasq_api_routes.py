@@ -10,6 +10,8 @@ import importlib.util
 import json
 import logging
 import subprocess
+import sys
+import types
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,13 +21,29 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 PLUGIN_PY = Path(__file__).parent / "plugin.py"
+_PROJECT_ROOT = str(PLUGIN_PY.parent.parent.parent)
+_PKG_NAME = "plugins.dnsmasq"
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 def _load_module():
-    spec = importlib.util.spec_from_file_location("dnsmasq_plugin", PLUGIN_PY)
+    if _PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, _PROJECT_ROOT)
+    if "plugins" not in sys.modules:
+        import importlib as _il
+        _il.import_module("plugins")
+    if _PKG_NAME not in sys.modules:
+        pkg = types.ModuleType(_PKG_NAME)
+        pkg.__path__ = [str(PLUGIN_PY.parent)]
+        pkg.__package__ = _PKG_NAME
+        sys.modules[_PKG_NAME] = pkg
+    mod_name = f"{_PKG_NAME}.plugin"
+    sys.modules.pop(mod_name, None)
+    spec = importlib.util.spec_from_file_location(mod_name, PLUGIN_PY)
     mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = _PKG_NAME
+    sys.modules[mod_name] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -49,7 +67,8 @@ def _make_plugin(tmp_path: Path, config: dict[str, Any] | None = None):
         "state_file": "dnsmasq_state.json",
         "config_path": str(tmp_path / "ff-managed.conf"),
         "blocklist_path": str(tmp_path / "ff-blocklist.conf"),
-        "lease_file": str(tmp_path / "dnsmasq.leases"),
+        "dhcp": {"lease_file": str(tmp_path / "dnsmasq.leases")},
+        "ignore_state_on_boot": True,
         **(config or {}),
     }
     inst.setup()
@@ -284,7 +303,7 @@ def test_live_leases_parsed(tmp_path):
     lease_content = "1716000000 aa:bb:cc:dd:ee:01 192.168.1.10 desktop *\n"
     lease_file = tmp_path / "dnsmasq.leases"
     lease_file.write_text(lease_content)
-    p = _make_plugin(tmp_path, {"lease_file": str(lease_file)})
+    p = _make_plugin(tmp_path, {"dhcp": {"lease_file": str(lease_file)}})
     c = _make_client(p)
 
     r = c.get("/v1/dnsmasq/dhcp/leases")
@@ -350,6 +369,55 @@ def test_pxe_service_crud(client):
 def test_pxe_service_out_of_range(client):
     r = client.delete("/v1/dnsmasq/pxe/services/5")
     assert r.status_code == 404
+
+
+# ── PXE images ─────────────────────────────────────────────────────────────────
+
+def test_upload_pxe_images_single(tmp_path):
+    data_dir = tmp_path / "tftp"
+    data_dir.mkdir()
+    plugin = _make_plugin(tmp_path, {"pxe": {"data_dir": str(data_dir)}})
+    client = _make_client(plugin)
+    r = client.post(
+        "/v1/dnsmasq/pxe/images",
+        files=[("files", ("vmlinuz", b"kernel data", "application/octet-stream"))],
+    )
+    assert r.status_code == 201
+    data = r.json()
+    assert data["count"] == 1
+    assert data["uploaded"][0]["name"] == "vmlinuz"
+    assert (data_dir / "vmlinuz").read_bytes() == b"kernel data"
+
+
+def test_upload_pxe_images_multiple(tmp_path):
+    data_dir = tmp_path / "tftp"
+    data_dir.mkdir()
+    plugin = _make_plugin(tmp_path, {"pxe": {"data_dir": str(data_dir)}})
+    client = _make_client(plugin)
+    r = client.post(
+        "/v1/dnsmasq/pxe/images",
+        files=[
+            ("files", ("vmlinuz", b"kernel data", "application/octet-stream")),
+            ("files", ("initrd.img", b"initrd data", "application/octet-stream")),
+        ],
+    )
+    assert r.status_code == 201
+    data = r.json()
+    assert data["count"] == 2
+    names = {f["name"] for f in data["uploaded"]}
+    assert names == {"vmlinuz", "initrd.img"}
+
+
+def test_upload_pxe_image_invalid_filename(tmp_path):
+    data_dir = tmp_path / "tftp"
+    data_dir.mkdir()
+    plugin = _make_plugin(tmp_path, {"pxe": {"data_dir": str(data_dir)}})
+    client = _make_client(plugin)
+    r = client.post(
+        "/v1/dnsmasq/pxe/images",
+        files=[("files", (".hidden", b"data", "application/octet-stream"))],
+    )
+    assert r.status_code == 400
 
 
 # ── mDNS ───────────────────────────────────────────────────────────────────────
@@ -460,7 +528,7 @@ async def test_fetch_blocklist_domains_hosts_format(tmp_path):
     mock_aclient.get = AsyncMock(return_value=mock_resp)
     mock_aclient.__aenter__ = AsyncMock(return_value=mock_aclient)
     mock_aclient.__aexit__ = AsyncMock(return_value=False)
-    with patch("plugins.dnsmasq.plugin._validate_blocklist_url", new_callable=AsyncMock):
+    with patch("plugins.dnsmasq.libs.blocklist._validate_blocklist_url", new_callable=AsyncMock):
         with patch("httpx.AsyncClient", return_value=mock_aclient):
             domains = await inst._fetch_blocklist_domains("http://x.com/hosts.txt", "hosts")
     assert set(domains) == _HOSTS_EXPECTED
@@ -476,7 +544,7 @@ async def test_fetch_blocklist_domains_plain_format(tmp_path):
     mock_aclient.get = AsyncMock(return_value=mock_resp)
     mock_aclient.__aenter__ = AsyncMock(return_value=mock_aclient)
     mock_aclient.__aexit__ = AsyncMock(return_value=False)
-    with patch("plugins.dnsmasq.plugin._validate_blocklist_url", new_callable=AsyncMock):
+    with patch("plugins.dnsmasq.libs.blocklist._validate_blocklist_url", new_callable=AsyncMock):
         with patch("httpx.AsyncClient", return_value=mock_aclient):
             domains = await inst._fetch_blocklist_domains("http://x.com/domains.txt", "domains")
     assert set(domains) == _DOMAINS_EXPECTED
@@ -646,9 +714,12 @@ def test_discard_reverts_to_applied_state(plugin):
 
 def test_apply_state_restarts_when_on_disk_config_differs(tmp_path):
     p = _make_plugin(tmp_path)
+    p.config["ignore_state_on_boot"] = False
     p._run_dnsmasq_test = MagicMock(return_value=_ok())
     p._write_file_sudo = MagicMock()
     p._run_systemctl = MagicMock(return_value=_ok(stdout=""))
+    p._mkdir = MagicMock(return_value=True)
+    p._ensure_lease_file = MagicMock()
     # on-disk config doesn't exist → differs from desired → should restart
     p._read_on_disk = MagicMock(return_value=None)
     p.setup()
@@ -657,13 +728,17 @@ def test_apply_state_restarts_when_on_disk_config_differs(tmp_path):
 
 def test_apply_state_skipped_when_on_disk_config_matches(tmp_path):
     p = _make_plugin(tmp_path)
+    p.config["ignore_state_on_boot"] = False
     p._run_dnsmasq_test = MagicMock(return_value=_ok())
     p._write_file_sudo = MagicMock()
-    p._run_systemctl = MagicMock(return_value=_ok(stdout=""))
+    # is-active returns 0 (service is running) so restart is skipped
+    p._run_systemctl = MagicMock(return_value=_ok(stdout="active"))
     # Simulate on-disk config matching desired exactly
     p._read_on_disk = MagicMock(side_effect=lambda path: p._build_config() if "ff-managed" in path else p._build_blocklist_config())
     p.setup()
-    p._run_systemctl.assert_not_called()
+    calls = [c.args[0] for c in p._run_systemctl.call_args_list]
+    assert calls == ["is-active"], f"Expected only is-active check, got: {calls}"
+    p._write_file_sudo.assert_not_called()
 
 
 def test_ignore_state_on_boot_skips_apply(tmp_path):

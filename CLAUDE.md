@@ -180,6 +180,19 @@ Every plugin is a directory under `plugins/` with two required files:
 
 **`plugin.py`** — must contain either a `PluginBase` subclass or decorated module-level functions (or both).
 
+**`libs/` subpackages (optional)** — large plugins can split logic into submodules under a `libs/` subdirectory. The loader registers the plugin directory as a Python package before importing `plugin.py`, so relative imports work transparently:
+
+```python
+# plugin.py
+from .libs.blocklist import BlocklistMixin
+from .libs.dhcp import DhcpMixin
+
+class DnsmasqPlugin(PluginBase, ApiRouterPlugin, DhcpMixin, BlocklistMixin):
+    ...
+```
+
+Each `libs/<name>/` directory needs an `__init__.py`. The mixin classes inherit from nothing (or `object`) and rely on cooperative multiple inheritance to access `self.router`, `self.logger`, `self.config`, etc. from the main plugin class.
+
 ### Plugin base classes
 
 `PluginBase` (`plugin_system/core/plugin_base.py`) — inherit to get lifecycle hooks:
@@ -406,6 +419,45 @@ client = TestClient(app)
 ```
 
 Use `tmp_path` for any file-backed state (e.g. `rules_file`, `state_file`) so tests are isolated. Plugins that persist state write into a `data/` subdirectory of `plugin_dir` (e.g. `tmp_path / "data" / "rules.json"`); the subdirectory is created automatically on first save.
+
+**Plugins with `libs/` subpackages** need an extra setup step before loading `plugin.py` — the plugin directory must be registered as a package in `sys.modules` so relative imports (`from .libs.foo import ...`) resolve. Mirror what the loader does:
+
+```python
+import sys, types, importlib.util
+from pathlib import Path
+
+PLUGIN_PY = Path(__file__).parent / "plugin.py"
+_PROJECT_ROOT = str(PLUGIN_PY.parent.parent.parent)   # repo root
+_PKG_NAME = "plugins.dnsmasq"                         # dotted package name
+
+def _load_module():
+    if _PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, _PROJECT_ROOT)
+    # register the package stub so relative imports resolve
+    if _PKG_NAME not in sys.modules:
+        pkg = types.ModuleType(_PKG_NAME)
+        pkg.__path__ = [str(PLUGIN_PY.parent)]
+        pkg.__package__ = _PKG_NAME
+        sys.modules[_PKG_NAME] = pkg
+    mod_name = f"{_PKG_NAME}.plugin"
+    sys.modules.pop(mod_name, None)
+    spec = importlib.util.spec_from_file_location(mod_name, PLUGIN_PY)
+    mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = _PKG_NAME
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+```
+
+When patching functions that live in a `libs/` submodule (not in `plugin.py` itself), the patch target must use the submodule path:
+
+```python
+# wrong — _validate_blocklist_url lives in libs/blocklist/__init__.py now
+with patch("plugins.dnsmasq.plugin._validate_blocklist_url", ...):
+
+# correct
+with patch("plugins.dnsmasq.libs.blocklist._validate_blocklist_url", ...):
+```
 
 **Plugin test pattern — pyinfra mocking (host, syslog, apt_cacher_ng)**
 
