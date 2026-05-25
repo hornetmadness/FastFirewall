@@ -18,3 +18,126 @@ firewall:
   allow_ssh_from_lan: true
   allow_http_from_lan: true
   allow_https_from_lan: true
+
+  # ── Named sets ────────────────────────────────────────────────────────────
+  # Create named address/port sets that rules reference via src_address_set /
+  # dst_address_set.  Sets can be updated live without changing rules.
+  #
+  # sets:
+  #   - name: "blocked_ips"
+  #     type: "ipv4_addr"
+  #     flags: ["interval"]          # "interval" lets you use CIDRs in the set
+  #     elements: ["198.51.100.0/24", "203.0.113.50"]
+  #   - name: "admin_hosts"
+  #     type: "ipv4_addr"
+  #     elements: ["192.168.0.5", "192.168.0.6"]
+
+  # ── Quotas ────────────────────────────────────────────────────────────────
+  # Named quotas track byte consumption and can be referenced from rules.
+  # "over" inverts the match — rule matches only after the quota is exceeded.
+  #
+  # quotas:
+  #   - name: "daily_cap"
+  #     amount: 10
+  #     unit: "gbytes"
+  #     comment: "10 GB daily cap — match traffic that has exceeded it"
+  #   - name: "burst_limit"
+  #     amount: 100
+  #     unit: "mbytes"
+  #     over: true          # match only after 100 MB is consumed
+  #     comment: "Rate-limit heavy flows after initial burst"
+
+  # ── Extra filter rules ────────────────────────────────────────────────────
+  # Verbatim rule objects appended after the built-in scenario rules.
+  # All rule fields are supported — see plugins/firewall/CLAUDE.md for the
+  # full field reference.
+  #
+  # rules:
+  #
+  #   # Block a named set of IPs (created above)
+  #   - name: "block-bad-ips"
+  #     chain: "input"
+  #     action: "deny"
+  #     src_address_set: "@blocked_ips"
+  #     priority: 5
+  #
+  #   # Restrict SSH to admin hosts only
+  #   - name: "allow-ssh-admin"
+  #     chain: "input"
+  #     action: "accept"
+  #     protocol: "tcp"
+  #     src_address_set: "@admin_hosts"
+  #     dst_port: 22
+  #     priority: 29
+  #
+  #   # Rate-limit new inbound connections (SYN flood protection)
+  #   - name: "rate-limit-new"
+  #     chain: "input"
+  #     action: "deny"
+  #     ct_state: ["new"]
+  #     rate_limit: {rate: 100, unit: "second", over: true}
+  #     comment: "Drop new connections exceeding 100/s"
+  #     priority: 15
+  #
+  #   # Drop invalid conntrack entries and log them
+  #   - name: "drop-invalid"
+  #     chain: "input"
+  #     action: "deny"
+  #     ct_state: ["invalid"]
+  #     log: {prefix: "INVALID: ", level: "warn"}
+  #     priority: 8
+  #
+  #   # Allow ICMPv6
+  #   - name: "allow-icmpv6"
+  #     chain: "input"
+  #     action: "accept"
+  #     protocol: "icmpv6"
+  #     priority: 11
+  #
+  #   # Traffic that exceeds a quota gets dropped
+  #   - name: "cap-heavy-traffic"
+  #     chain: "input"
+  #     action: "deny"
+  #     quota_name: "daily_cap"
+  #     priority: 6
+  #
+  #   # Mark management traffic for QoS (meta mark)
+  #   - name: "mark-mgmt"
+  #     chain: "input"
+  #     action: "accept"
+  #     protocol: "tcp"
+  #     dst_port_range: [8000, 8099]
+  #     mark: 10
+  #     priority: 25
+  #
+  #   # Drop multicast packets on ingress
+  #   - name: "drop-multicast"
+  #     chain: "input"
+  #     action: "deny"
+  #     pkttype: "multicast"
+  #     priority: 7
+
+  # ── Ingress rules ─────────────────────────────────────────────────────────
+  # Applied at the netdev hook (per physical interface) before routing.
+  # Use for early-drop — these run before the filter table and cannot be
+  # bypassed by conntrack.  Requires knowing the interface name.
+  #
+  # ingress:
+  #   - name: "drop-invalid-ingress"
+  #     device: "eth0"
+  #     action: "deny"
+  #     ct_state: ["invalid"]
+  #     priority: 10
+  #   - name: "syn-flood-protect"
+  #     device: "eth0"
+  #     protocol: "tcp"
+  #     tcp_flags: ["syn"]
+  #     action: "deny"
+  #     rate_limit: {rate: 200, unit: "second", over: true}
+  #     comment: "SYN flood protection"
+  #     priority: 20
+  #   - name: "drop-spoofed-src"
+  #     device: "eth0"
+  #     action: "deny"
+  #     src_address: "127.0.0.0/8"    # loopback source from WAN is invalid
+  #     priority: 5

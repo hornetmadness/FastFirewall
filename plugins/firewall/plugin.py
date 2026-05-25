@@ -18,208 +18,56 @@ Events consumed:
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 import os
 import subprocess
-from typing import Annotated, Any, Literal, Optional, Union
+import sys
+from pathlib import Path
+
+# make the plugin-local _nft subpackage importable regardless of how this
+# module was loaded (PluginLoader uses spec_from_file_location, not packages)
+_plugin_dir = str(Path(__file__).parent)
+if _plugin_dir not in sys.path:
+    sys.path.insert(0, _plugin_dir)
+
+from _nft.compiler import (  # noqa: E402
+    _addr_family,
+    _compile_to_script,
+    _port_set,
+    _resolve_port_value,
+    _rule_to_nft_expr,
+)
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field, field_validator
 
-from plugin_system.core import ApiRouterPlugin, PluginBase, PluginStateFile, Service, on
+from models import (  # noqa: E402
+    ChainConfig,
+    ChainUpdate,
+    CompileRequest,
+    CompileResult,
+    CustomChain,
+    FirewallQuota,
+    FirewallRule,
+    FirewallSet,
+    Flowtable,
+    IngressRule,
+    IngressRuleCreate,
+    IngressRuleUpdate,
+    NatRule,
+    NatRuleCreate,
+    NatRuleUpdate,
+    RuleCreate,
+    RuleUpdate,
+    SetCreate,
+    SetElementsBody,
+    VerdictMap,
+    VerdictMapEntryBody,
+    VerdictMapKeyBody,
+)
+
+from plugin_system.core import ApiRouterPlugin, PluginBase, PluginStateFile, Service
 from plugin_system.core.events import Event, bus
-from plugin_system.core.macros import is_macro, macro_registry, validate_macro_syntax
-
-
-# ── Pydantic models ────────────────────────────────────────────────────────────
-
-def _validate_port_field(v: object) -> object:
-    if isinstance(v, str):
-        validate_macro_syntax(v)
-    return v
-
-
-class FirewallRule(BaseModel):
-    id: str = Field(default_factory=lambda: hashlib.sha256(os.urandom(16)).hexdigest()[:16])
-    name: str = Field(max_length=100)
-    chain: Literal["input", "forward", "output"] = "input"
-    action: Literal["accept", "deny", "reject"] = "deny"
-    protocol: Optional[Literal["tcp", "udp", "icmp", "icmpv6", "esp", "ah", "any"]] = None
-    src_address: str = Field(default="any", max_length=43)
-    dst_address: str = Field(default="any", max_length=43)
-    src_port: Optional[Union[int, str]] = None
-    dst_port: Optional[Union[int, str]] = None
-    comment: Optional[str] = Field(default=None, max_length=255)
-    priority: int = 100
-    enabled: bool = True
-
-    @field_validator("src_port", "dst_port", mode="before")
-    @classmethod
-    def validate_port(cls, v: object) -> object:
-        return _validate_port_field(v)
-
-
-class RuleCreate(BaseModel):
-    name: str = Field(max_length=100)
-    chain: Literal["input", "forward", "output"] = "input"
-    action: Literal["accept", "deny", "reject"] = "deny"
-    protocol: Optional[Literal["tcp", "udp", "icmp", "icmpv6", "esp", "ah", "any"]] = None
-    src_address: str = Field(default="any", max_length=43)
-    dst_address: str = Field(default="any", max_length=43)
-    src_port: Optional[Union[int, str]] = None
-    dst_port: Optional[Union[int, str]] = None
-    comment: Optional[str] = Field(default=None, max_length=255)
-    priority: int = 100
-    enabled: bool = True
-
-    @field_validator("src_port", "dst_port", mode="before")
-    @classmethod
-    def validate_port(cls, v: object) -> object:
-        return _validate_port_field(v)
-
-
-class RuleUpdate(BaseModel):
-    name: Optional[str] = Field(default=None, max_length=100)
-    chain: Optional[Literal["input", "forward", "output"]] = None
-    action: Optional[Literal["accept", "deny", "reject"]] = None
-    protocol: Optional[Literal["tcp", "udp", "icmp", "icmpv6", "esp", "ah", "any"]] = None
-    src_address: Optional[str] = Field(default=None, max_length=43)
-    dst_address: Optional[str] = Field(default=None, max_length=43)
-    src_port: Optional[Union[int, str]] = None
-    dst_port: Optional[Union[int, str]] = None
-    comment: Optional[str] = Field(default=None, max_length=255)
-    priority: Optional[int] = None
-    enabled: Optional[bool] = None
-
-    @field_validator("src_port", "dst_port", mode="before")
-    @classmethod
-    def validate_port(cls, v: object) -> object:
-        return _validate_port_field(v)
-
-
-class ChainConfig(BaseModel):
-    policy: Literal["accept", "drop"] = "drop"
-    priority: int = 0
-    preamble: list[str] = []
-
-
-class ChainUpdate(BaseModel):
-    policy: Optional[Literal["accept", "drop"]] = None
-    priority: Optional[int] = None
-    preamble: Optional[list[Annotated[str, Field(max_length=512)]]] = None
-
-
-class CompileRequest(BaseModel):
-    filter_name: str = Field(default="fastfirewall", max_length=64)
-
-
-class CompileResult(BaseModel):
-    filter_name: str
-    output: list[str]
-    rule_count: int
-
-
-# ── nftables script helpers ────────────────────────────────────────────────────
-
-def _addr_family(addr: str) -> str:
-    """Return 'ip' for IPv4 addresses/CIDRs, 'ip6' for IPv6."""
-    try:
-        return "ip" if ipaddress.ip_network(addr, strict=False).version == 4 else "ip6"
-    except ValueError:
-        return "ip"
-
-
-def _resolve_port_value(value: int | str, rule_name: str, logger: Any) -> list[int] | None:
-    """Return resolved port list, or None if an unresolvable macro should cause the rule to be skipped."""
-    if isinstance(value, int):
-        return [value]
-    ports = macro_registry.resolve_ports(value)
-    if not ports and is_macro(value):
-        logger.warning(
-            "Skipping rule %r: macro %r resolved to no ports (plugin not loaded?)",
-            rule_name, value,
-        )
-        return None
-    return ports or []
-
-
-def _port_set(ports: list[int]) -> str:
-    if len(ports) == 1:
-        return str(ports[0])
-    return "{ " + ", ".join(str(p) for p in sorted(ports)) + " }"
-
-
-def _rule_to_nft_expr(rule: FirewallRule, logger: Any) -> str | None:
-    """Convert a FirewallRule to an nft match-action expression, or None to skip the rule."""
-    parts: list[str] = []
-    if rule.src_address and rule.src_address != "any":
-        fam = _addr_family(rule.src_address)
-        parts.append(f"{fam} saddr {rule.src_address}")
-    if rule.dst_address and rule.dst_address != "any":
-        fam = _addr_family(rule.dst_address)
-        parts.append(f"{fam} daddr {rule.dst_address}")
-    proto = rule.protocol
-    if proto and proto != "any":
-        if proto in ("tcp", "udp"):
-            if rule.src_port is not None:
-                ports = _resolve_port_value(rule.src_port, rule.name, logger)
-                if ports is None:
-                    return None
-                parts.append(f"{proto} sport {_port_set(ports)}")
-            if rule.dst_port is not None:
-                ports = _resolve_port_value(rule.dst_port, rule.name, logger)
-                if ports is None:
-                    return None
-                parts.append(f"{proto} dport {_port_set(ports)}")
-        elif proto in ("icmp", "icmpv6", "esp", "ah"):
-            nft_name = "ipv6-icmp" if proto == "icmpv6" else proto
-            parts.append(f"meta l4proto {nft_name}")
-    if rule.action == "accept":
-        parts.append("accept")
-    elif rule.action == "reject":
-        parts.append("reject")
-    else:
-        parts.append("drop")
-    return " ".join(parts)
-
-
-def _compile_to_script(
-    rules: list[FirewallRule],
-    filter_name: str,
-    chains: dict[str, ChainConfig],
-    logger: Any,
-) -> str:
-    """Generate a complete nftables script from enabled rules and chain configs."""
-    lines = [
-        "# FastFirewall managed ruleset — do not edit manually",
-        f"add table inet {filter_name}",
-        f"flush table inet {filter_name}",
-    ]
-    for chain_name, cfg in chains.items():
-        lines.append(
-            f"add chain inet {filter_name} {chain_name} "
-            f"{{ type filter hook {chain_name} priority {cfg.priority}; policy {cfg.policy}; }}"
-        )
-    for chain_name, cfg in chains.items():
-        for expr in cfg.preamble:
-            lines.append(f"add rule inet {filter_name} {chain_name} {expr}")
-    seen_exprs: set[str] = set()
-    for rule in sorted(rules, key=lambda r: r.priority):
-        if rule.chain not in chains:
-            logger.warning("Skipping rule %r: chain %r not defined", rule.name, rule.chain)
-            continue
-        expr = _rule_to_nft_expr(rule, logger)
-        if expr is None:
-            continue
-        dedup_key = f"{rule.chain}:{expr}"
-        if dedup_key in seen_exprs:
-            logger.warning("Skipping duplicate rule %r: identical nft expression already emitted", rule.name)
-            continue
-        seen_exprs.add(dedup_key)
-        label = json.dumps(rule.comment or rule.name)
-        lines.append(f"add rule inet {filter_name} {rule.chain} {expr} comment {label}")
-    return "\n".join(lines)
+from plugin_system.core.macros import macro_registry
 
 
 def _rule_hash(data: dict) -> str:
@@ -227,7 +75,7 @@ def _rule_hash(data: dict) -> str:
 
 
 _DEFAULT_CHAINS: dict[str, dict] = {
-    "input":   {"policy": "drop",   "priority": 0, "preamble": ["iif lo accept", "ct state established,related accept"]},
+    "input":   {"policy": "drop",   "priority": 0, "preamble": ["iif lo accept", "ct state established,related accept", "ct state invalid drop"]},
     "forward": {"policy": "drop",   "priority": 0, "preamble": ["ct state established,related accept"]},
     "output":  {"policy": "accept", "priority": 0, "preamble": []},
 }
@@ -272,6 +120,14 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         self._chains: dict[str, ChainConfig] = {
             name: ChainConfig(**cfg) for name, cfg in _DEFAULT_CHAINS.items()
         }
+        self._sets: dict[str, FirewallSet] = {}
+        self._nat_rules: dict[str, NatRule] = {}
+        self._flowtables: dict[str, Flowtable] = {}
+        self._custom_chains: dict[str, CustomChain] = {}
+        self._ingress_rules: dict[str, IngressRule] = {}
+        self._ingress_table = self.config.get("ingress_table", "ff_ingress")
+        self._verdict_maps: dict[str, VerdictMap] = {}
+        self._quotas: dict[str, FirewallQuota] = {}
         self._load_state()
         if not self.config.get("ignore_state_on_boot", False):
             self._apply_state()
@@ -288,6 +144,13 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         return {
             "rules": [r.model_dump() for r in self._rules.values()],
             "chains": {name: cfg.model_dump() for name, cfg in self._chains.items()},
+            "sets": {name: s.model_dump() for name, s in self._sets.items()},
+            "nat_rules": [r.model_dump() for r in self._nat_rules.values()],
+            "flowtables": {name: ft.model_dump() for name, ft in self._flowtables.items()},
+            "custom_chains": {name: cc.model_dump() for name, cc in self._custom_chains.items()},
+            "ingress_rules": [r.model_dump() for r in self._ingress_rules.values()],
+            "verdict_maps": {name: vm.model_dump() for name, vm in self._verdict_maps.items()},
+            "quotas": {name: q.model_dump() for name, q in self._quotas.items()},
         }
 
     def _save_state(self) -> None:
@@ -295,7 +158,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     def _load_state(self) -> None:
         fresh_install = not self._state_file.path.exists()
-        default: dict = {"rules": [], "chains": _DEFAULT_CHAINS}
+        default: dict = {"rules": [], "chains": _DEFAULT_CHAINS, "sets": {}, "nat_rules": [], "flowtables": {}, "custom_chains": {}, "ingress_rules": [], "verdict_maps": {}, "quotas": {}}
         raw = self._state_file.load_desired(default=default)
         try:
             self._rules = {r["id"]: FirewallRule(**r) for r in raw.get("rules", [])}
@@ -307,6 +170,41 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         except Exception:
             self.logger.error("Failed to parse chain config, using defaults", exc_info=True)
             self._chains = {name: ChainConfig(**cfg) for name, cfg in _DEFAULT_CHAINS.items()}
+        try:
+            self._sets = {name: FirewallSet(**s) for name, s in raw.get("sets", {}).items()}
+        except Exception:
+            self.logger.error("Failed to parse sets, starting empty", exc_info=True)
+            self._sets = {}
+        try:
+            self._nat_rules = {r["id"]: NatRule(**r) for r in raw.get("nat_rules", [])}
+        except Exception:
+            self.logger.error("Failed to parse NAT rules, starting empty", exc_info=True)
+            self._nat_rules = {}
+        try:
+            self._flowtables = {name: Flowtable(**ft) for name, ft in raw.get("flowtables", {}).items()}
+        except Exception:
+            self.logger.error("Failed to parse flowtables, starting empty", exc_info=True)
+            self._flowtables = {}
+        try:
+            self._custom_chains = {name: CustomChain(**cc) for name, cc in raw.get("custom_chains", {}).items()}
+        except Exception:
+            self.logger.error("Failed to parse custom chains, starting empty", exc_info=True)
+            self._custom_chains = {}
+        try:
+            self._ingress_rules = {r["id"]: IngressRule(**r) for r in raw.get("ingress_rules", [])}
+        except Exception:
+            self.logger.error("Failed to parse ingress rules, starting empty", exc_info=True)
+            self._ingress_rules = {}
+        try:
+            self._verdict_maps = {name: VerdictMap(**vm) for name, vm in raw.get("verdict_maps", {}).items()}
+        except Exception:
+            self.logger.error("Failed to parse verdict maps, starting empty", exc_info=True)
+            self._verdict_maps = {}
+        try:
+            self._quotas = {name: FirewallQuota(**q) for name, q in raw.get("quotas", {}).items()}
+        except Exception:
+            self.logger.error("Failed to parse quotas, starting empty", exc_info=True)
+            self._quotas = {}
         if fresh_install:
             for rule_create in _DEFAULT_RULES:
                 rule_data = rule_create.model_dump()
@@ -318,12 +216,21 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     def _apply_state(self) -> None:
         enabled = [r for r in self._rules.values() if r.enabled]
-        if not enabled:
+        if not enabled and not self._nat_rules and not self._flowtables and not self._ingress_rules and not self._verdict_maps and not self._quotas:
             return
         try:
-            script = _compile_to_script(enabled, self._default_filter, self._chains, self.logger)
+            script = _compile_to_script(
+                enabled, self._default_filter, self._chains, self.logger,
+                sets=self._sets, nat_rules=list(self._nat_rules.values()),
+                flowtables=list(self._flowtables.values()),
+                custom_chains=self._custom_chains,
+                ingress_rules=list(self._ingress_rules.values()),
+                ingress_table=self._ingress_table,
+                verdict_maps=self._verdict_maps,
+                quotas=self._quotas,
+            )
             self._apply_nft_script(script)
-            self._state_file.commit()
+            self._state_file.commit(self._desired_snapshot())
             self.logger.info("Re-applied %d rules on boot", len(enabled))
         except Exception as exc:
             self.logger.warning("Could not re-apply rules on boot: %s", exc)
@@ -354,20 +261,80 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     def _register_routes(self) -> None:
         add = self.router.add_api_route
-        add("/rules",                self._list_rules,    methods=["GET"],    summary="List firewall rules")
-        add("/rules",                self._create_rule,   methods=["POST"],   summary="Create a firewall rule", status_code=201)
-        add("/rules/{rule_id}",      self._get_rule,      methods=["GET"],    summary="Get a firewall rule")
-        add("/rules/{rule_id}",      self._update_rule,   methods=["PUT"],    summary="Update a firewall rule")
-        add("/rules/{rule_id}",      self._delete_rule,   methods=["DELETE"], summary="Delete a firewall rule")
-        add("/chains",               self._list_chains,   methods=["GET"],    summary="List chains and their policies")
-        add("/chains/{chain_name}",  self._get_chain,     methods=["GET"],    summary="Get a chain")
-        add("/chains/{chain_name}",  self._update_chain,  methods=["PUT"],    summary="Update chain policy or priority")
-        add("/table",                self._get_table,     methods=["GET"],    summary="Show current table configuration")
-        add("/check",                self._check,         methods=["POST"],   summary="Dry-run validate (no apply)")
-        add("/apply",                self._apply,         methods=["POST"],   summary="Compile and apply rules to nftables")
-        add("/compile",              self._compile,       methods=["POST"],   summary="Compile rules to nft script (preview only)")
-        add("/discard",              self._discard,       methods=["POST"],   summary="Revert pending changes to last applied state")
-        add("/status",               self._status,        methods=["GET"],    summary="Plugin status")
+        _w = "https://wiki.nftables.org/wiki-nftables/index.php"
+        # filter rules
+        _d = f"[nftables rule management]({_w}/Simple_rule_management)"
+        add("/rules",                       self._list_rules,          methods=["GET"],    summary="List firewall rules",            description=_d)
+        add("/rules",                       self._create_rule,         methods=["POST"],   summary="Create a firewall rule",         description=_d, status_code=201)
+        add("/rules/{rule_id}",             self._get_rule,            methods=["GET"],    summary="Get a firewall rule",            description=_d)
+        add("/rules/{rule_id}",             self._update_rule,         methods=["PUT"],    summary="Update a firewall rule",         description=_d)
+        add("/rules/{rule_id}",             self._delete_rule,         methods=["DELETE"], summary="Delete a firewall rule",         description=_d)
+        # chains
+        _d = f"[nftables chain configuration]({_w}/Configuring_chains)"
+        add("/chains",                      self._list_chains,         methods=["GET"],    summary="List chains and their policies", description=_d)
+        add("/chains/{chain_name}",         self._get_chain,           methods=["GET"],    summary="Get a chain",                    description=_d)
+        add("/chains/{chain_name}",         self._update_chain,        methods=["PUT"],    summary="Update chain policy or priority",description=_d)
+        # named sets (§3)
+        _d = f"[nftables sets]({_w}/Sets)"
+        add("/sets",                        self._list_sets,           methods=["GET"],    summary="List named sets",                description=_d)
+        add("/sets",                        self._create_set,          methods=["POST"],   summary="Create a named set",             description=_d, status_code=201)
+        add("/sets/{set_name}",             self._get_set,             methods=["GET"],    summary="Get a named set",                description=_d)
+        add("/sets/{set_name}",             self._delete_set,          methods=["DELETE"], summary="Delete a named set",             description=_d)
+        add("/sets/{set_name}/elements",    self._add_set_elements,    methods=["POST"],   summary="Add elements to a set",          description=_d)
+        add("/sets/{set_name}/elements",    self._remove_set_elements, methods=["DELETE"], summary="Remove elements from a set",     description=_d)
+        # custom chains (§10)
+        _d = f"[nftables chain configuration]({_w}/Configuring_chains)"
+        add("/custom-chains",               self._list_custom_chains,  methods=["GET"],    summary="List custom chains",             description=_d)
+        add("/custom-chains",               self._create_custom_chain, methods=["POST"],   summary="Create a custom chain",          description=_d, status_code=201)
+        add("/custom-chains/{cc_name}",     self._get_custom_chain,    methods=["GET"],    summary="Get a custom chain",             description=_d)
+        add("/custom-chains/{cc_name}",     self._delete_custom_chain, methods=["DELETE"], summary="Delete a custom chain",          description=_d)
+        # flowtables (§7)
+        _d = f"[nftables flowtables]({_w}/Flowtables)"
+        add("/flowtables",                  self._list_flowtables,     methods=["GET"],    summary="List flowtables",                description=_d)
+        add("/flowtables",                  self._create_flowtable,    methods=["POST"],   summary="Create a flowtable",             description=_d, status_code=201)
+        add("/flowtables/{ft_name}",        self._get_flowtable,       methods=["GET"],    summary="Get a flowtable",                description=_d)
+        add("/flowtables/{ft_name}",        self._delete_flowtable,    methods=["DELETE"], summary="Delete a flowtable",             description=_d)
+        # NAT rules (§4)
+        _d = f"[nftables NAT]({_w}/Performing_Network_Address_Translation_(NAT))"
+        add("/nat/rules",                   self._list_nat_rules,      methods=["GET"],    summary="List NAT rules",                 description=_d)
+        add("/nat/rules",                   self._create_nat_rule,     methods=["POST"],   summary="Create a NAT rule",              description=_d, status_code=201)
+        add("/nat/rules/{rule_id}",         self._get_nat_rule,        methods=["GET"],    summary="Get a NAT rule",                 description=_d)
+        add("/nat/rules/{rule_id}",         self._update_nat_rule,     methods=["PUT"],    summary="Update a NAT rule",              description=_d)
+        add("/nat/rules/{rule_id}",         self._delete_nat_rule,     methods=["DELETE"], summary="Delete a NAT rule",              description=_d)
+        # ingress rules (§11) — netdev family, per-device early drop
+        _d = f"[nftables netdev / ingress]({_w}/Nftables_families#netdev)"
+        add("/ingress/rules",               self._list_ingress_rules,  methods=["GET"],    summary="List ingress rules",             description=_d)
+        add("/ingress/rules",               self._create_ingress_rule, methods=["POST"],   summary="Create an ingress rule",         description=_d, status_code=201)
+        add("/ingress/rules/{rule_id}",     self._get_ingress_rule,    methods=["GET"],    summary="Get an ingress rule",            description=_d)
+        add("/ingress/rules/{rule_id}",     self._update_ingress_rule, methods=["PUT"],    summary="Update an ingress rule",         description=_d)
+        add("/ingress/rules/{rule_id}",     self._delete_ingress_rule, methods=["DELETE"], summary="Delete an ingress rule",         description=_d)
+        # quotas (§8)
+        _d = f"[nftables quotas]({_w}/Matching_packet_rate_limiting#Quotas)"
+        add("/quotas",                      self._list_quotas,         methods=["GET"],    summary="List named quotas",              description=_d)
+        add("/quotas",                      self._create_quota,        methods=["POST"],   summary="Create a named quota",           description=_d, status_code=201)
+        add("/quotas/{quota_name}",         self._get_quota,           methods=["GET"],    summary="Get a named quota",              description=_d)
+        add("/quotas/{quota_name}",         self._delete_quota,        methods=["DELETE"], summary="Delete a named quota",           description=_d)
+        # verdict maps (§12)
+        _d = f"[nftables verdict maps]({_w}/Verdict_Maps_(vmaps))"
+        add("/maps",                        self._list_verdict_maps,          methods=["GET"],    summary="List verdict maps",                    description=_d)
+        add("/maps",                        self._create_verdict_map,         methods=["POST"],   summary="Create a verdict map",                 description=_d, status_code=201)
+        add("/maps/{map_name}",             self._get_verdict_map,            methods=["GET"],    summary="Get a verdict map",                    description=_d)
+        add("/maps/{map_name}",             self._delete_verdict_map,         methods=["DELETE"], summary="Delete a verdict map",                 description=_d)
+        add("/maps/{map_name}/entries",     self._add_verdict_map_entries,    methods=["POST"],   summary="Add entries to a verdict map",         description=_d)
+        add("/maps/{map_name}/entries",     self._remove_verdict_map_entries, methods=["DELETE"], summary="Remove entries from a verdict map by key", description=_d)
+        # counters (§8) — read-only live-state views
+        _d = f"[nftables counters]({_w}/Counters)"
+        add("/counters",                      self._list_counters, methods=["GET"],  summary="Live counter values from kernel",  description=_d)
+        add("/counters/{counter_name}/reset", self._reset_counter, methods=["POST"], summary="Atomically reset a named counter", description=_d)
+        # table / apply / compile / status
+        _d = f"[nftables operations at ruleset level]({_w}/Operations_at_ruleset_level)"
+        add("/table",      self._get_table, methods=["GET"],  summary="Show current table configuration",          description=_d)
+        add("/check",      self._check,     methods=["POST"], summary="Dry-run validate (no apply)",               description=_d)
+        add("/apply",      self._apply,     methods=["POST"], summary="Compile and apply rules to nftables",       description=_d)
+        add("/compile",    self._compile,   methods=["POST"], summary="Compile rules to nft script (preview only)",description=_d)
+        add("/discard",    self._discard,   methods=["POST"], summary="Revert pending changes to last applied state")
+        add("/live-state", self._live_state,methods=["GET"],  summary="Live kernel ruleset (nft -j list table)",   description=_d)
+        add("/status",     self._status,    methods=["GET"],  summary="Plugin status")
 
     # ── rule CRUD ──────────────────────────────────────────────────────
 
@@ -436,6 +403,329 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         ))
         return {"deleted": True, "rule_id": rule_id}
 
+    # ── named set CRUD (§3) ────────────────────────────────────────────
+
+    def _list_sets(self) -> dict:
+        return {"sets": [s.model_dump() for s in self._sets.values()], "count": len(self._sets)}
+
+    def _create_set(self, body: SetCreate) -> dict:
+        if body.name in self._sets:
+            raise HTTPException(409, f"Set {body.name!r} already exists")
+        fw_set = FirewallSet(**body.model_dump())
+        self._sets[fw_set.name] = fw_set
+        self._save_state()
+        return fw_set.model_dump()
+
+    def _get_set(self, set_name: str) -> dict:
+        fw_set = self._sets.get(set_name)
+        if not fw_set:
+            raise HTTPException(404, f"Set {set_name!r} not found")
+        return fw_set.model_dump()
+
+    def _delete_set(self, set_name: str) -> dict:
+        if set_name not in self._sets:
+            raise HTTPException(404, f"Set {set_name!r} not found")
+        self._sets.pop(set_name)
+        self._save_state()
+        return {"deleted": True, "name": set_name}
+
+    def _add_set_elements(self, set_name: str, body: SetElementsBody) -> dict:
+        fw_set = self._sets.get(set_name)
+        if not fw_set:
+            raise HTTPException(404, f"Set {set_name!r} not found")
+        existing = set(fw_set.elements)
+        merged = fw_set.elements + [e for e in body.elements if e not in existing]
+        self._sets[set_name] = fw_set.model_copy(update={"elements": merged})
+        self._save_state()
+        return self._sets[set_name].model_dump()
+
+    def _remove_set_elements(self, set_name: str, body: SetElementsBody) -> dict:
+        fw_set = self._sets.get(set_name)
+        if not fw_set:
+            raise HTTPException(404, f"Set {set_name!r} not found")
+        remove = set(body.elements)
+        kept = [e for e in fw_set.elements if e not in remove]
+        self._sets[set_name] = fw_set.model_copy(update={"elements": kept})
+        self._save_state()
+        return self._sets[set_name].model_dump()
+
+    # ── custom chain CRUD (§10) ───────────────────────────────────────
+
+    def _list_custom_chains(self) -> dict:
+        return {"custom_chains": [cc.model_dump() for cc in self._custom_chains.values()], "count": len(self._custom_chains)}
+
+    def _create_custom_chain(self, body: CustomChain) -> dict:
+        if body.name in self._custom_chains:
+            raise HTTPException(409, f"Custom chain {body.name!r} already exists")
+        if body.name in self._chains:
+            raise HTTPException(409, f"A hook chain named {body.name!r} already exists")
+        self._custom_chains[body.name] = body
+        self._save_state()
+        return body.model_dump()
+
+    def _get_custom_chain(self, cc_name: str) -> dict:
+        cc = self._custom_chains.get(cc_name)
+        if not cc:
+            raise HTTPException(404, f"Custom chain {cc_name!r} not found")
+        return cc.model_dump()
+
+    def _delete_custom_chain(self, cc_name: str) -> dict:
+        if cc_name not in self._custom_chains:
+            raise HTTPException(404, f"Custom chain {cc_name!r} not found")
+        self._custom_chains.pop(cc_name)
+        self._save_state()
+        return {"deleted": True, "name": cc_name}
+
+    # ── flowtable CRUD (§7) ───────────────────────────────────────────
+
+    def _list_flowtables(self) -> dict:
+        return {"flowtables": [ft.model_dump() for ft in self._flowtables.values()], "count": len(self._flowtables)}
+
+    def _create_flowtable(self, body: Flowtable) -> dict:
+        if body.name in self._flowtables:
+            raise HTTPException(409, f"Flowtable {body.name!r} already exists")
+        self._flowtables[body.name] = body
+        self._save_state()
+        return body.model_dump()
+
+    def _get_flowtable(self, ft_name: str) -> dict:
+        ft = self._flowtables.get(ft_name)
+        if not ft:
+            raise HTTPException(404, f"Flowtable {ft_name!r} not found")
+        return ft.model_dump()
+
+    def _delete_flowtable(self, ft_name: str) -> dict:
+        if ft_name not in self._flowtables:
+            raise HTTPException(404, f"Flowtable {ft_name!r} not found")
+        self._flowtables.pop(ft_name)
+        self._save_state()
+        return {"deleted": True, "name": ft_name}
+
+    # ── NAT rule CRUD (§4) ─────────────────────────────────────────────
+
+    def _snapshot_nat_map(self) -> dict[str, dict]:
+        snapshot = self._state_file.current_snapshot
+        if snapshot is None:
+            return {}
+        return {r["id"]: r for r in snapshot.get("nat_rules", [])}
+
+    def _list_nat_rules(self) -> dict:
+        rules = sorted(self._nat_rules.values(), key=lambda r: r.priority)
+        snap = self._snapshot_nat_map()
+        return {
+            "nat_rules": [{**r.model_dump(), "applied": snap.get(r.id) == r.model_dump()} for r in rules],
+            "count": len(rules),
+        }
+
+    def _create_nat_rule(self, body: NatRuleCreate) -> dict:
+        rule_id = _rule_hash(body.model_dump())
+        if rule_id in self._nat_rules:
+            raise HTTPException(409, f"An identical NAT rule already exists (id={rule_id!r})")
+        rule = NatRule(id=rule_id, **body.model_dump())
+        self._nat_rules[rule.id] = rule
+        self._save_state()
+        snap = self._snapshot_nat_map()
+        return {**rule.model_dump(), "applied": snap.get(rule.id) == rule.model_dump()}
+
+    def _get_nat_rule(self, rule_id: str) -> dict:
+        rule = self._nat_rules.get(rule_id)
+        if not rule:
+            raise HTTPException(404, f"NAT rule {rule_id!r} not found")
+        snap = self._snapshot_nat_map()
+        return {**rule.model_dump(), "applied": snap.get(rule.id) == rule.model_dump()}
+
+    def _update_nat_rule(self, rule_id: str, body: NatRuleUpdate) -> dict:
+        rule = self._nat_rules.get(rule_id)
+        if not rule:
+            raise HTTPException(404, f"NAT rule {rule_id!r} not found")
+        updates = body.model_dump(exclude_unset=True)
+        updated = rule.model_copy(update=updates)
+        self._nat_rules[rule_id] = updated
+        self._save_state()
+        snap = self._snapshot_nat_map()
+        return {**updated.model_dump(), "applied": snap.get(updated.id) == updated.model_dump()}
+
+    def _delete_nat_rule(self, rule_id: str) -> dict:
+        if rule_id not in self._nat_rules:
+            raise HTTPException(404, f"NAT rule {rule_id!r} not found")
+        self._nat_rules.pop(rule_id)
+        self._save_state()
+        return {"deleted": True, "rule_id": rule_id}
+
+    # ── ingress rule CRUD (§11) ───────────────────────────────────────
+
+    def _snapshot_ingress_map(self) -> dict[str, dict]:
+        snapshot = self._state_file.current_snapshot
+        if snapshot is None:
+            return {}
+        return {r["id"]: r for r in snapshot.get("ingress_rules", [])}
+
+    def _list_ingress_rules(self, enabled_only: bool = False) -> dict:
+        rules = sorted(self._ingress_rules.values(), key=lambda r: r.priority)
+        if enabled_only:
+            rules = [r for r in rules if r.enabled]
+        snap = self._snapshot_ingress_map()
+        return {
+            "ingress_rules": [{**r.model_dump(), "applied": snap.get(r.id) == r.model_dump()} for r in rules],
+            "count": len(rules),
+        }
+
+    def _create_ingress_rule(self, body: IngressRuleCreate) -> dict:
+        rule_id = _rule_hash(body.model_dump())
+        if rule_id in self._ingress_rules:
+            raise HTTPException(409, f"An identical ingress rule already exists (id={rule_id!r})")
+        rule = IngressRule(id=rule_id, **body.model_dump())
+        self._ingress_rules[rule.id] = rule
+        self._save_state()
+        snap = self._snapshot_ingress_map()
+        return {**rule.model_dump(), "applied": snap.get(rule.id) == rule.model_dump()}
+
+    def _get_ingress_rule(self, rule_id: str) -> dict:
+        rule = self._ingress_rules.get(rule_id)
+        if not rule:
+            raise HTTPException(404, f"Ingress rule {rule_id!r} not found")
+        snap = self._snapshot_ingress_map()
+        return {**rule.model_dump(), "applied": snap.get(rule.id) == rule.model_dump()}
+
+    def _update_ingress_rule(self, rule_id: str, body: IngressRuleUpdate) -> dict:
+        rule = self._ingress_rules.get(rule_id)
+        if not rule:
+            raise HTTPException(404, f"Ingress rule {rule_id!r} not found")
+        updates = body.model_dump(exclude_unset=True)
+        updated = rule.model_copy(update=updates)
+        self._ingress_rules[rule_id] = updated
+        self._save_state()
+        snap = self._snapshot_ingress_map()
+        return {**updated.model_dump(), "applied": snap.get(updated.id) == updated.model_dump()}
+
+    def _delete_ingress_rule(self, rule_id: str) -> dict:
+        if rule_id not in self._ingress_rules:
+            raise HTTPException(404, f"Ingress rule {rule_id!r} not found")
+        self._ingress_rules.pop(rule_id)
+        self._save_state()
+        return {"deleted": True, "rule_id": rule_id}
+
+    # ── quota CRUD (§8) ──────────────────────────────────────────────
+
+    def _list_quotas(self) -> dict:
+        return {"quotas": [q.model_dump() for q in self._quotas.values()], "count": len(self._quotas)}
+
+    def _create_quota(self, body: FirewallQuota) -> dict:
+        if body.name in self._quotas:
+            raise HTTPException(409, f"Quota {body.name!r} already exists")
+        self._quotas[body.name] = body
+        self._save_state()
+        return body.model_dump()
+
+    def _get_quota(self, quota_name: str) -> dict:
+        quota = self._quotas.get(quota_name)
+        if not quota:
+            raise HTTPException(404, f"Quota {quota_name!r} not found")
+        return quota.model_dump()
+
+    def _delete_quota(self, quota_name: str) -> dict:
+        if quota_name not in self._quotas:
+            raise HTTPException(404, f"Quota {quota_name!r} not found")
+        self._quotas.pop(quota_name)
+        self._save_state()
+        return {"deleted": True, "name": quota_name}
+
+    # ── verdict map CRUD (§12) ────────────────────────────────────────
+
+    def _list_verdict_maps(self) -> dict:
+        return {"verdict_maps": [vm.model_dump() for vm in self._verdict_maps.values()], "count": len(self._verdict_maps)}
+
+    def _create_verdict_map(self, body: VerdictMap) -> dict:
+        if body.name in self._verdict_maps:
+            raise HTTPException(409, f"Verdict map {body.name!r} already exists")
+        self._verdict_maps[body.name] = body
+        self._save_state()
+        return body.model_dump()
+
+    def _get_verdict_map(self, map_name: str) -> dict:
+        vm = self._verdict_maps.get(map_name)
+        if not vm:
+            raise HTTPException(404, f"Verdict map {map_name!r} not found")
+        return vm.model_dump()
+
+    def _delete_verdict_map(self, map_name: str) -> dict:
+        if map_name not in self._verdict_maps:
+            raise HTTPException(404, f"Verdict map {map_name!r} not found")
+        self._verdict_maps.pop(map_name)
+        self._save_state()
+        return {"deleted": True, "name": map_name}
+
+    def _add_verdict_map_entries(self, map_name: str, body: VerdictMapEntryBody) -> dict:
+        vm = self._verdict_maps.get(map_name)
+        if not vm:
+            raise HTTPException(404, f"Verdict map {map_name!r} not found")
+        existing_keys = {e.key for e in vm.entries}
+        merged = list(vm.entries) + [e for e in body.entries if e.key not in existing_keys]
+        self._verdict_maps[map_name] = vm.model_copy(update={"entries": merged})
+        self._save_state()
+        return self._verdict_maps[map_name].model_dump()
+
+    def _remove_verdict_map_entries(self, map_name: str, body: VerdictMapKeyBody) -> dict:
+        vm = self._verdict_maps.get(map_name)
+        if not vm:
+            raise HTTPException(404, f"Verdict map {map_name!r} not found")
+        remove_keys = set(body.keys)
+        kept = [e for e in vm.entries if e.key not in remove_keys]
+        self._verdict_maps[map_name] = vm.model_copy(update={"entries": kept})
+        self._save_state()
+        return self._verdict_maps[map_name].model_dump()
+
+    # ── counter endpoints (§8) ────────────────────────────────────────
+
+    def _list_counters(self) -> dict:
+        result = subprocess.run(
+            ["sudo", self._nft_wrapper, "--list-counters", "inet", self._default_filter],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            self.logger.error("nft list counters failed (rc=%d): %s", result.returncode, result.stderr.strip())
+            raise HTTPException(500, "Failed to query counters; check server logs")
+        try:
+            data = json.loads(result.stdout)
+        except Exception as exc:
+            self.logger.error("Failed to parse nft counter output", exc_info=True)
+            raise HTTPException(500, "Failed to parse counter output; check server logs") from exc
+        return {"table": f"inet {self._default_filter}", "counters": data}
+
+    def _reset_counter(self, counter_name: str) -> dict:
+        result = subprocess.run(
+            ["sudo", self._nft_wrapper, "--reset-counter", "inet", self._default_filter, counter_name],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            self.logger.error("nft reset counter failed (rc=%d): %s", result.returncode, result.stderr.strip())
+            raise HTTPException(500, "Failed to reset counter; check server logs")
+        try:
+            data = json.loads(result.stdout) if result.stdout.strip() else {}
+        except Exception as exc:
+            self.logger.error("Failed to parse counter reset output", exc_info=True)
+            raise HTTPException(500, "Failed to parse counter reset output; check server logs") from exc
+        return {"reset": True, "name": counter_name, "previous": data}
+
+    # ── pending-changes detail (§13) ──────────────────────────────────
+
+    _SNAP_EMPTY: dict = {
+        "rules": [], "chains": {}, "sets": {}, "nat_rules": [],
+        "flowtables": {}, "custom_chains": {}, "ingress_rules": [],
+        "verdict_maps": {}, "quotas": {},
+    }
+
+    def _pending_changes_detail(self) -> dict:
+        snap = self._state_file.current_snapshot
+        keys = list(self._SNAP_EMPTY.keys())
+        if snap is None:
+            return {"any": False, **{k: False for k in keys}}
+        desired = self._desired_snapshot()
+        # use empty baseline for keys absent in older snapshots
+        result = {k: desired.get(k) != snap.get(k, self._SNAP_EMPTY[k]) for k in keys}
+        result["any"] = any(result[k] for k in keys)
+        return result
+
     # ── apply / compile endpoints ──────────────────────────────────────
 
     @property
@@ -482,7 +772,16 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     def _check(self) -> dict:
         enabled = [r for r in self._rules.values() if r.enabled]
-        script = _compile_to_script(enabled, self._default_filter, self._chains, self.logger)
+        script = _compile_to_script(
+            enabled, self._default_filter, self._chains, self.logger,
+            sets=self._sets, nat_rules=list(self._nat_rules.values()),
+            flowtables=list(self._flowtables.values()),
+            custom_chains=self._custom_chains,
+            ingress_rules=list(self._ingress_rules.values()),
+            ingress_table=self._ingress_table,
+            verdict_maps=self._verdict_maps,
+            quotas=self._quotas,
+        )
         success, error = self._validate_nft_script(script)
         return {
             "success": success,
@@ -493,7 +792,16 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     def _apply(self) -> dict:
         enabled = [r for r in self._rules.values() if r.enabled]
-        script = _compile_to_script(enabled, self._default_filter, self._chains, self.logger)
+        script = _compile_to_script(
+            enabled, self._default_filter, self._chains, self.logger,
+            sets=self._sets, nat_rules=list(self._nat_rules.values()),
+            flowtables=list(self._flowtables.values()),
+            custom_chains=self._custom_chains,
+            ingress_rules=list(self._ingress_rules.values()),
+            ingress_table=self._ingress_table,
+            verdict_maps=self._verdict_maps,
+            quotas=self._quotas,
+        )
         output_path = self._compiled_output_path
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w") as fh:
@@ -513,12 +821,25 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             "success": True,
             "rule_count": len(enabled),
             "chain_count": len(self._chains),
-            "pending_changes": self._state_file.pending_changes,
+            "pending_changes": self._pending_changes_detail(),
         }
 
     def _compile(self, body: CompileRequest) -> CompileResult:
         enabled = [r for r in self._rules.values() if r.enabled]
-        script = _compile_to_script(enabled, body.filter_name, self._chains, self.logger)
+        script = _compile_to_script(
+            enabled, body.filter_name, self._chains, self.logger,
+            sets=self._sets, nat_rules=list(self._nat_rules.values()),
+            flowtables=list(self._flowtables.values()),
+            custom_chains=self._custom_chains,
+            ingress_rules=list(self._ingress_rules.values()),
+            ingress_table=self._ingress_table,
+            verdict_maps=self._verdict_maps,
+            quotas=self._quotas,
+        )
+        output_path = os.path.join(str(self.plugin_dir), "data", f"{body.filter_name}.nft")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w") as fh:
+            fh.write(script)
         bus.emit(Event(
             name="firewall.compiled",
             source=self.plugin_id,
@@ -528,6 +849,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             filter_name=body.filter_name,
             output=script.splitlines(),
             rule_count=len(enabled),
+            output_path=output_path,
         )
 
     def _discard(self) -> dict:
@@ -537,11 +859,34 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         try:
             self._rules = {r["id"]: FirewallRule(**r) for r in snapshot.get("rules", [])}
             self._chains = {name: ChainConfig(**cfg) for name, cfg in snapshot.get("chains", _DEFAULT_CHAINS).items()}
+            self._sets = {name: FirewallSet(**s) for name, s in snapshot.get("sets", {}).items()}
+            self._nat_rules = {r["id"]: NatRule(**r) for r in snapshot.get("nat_rules", [])}
+            self._flowtables = {name: Flowtable(**ft) for name, ft in snapshot.get("flowtables", {}).items()}
+            self._custom_chains = {name: CustomChain(**cc) for name, cc in snapshot.get("custom_chains", {}).items()}
+            self._ingress_rules = {r["id"]: IngressRule(**r) for r in snapshot.get("ingress_rules", [])}
+            self._verdict_maps = {name: VerdictMap(**vm) for name, vm in snapshot.get("verdict_maps", {}).items()}
+            self._quotas = {name: FirewallQuota(**q) for name, q in snapshot.get("quotas", {}).items()}
         except Exception as exc:
             self.logger.error("Failed to restore from snapshot", exc_info=True)
             raise HTTPException(500, "Failed to restore from snapshot; check server logs") from exc
         self._save_state()
         return {"discarded": True, "rule_count": len(self._rules)}
+
+    def _live_state(self) -> dict:
+        result = subprocess.run(
+            ["sudo", self._nft_wrapper, "--list", "inet", self._default_filter],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            self.logger.error("nft list failed (rc=%d): %s", result.returncode, result.stderr.strip())
+            raise HTTPException(500, "Failed to query live kernel state; check server logs")
+        try:
+            live = json.loads(result.stdout)
+        except Exception as exc:
+            self.logger.error("Failed to parse nft JSON output", exc_info=True)
+            raise HTTPException(500, "Failed to parse live kernel state; check server logs") from exc
+        return {"table": f"inet {self._default_filter}", "live": live}
 
     def _status(self) -> dict:
         total = len(self._rules)
@@ -550,19 +895,17 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             "plugin": self.meta["name"],
             "version": self.meta["version"],
             "rules": {"total": total, "enabled": enabled, "disabled": total - enabled},
+            "nat_rules": len(self._nat_rules),
+            "sets": len(self._sets),
+            "flowtables": len(self._flowtables),
+            "custom_chains": len(self._custom_chains),
+            "ingress_rules": len(self._ingress_rules),
+            "verdict_maps": len(self._verdict_maps),
+            "quotas": len(self._quotas),
             "state_file": self._state_file.path,
             "default_filter": self._default_filter,
-            "pending_changes": self._state_file.pending_changes,
+            "pending_changes": self._pending_changes_detail(),
             "macros": macro_registry.namespaces,
             "compiled_output": self._compiled_output_path,
         }
 
-    # ── event handlers ─────────────────────────────────────────────────
-
-    @on("firewall.compile")
-    def on_compile_event(self, event: Event) -> None:
-        filter_name = event.payload.get("filter_name", self._default_filter)
-        enabled = [r for r in self._rules.values() if r.enabled]
-        script = _compile_to_script(enabled, filter_name, self._chains, self.logger)
-        self.logger.info("Compiled %d rules for filter %r", len(enabled), filter_name)
-        self.logger.debug("Script:\n%s", script)

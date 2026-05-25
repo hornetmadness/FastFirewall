@@ -49,6 +49,7 @@ class FFClient:
 
     Pass simulate=True to log calls without authenticating or making any real
     HTTP requests.  Used to pre-build the export file before the apply prompt.
+    Pass verbose=True to print each request and response to stdout.
     """
 
     def __init__(
@@ -58,10 +59,12 @@ class FFClient:
         password: str,
         export_path: str | None = None,
         simulate: bool = False,
+        verbose: bool = False,
     ) -> None:
         self.host = host.rstrip("/")
         self._export_path = export_path
         self._simulate = simulate
+        self._verbose = verbose
         self._log: list[dict[str, Any]] = []
         if not simulate:
             self._session = requests.Session()
@@ -102,6 +105,12 @@ class FFClient:
                 entry["body"] = body
             self._log.append(entry)
 
+        if self._verbose:
+            print(f"\n  --> {method} {path}")
+            if body is not None:
+                for line in json.dumps(body, indent=4).splitlines():
+                    print(f"      {line}")
+
         if self._simulate:
             # Return enough for scenario code to keep running without errors.
             return {"success": True, "valid": True, "returncode": 0, "output": ""}
@@ -110,6 +119,16 @@ class FFClient:
             resp = self._session.request(method, url, json=body, timeout=30)
         except requests.ConnectionError:
             raise FFError(f"Connection lost during {method} {path}")
+
+        if self._verbose:
+            print(f"  <-- {resp.status_code}")
+            try:
+                resp_data = resp.json()
+                for line in json.dumps(resp_data, indent=4).splitlines():
+                    print(f"      {line}")
+            except Exception:
+                if resp.text:
+                    print(f"      {resp.text[:500]}")
 
         if not resp.ok:
             try:
@@ -281,6 +300,23 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
 
     lan_subnet = fw.get("lan_subnet", "192.168.0.0/24")
 
+    # Named sets — created first so rules can reference them
+    for set_def in fw.get("sets", []):
+        client.post(
+            "/v1/firewall/sets", set_def,
+            description=f"Create named set: {set_def['name']}",
+        )
+        _print_ok(f"Set '{set_def['name']}' created (type: {set_def.get('type', '?')})")
+
+    # Quotas — created before rules so rules can reference them by name
+    for quota in fw.get("quotas", []):
+        client.post(
+            "/v1/firewall/quotas", quota,
+            description=f"Create quota: {quota['name']}",
+        )
+        _print_ok(f"Quota '{quota['name']}' created ({quota.get('amount')} {quota.get('unit', 'mbytes')})")
+
+    # Built-in filter rules for common scenarios
     rules: list[dict[str, Any]] = [
         {
             "name": "allow-icmp",
@@ -376,9 +412,47 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
         "priority": 1000,
     })
 
+    # Extra filter rules supplied verbatim in config (support all new rule fields)
+    for rule in fw.get("rules", []):
+        rules.append(rule)
+
     for rule in rules:
         client.post("/v1/firewall/rules", rule, description=f"Add rule: {rule['name']}")
         _print_ok(f"Rule '{rule['name']}' added")
+
+    # Masquerade NAT — required for a gateway to provide internet to LAN clients
+    wan_iface = fw.get("wan_iface")
+    if wan_iface and fw.get("masquerade", False):
+        _print_step(f"Adding masquerade NAT for WAN interface '{wan_iface}'")
+        client.post(
+            "/v1/firewall/nat/rules",
+            {
+                "name": "masquerade-wan",
+                "chain": "postrouting",
+                "type": "masquerade",
+                "out_interface": wan_iface,
+                "comment": "Masquerade outbound traffic on WAN",
+                "priority": 100,
+            },
+            description=f"Add masquerade NAT rule for {wan_iface}",
+        )
+        _print_ok(f"Masquerade NAT added (oif: {wan_iface})")
+
+    # Extra NAT rules supplied verbatim in config (DNAT port-forwarding, SNAT, etc.)
+    for nat_rule in fw.get("nat", []):
+        client.post(
+            "/v1/firewall/nat/rules", nat_rule,
+            description=f"Add NAT rule: {nat_rule['name']}",
+        )
+        _print_ok(f"NAT rule '{nat_rule['name']}' added")
+
+    # Ingress (netdev) rules — early-drop per physical device before routing
+    for ingress_rule in fw.get("ingress", []):
+        client.post(
+            "/v1/firewall/ingress/rules", ingress_rule,
+            description=f"Add ingress rule: {ingress_rule['name']}",
+        )
+        _print_ok(f"Ingress rule '{ingress_rule['name']}' added (device: {ingress_rule.get('device', '?')})")
 
     _check_before_apply(client, "/v1/firewall/check", "success", "firewall")
     _print_step("Applying firewall rules")
@@ -562,6 +636,8 @@ def run_gateway(client: FFClient, cfg: dict[str, Any]) -> None:
     if fw_cfg:
         if not fw_cfg.get("lan_subnet") and lan_address:
             fw_cfg["lan_subnet"] = _network_of(lan_address)
+        if not fw_cfg.get("wan_iface") and wan_iface:
+            fw_cfg["wan_iface"] = wan_iface
         _apply_firewall_rules(client, fw_cfg)
 
     # 10. Host user
@@ -763,7 +839,17 @@ def _confirm_apply(cfg: dict[str, Any]) -> None:
 
     if fw_cfg.get("lan_subnet"):
         flags = [k.replace("allow_", "").replace("_from_lan", "") for k, v in fw_cfg.items() if k.startswith("allow_") and v]
-        print(f"  Firewall : LAN subnet {fw_cfg['lan_subnet']}  allow: {', '.join(flags) or 'none'}")
+        extras: list[str] = []
+        if fw_cfg.get("masquerade"):
+            extras.append(f"masquerade({fw_cfg.get('wan_iface', '?')})")
+        if fw_cfg.get("nat"):
+            extras.append(f"{len(fw_cfg['nat'])} NAT rule(s)")
+        if fw_cfg.get("ingress"):
+            extras.append(f"{len(fw_cfg['ingress'])} ingress rule(s)")
+        if fw_cfg.get("sets"):
+            extras.append(f"{len(fw_cfg['sets'])} set(s)")
+        extra_str = ("  " + ", ".join(extras)) if extras else ""
+        print(f"  Firewall : LAN subnet {fw_cfg['lan_subnet']}  allow: {', '.join(flags) or 'none'}{extra_str}")
 
     if user_cfg and user_cfg.get("username"):
         sudo_note = " (sudo)" if user_cfg.get("sudo") else ""
@@ -872,11 +958,17 @@ def _gather_dhcp() -> dict[str, Any]:
 def _gather_firewall() -> dict[str, Any]:
     print("\n  -- Firewall --")
     lan_subnet = _prompt("LAN subnet to allow traffic from (CIDR)", "192.168.0.0/24")
+    allow_forward = _prompt_yn("Allow LAN forwarding (gateway mode)?", False)
+    masquerade = False
+    if allow_forward:
+        masquerade = _prompt_yn("Enable WAN masquerade NAT (required for LAN internet access)?", True)
     allow_ssh = _prompt_yn("Allow SSH from LAN?", True)
     allow_http = _prompt_yn("Allow HTTP from LAN?", True)
     allow_https = _prompt_yn("Allow HTTPS from LAN?", True)
     return {
         "lan_subnet": lan_subnet,
+        "allow_lan_forwarding": allow_forward,
+        "masquerade": masquerade,
         "allow_ssh_from_lan": allow_ssh,
         "allow_http_from_lan": allow_http,
         "allow_https_from_lan": allow_https,
@@ -972,6 +1064,7 @@ def replay_session(
     host: str | None,
     username: str | None,
     password: str | None,
+    verbose: bool = False,
 ) -> None:
     _print_header(f"Replaying {replay_path}")
 
@@ -991,7 +1084,7 @@ def replay_session(
     actual_username = username or _prompt("Username", "admin")
     actual_password = password or _prompt("Password", secret=True)
 
-    client = FFClient(actual_host, actual_username, actual_password)
+    client = FFClient(actual_host, actual_username, actual_password, verbose=verbose)
 
     print(f"\n  Replaying {len(entries)} requests against {actual_host}\n")
 
@@ -1009,8 +1102,13 @@ def replay_session(
 
         print(f"  [{i}/{len(entries)}] {method} {path}  — {description}")
         try:
-            client.request(method, path, body, description=description)
-            _print_ok("OK")
+            result = client.request(method, path, body, description=description)
+            if result.get("success") is False:
+                _print_warn(f"Request succeeded but reported failure: {result}")
+                if not _prompt_yn("Continue despite failure?", True):
+                    sys.exit(1)
+            else:
+                _print_ok("OK")
         except FFError as exc:
             _print_warn(str(exc))
             if not _prompt_yn("Continue despite error?", True):
@@ -1050,6 +1148,9 @@ def main() -> None:
 
               # Apply against a different server
               uv run tools/bootstrap.py --apply my-setup.json --host http://10.0.0.1:8000
+
+              # Show every API request and response
+              uv run tools/bootstrap.py --config tools/examples/firewall.yaml --verbose
         """),
     )
     parser.add_argument("--config", metavar="FILE",
@@ -1063,12 +1164,15 @@ def main() -> None:
     parser.add_argument("--username", "-u", metavar="USER", help="API username")
     parser.add_argument("--password", "-p", metavar="PASS",
                         help="API password (avoid on shared systems; prefer the interactive prompt)")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Print each API request and response")
 
     args = parser.parse_args()
 
     try:
         if args.apply:
-            replay_session(args.apply, args.host, args.username, args.password)
+            replay_session(args.apply, args.host, args.username, args.password,
+                           verbose=args.verbose)
             return
 
         if args.config:
@@ -1098,6 +1202,7 @@ def main() -> None:
             host,
             server.get("username", "admin"),
             server.get("password", "admin"),
+            verbose=args.verbose,
         )
         _run_scenario(client, cfg)
 

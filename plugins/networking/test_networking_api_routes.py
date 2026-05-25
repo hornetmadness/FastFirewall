@@ -540,10 +540,23 @@ def test_get_config_yaml_includes_interfaces_and_routes(client):
     assert config["routing"]["routes"][0]["to"] == "default"
 
 
-def test_get_config_yaml_includes_sysctl(client):
+def test_get_config_yaml_link_defaults_to_physical(client):
+    # ifstate requires 'link' with 'kind' on every interface.
+    # When the API caller omits 'kind' (e.g. bootstrap sends {link: {state: up}}),
+    # _build_ifstate_yaml must default kind to "physical" to pass schema validation.
+    client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
+    config = yaml.safe_load(client.get("/v1/networking/config").text)
+    assert config["interfaces"]["eth0"]["link"]["kind"] == "physical"
+    assert config["interfaces"]["eth0"]["link"]["state"] == "up"
+
+
+def test_get_config_yaml_excludes_sysctl(client):
+    # sysctl is applied directly via `sysctl -w`, not through ifstatecli.
+    # The ifstate YAML config must NOT include a sysctl block (ifstate's schema
+    # rejects kernel dot-notation keys like net.ipv4.ip_forward).
     client.put("/v1/networking/config/sysctl/net.ipv4.ip_forward", json={"value": "1"})
     config = yaml.safe_load(client.get("/v1/networking/config").text)
-    assert config["sysctl"]["net.ipv4.ip_forward"] == "1"
+    assert "sysctl" not in (config or {})
 
 
 def test_get_config_empty_state_is_valid_yaml(client):
@@ -554,6 +567,7 @@ def test_get_config_empty_state_is_valid_yaml(client):
 # ── apply & check ──────────────────────────────────────────────────────────────
 
 def test_apply_calls_ifstatecli_apply(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
     plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
     r = client.post("/v1/networking/apply")
     assert r.status_code == 200
@@ -563,6 +577,7 @@ def test_apply_calls_ifstatecli_apply(plugin, client):
 
 
 def test_apply_returns_success_true_on_zero_exit(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
     plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
     r = client.post("/v1/networking/apply")
     assert r.json()["success"] is True
@@ -570,6 +585,7 @@ def test_apply_returns_success_true_on_zero_exit(plugin, client):
 
 
 def test_apply_returns_success_false_on_nonzero_exit(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
     plugin._run_ifstate.return_value = _ifstate_err(stderr="failed")
     r = client.post("/v1/networking/apply")
     assert r.status_code == 200
