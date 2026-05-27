@@ -4,7 +4,7 @@ description: 'Installs and configures fluent-bit and rsyslog to collect system l
   and tail log files.
 
   '
-enabled: true
+enabled: false
 id: syslog
 name: Syslog Plugin
 version: 1.0.0

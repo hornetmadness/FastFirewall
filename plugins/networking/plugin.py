@@ -126,6 +126,9 @@ class AliasCreate(BaseModel):
 
 _ALIAS_NAME_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]*$')
 
+# Loopback addresses are invariant on Linux and never managed via ifstate.
+_LO_ADDRESSES = ["127.0.0.1/8", "::1/128"]
+
 
 def _validate_host(value: str) -> str:
     value = value.strip()
@@ -235,32 +238,26 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             return None
         if field == "name":
             return device
+        addresses = self._interfaces.get(device, {}).get("addresses") or (
+            _LO_ADDRESSES if device == "lo" else []
+        )
         if field == "address":
-            return [
-                str(ipaddress.ip_interface(a).ip)
-                for a in self._interfaces.get(device, {}).get("addresses", [])
-            ]
+            return [str(ipaddress.ip_interface(a).ip) for a in addresses]
         if field == "net_addr":
-            return [
-                str(ipaddress.ip_interface(a).network)
-                for a in self._interfaces.get(device, {}).get("addresses", [])
-            ]
+            return [str(ipaddress.ip_interface(a).network) for a in addresses]
         return None
 
     def macro_snapshot(self) -> dict[str, dict[str, Any]]:
         entries: dict[str, Any] = {}
         for alias, device in self._aliases.items():
             entries[f"{alias}.name"] = device
-            addrs = [
-                str(ipaddress.ip_interface(a).ip)
-                for a in self._interfaces.get(device, {}).get("addresses", [])
-            ]
+            addresses = self._interfaces.get(device, {}).get("addresses") or (
+                _LO_ADDRESSES if device == "lo" else []
+            )
+            addrs = [str(ipaddress.ip_interface(a).ip) for a in addresses]
             if addrs:
                 entries[f"{alias}.address"] = addrs
-            nets = [
-                str(ipaddress.ip_interface(a).network)
-                for a in self._interfaces.get(device, {}).get("addresses", [])
-            ]
+            nets = [str(ipaddress.ip_interface(a).network) for a in addresses]
             if nets:
                 entries[f"{alias}.net_addr"] = nets
         return {"interface": entries}
@@ -269,6 +266,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         """Add identity alias (name → name) for every managed interface not yet in _aliases."""
         for name in self._interfaces:
             self._aliases.setdefault(name, name)
+        self._aliases.setdefault("lo", "lo")
 
     def _save_state(self) -> None:
         self._state_file.save_desired(self._desired_snapshot())

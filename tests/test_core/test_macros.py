@@ -26,9 +26,43 @@ def test_resolve_ports_service_port(reg):
     assert reg.resolve_ports("$service_port.dns.udp") == [53]
 
 
-def test_resolve_ports_missing_service(reg):
+def test_resolve_ports_falls_back_to_etc_services(reg):
     reg.set_service_ports({})
-    assert reg.resolve_ports("$service_port.dns.udp") == []
+    assert reg.resolve_ports("$service_port.ssh.tcp") == [22]
+
+
+def test_resolve_ports_etc_services_unknown_returns_empty(reg):
+    reg.set_service_ports({})
+    assert reg.resolve_ports("$service_port.unknown_xyz_service.tcp") == []
+
+
+def test_resolve_ports_plugin_declaration_beats_etc_services(reg):
+    reg.set_service_ports({"ssh": {"tcp": [2222]}})
+    assert reg.resolve_ports("$service_port.ssh.tcp") == [2222]
+
+
+def test_register_service_port(reg):
+    reg.register_service_port("fastfirewall-api", "tcp", [8000])
+    assert reg.resolve_ports("$service_port.fastfirewall-api.tcp") == [8000]
+
+
+def test_register_service_port_cached(reg):
+    reg.register_service_port("fastfirewall-api", "tcp", [8000])
+    reg.resolve_ports("$service_port.fastfirewall-api.tcp")
+    assert ("ports", "$service_port.fastfirewall-api.tcp") in reg._cache
+
+
+def test_register_service_port_does_not_clobber_existing(reg):
+    reg.set_service_ports({"dns": {"udp": [53]}})
+    reg.register_service_port("fastfirewall-api", "tcp", [8000])
+    assert reg.resolve_ports("$service_port.dns.udp") == [53]
+    assert reg.resolve_ports("$service_port.fastfirewall-api.tcp") == [8000]
+
+
+def test_etc_services_cached(reg):
+    reg.set_service_ports({})
+    reg.resolve_ports("$service_port.ssh.tcp")
+    assert ("ports", "$service_port.ssh.tcp") in reg._cache
 
 
 def test_resolve_ports_unknown_namespace(reg):
@@ -158,9 +192,14 @@ def test_resolve_returns_service_port_list(reg):
     assert reg.resolve("$service_port.dns.udp") == [53]
 
 
-def test_resolve_returns_empty_list_for_unknown_service(reg):
+def test_resolve_returns_etc_services_fallback(reg):
     reg.set_service_ports({})
-    assert reg.resolve("$service_port.dns.udp") == []
+    assert reg.resolve("$service_port.ssh.tcp") == [22]
+
+
+def test_resolve_returns_empty_list_for_truly_unknown_service(reg):
+    reg.set_service_ports({})
+    assert reg.resolve("$service_port.unknown_xyz_service.tcp") == []
 
 
 def test_resolve_service_port_not_overridden_by_resolver(reg):

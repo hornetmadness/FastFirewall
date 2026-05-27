@@ -97,17 +97,18 @@ def test_status_returns_plugin_metadata(client):
 
 def test_status_managed_counts_start_at_zero(client):
     data = client.get("/v1/networking/status").json()
-    assert data["ff_managed"] == {"interfaces": 0, "routes": 0, "aliases": 0}
+    # lo alias is always auto-registered at startup
+    assert data["ff_managed"] == {"interfaces": 0, "routes": 0, "aliases": 1}
     assert data["pending_changes"] is False
 
 
 def test_status_counts_reflect_additions(client):
     client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
     client.post("/v1/networking/config/routes", json={"to": "default", "via": "192.168.1.1"})
-    # eth0 interface auto-creates alias "eth0" → adding LAN1 makes 2 aliases total
+    # eth0 interface auto-creates alias "eth0", LAN1 is explicit, lo is always present → 3 total
     client.put("/v1/networking/config/aliases/LAN1", json={"interface": "eth0"})
     managed = client.get("/v1/networking/status").json()["ff_managed"]
-    assert managed == {"interfaces": 1, "routes": 1, "aliases": 2}
+    assert managed == {"interfaces": 1, "routes": 1, "aliases": 3}
 
 
 # ── live state (ifstatecli show) ───────────────────────────────────────────────
@@ -1030,7 +1031,8 @@ def test_boot_import_does_not_crash_on_ifstate_failure(tmp_path):
 def test_list_aliases_empty(client):
     r = client.get("/v1/networking/config/aliases")
     assert r.status_code == 200
-    assert r.json() == {"aliases": {}, "count": 0}
+    # lo is always auto-registered at startup
+    assert r.json() == {"aliases": {"lo": "lo"}, "count": 1}
 
 
 def test_set_alias_creates_entry(client):
@@ -1043,7 +1045,7 @@ def test_set_alias_appears_in_list(client):
     client.put("/v1/networking/config/aliases/LAN1", json={"interface": "eth0"})
     client.put("/v1/networking/config/aliases/WAN", json={"interface": "eth1"})
     data = client.get("/v1/networking/config/aliases").json()
-    assert data["count"] == 2
+    assert data["count"] == 3  # lo + LAN1 + WAN
     assert data["aliases"]["LAN1"] == "eth0"
     assert data["aliases"]["WAN"] == "eth1"
 
@@ -1059,7 +1061,7 @@ def test_delete_alias_removes_entry(client):
     r = client.delete("/v1/networking/config/aliases/LAN1")
     assert r.status_code == 200
     assert r.json()["deleted"] == "LAN1"
-    assert client.get("/v1/networking/config/aliases").json()["aliases"] == {}
+    assert client.get("/v1/networking/config/aliases").json()["aliases"] == {"lo": "lo"}
 
 
 def test_delete_alias_404_for_unknown(client):
@@ -1091,7 +1093,7 @@ def test_set_alias_emits_aliases_updated_event(plugin, client):
     try:
         client.put("/v1/networking/config/aliases/LAN1", json={"interface": "eth0"})
         assert len(received) == 1
-        assert received[0].payload["aliases"] == {"LAN1": "eth0"}
+        assert received[0].payload["aliases"] == {"LAN1": "eth0", "lo": "lo"}
     finally:
         global_bus.unsubscribe("networking.aliases_updated", received.append)
 
@@ -1103,7 +1105,7 @@ def test_delete_alias_emits_aliases_updated_event(plugin, client):
     try:
         client.delete("/v1/networking/config/aliases/LAN1")
         assert len(received) == 1
-        assert received[0].payload["aliases"] == {}
+        assert received[0].payload["aliases"] == {"lo": "lo"}
     finally:
         global_bus.unsubscribe("networking.aliases_updated", received.append)
 
@@ -1180,7 +1182,7 @@ def test_boot_emits_aliases_updated_when_aliases_exist(tmp_path):
         assert len(received) == 0
         plugin = _make_plugin(tmp_path)
         assert len(received) == 1
-        assert received[0].payload["aliases"] == {"LAN1": "eth0"}
+        assert received[0].payload["aliases"] == {"LAN1": "eth0", "lo": "lo"}
     finally:
         global_bus.unsubscribe("networking.aliases_updated", received.append)
 

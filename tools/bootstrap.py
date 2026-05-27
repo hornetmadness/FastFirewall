@@ -375,7 +375,7 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
             "action": "accept",
             "protocol": "tcp",
             "src_address": "any",
-            "dst_port": 22,
+            "dst_port": "$service_port.ssh.tcp",
             "comment": "Allow SSH from any where",
             "priority": 30,
         })
@@ -387,7 +387,7 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
             "action": "accept",
             "protocol": "tcp",
             "src_address": "any",
-            "dst_port": 80,
+            "dst_port": "$service_port.http.tcp",
             "comment": "Allow HTTP from any where",
             "priority": 40,
         })
@@ -399,7 +399,7 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
             "action": "accept",
             "protocol": "tcp",
             "src_address": "any",
-            "dst_port": 443,
+            "dst_port": "$service_port.https.tcp",
             "comment": "Allow HTTPS from any where",
             "priority": 41,
         })

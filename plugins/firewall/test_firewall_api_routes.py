@@ -3154,3 +3154,62 @@ def test_plugins_all_loaded_skips_reapply_when_macro_unchanged(tmp_path):
         assert inst._apply_nft_script.call_count == call_count_after_setup
     finally:
         macro_registry.set_service_ports({})
+
+
+# ---------------------------------------------------------------------------
+# Address macro resolution in compiler
+# ---------------------------------------------------------------------------
+
+def test_src_address_macro_resolves_to_ip_saddr():
+    from plugin_system.core.macros import macro_registry
+    mod = _load_module()
+    macro_registry.register_namespace("interface", lambda *s: ["192.168.1.0/24"] if s == ("lan", "net_addr") else None)
+    try:
+        rule = mod.FirewallRule(name="lan-ssh", action="accept", protocol="tcp",
+                                src_address="$interface.lan.net_addr", dst_port=22)
+        expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
+        assert expr is not None
+        assert "ip saddr 192.168.1.0/24" in expr
+    finally:
+        macro_registry.unregister_namespace("interface")
+
+
+def test_dst_address_macro_resolves_to_ip_daddr():
+    from plugin_system.core.macros import macro_registry
+    mod = _load_module()
+    macro_registry.register_namespace("interface", lambda *s: ["10.0.0.0/8"] if s == ("wan", "net_addr") else None)
+    try:
+        rule = mod.FirewallRule(name="fwd-to-wan", action="accept",
+                                dst_address="$interface.wan.net_addr")
+        expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
+        assert expr is not None
+        assert "ip daddr 10.0.0.0/8" in expr
+    finally:
+        macro_registry.unregister_namespace("interface")
+
+
+def test_src_address_macro_multiple_addrs_produces_inline_set():
+    from plugin_system.core.macros import macro_registry
+    mod = _load_module()
+    macro_registry.register_namespace("interface", lambda *s: ["192.168.1.0/24", "10.0.0.0/8"] if s == ("lan", "net_addr") else None)
+    try:
+        rule = mod.FirewallRule(name="multi-lan", action="accept",
+                                src_address="$interface.lan.net_addr")
+        expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
+        assert expr is not None
+        assert "ip saddr { 192.168.1.0/24, 10.0.0.0/8 }" in expr
+    finally:
+        macro_registry.unregister_namespace("interface")
+
+
+def test_src_address_macro_unresolved_skips_rule():
+    from plugin_system.core.macros import macro_registry
+    mod = _load_module()
+    macro_registry.register_namespace("interface", lambda *s: None)
+    try:
+        rule = mod.FirewallRule(name="missing-iface", action="accept",
+                                src_address="$interface.lan.net_addr")
+        expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
+        assert expr is None
+    finally:
+        macro_registry.unregister_namespace("interface")
