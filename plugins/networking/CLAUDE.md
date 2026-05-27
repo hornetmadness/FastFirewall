@@ -1,6 +1,8 @@
 # Networking Plugin
 
-Manages network interfaces, routes, and kernel sysctl settings declaratively via **ifstate** (`ifstatecli`). Desired state is stored in a JSON file; call `POST /apply` to push it to the running kernel. Routes mount at `/v1/networking/`.
+Manages network interfaces and routes declaratively via **ifstate** (`ifstatecli`). Desired state is stored in a JSON file; call `POST /apply` to push it to the running kernel. Routes mount at `/v1/networking/`.
+
+Sysctl management is delegated to the host plugin. To set a sysctl from this plugin emit `host.sysctl.set` instead of calling `sysctl` directly — the host plugin will apply, persist, and track it.
 
 **Mutation model: deferred apply.** Every `PUT`/`POST`/`DELETE` mutation only updates the desired-state dict and saves it to disk — nothing is applied to the kernel until `POST /apply` is called. Uses `PluginStateFile` with `mutation_model="deferred"`, so `save_desired()` only writes desired state; `commit()` is called explicitly after a successful apply. `GET /status` reports `pending_changes: self._state_file.pending_changes`.
 
@@ -8,13 +10,12 @@ Depends on: `host` plugin.
 
 ## Resources
 
-Three managed resource types:
+Two managed resource types:
 
 | Resource | List | Mutate | Delete | Import |
 |---|---|---|---|---|
 | interfaces | `GET /config/interfaces` | `PUT /config/interfaces/{name}` | `DELETE /config/interfaces/{name}` | `POST /config/interfaces/import` |
 | routes | `GET /config/routes` | `POST /config/routes` | `DELETE /config/routes/{route_id}` | `POST /config/routes/import` |
-| sysctl | `GET /config/sysctl` | `PUT /config/sysctl/{key}` | `DELETE /config/sysctl/{key}` | — |
 
 Additional routes: `GET /status`, `GET /interfaces`, `GET /interfaces/{name}`, `GET /identify`, `GET /config`, `GET /config/diff`, `POST /apply`, `POST /check`, `POST /discard`, `POST /ping`, `POST /mtr`.
 
@@ -33,12 +34,12 @@ Additional routes: `GET /status`, `GET /interfaces`, `GET /interfaces/{name}`, `
   "desired_state": {
     "interfaces": {},
     "routes": {},
-    "sysctl": {}
+    "aliases": {}
   },
   "current_state": {
     "interfaces": {},
     "routes": {},
-    "sysctl": {}
+    "aliases": {}
   }
 }
 ```
@@ -47,17 +48,17 @@ Additional routes: `GET /status`, `GET /interfaces`, `GET /interfaces/{name}`, `
 
 ## Key methods
 
-**`_load_state()`** — calls `self._state_file.load_desired(default={})`, then reads `interfaces`, `routes`, `sysctl` from the result into `self._interfaces`, `self._routes`, `self._sysctl`. `current_snapshot` is restored automatically from the on-disk `current_state`.
+**`_load_state()`** — calls `self._state_file.load_desired(default={})`, then reads `interfaces`, `routes`, `aliases` from the result into `self._interfaces`, `self._routes`, `self._aliases`. `current_snapshot` is restored automatically from the on-disk `current_state`.
 
 **`_save_state()`** — calls `self._state_file.save_desired(self._desired_snapshot())`. Does **not** update `current_state` — that only happens via `commit()`.
 
-**`_desired_snapshot()`** — returns `json.loads(json.dumps({interfaces, routes, sysctl}))`: a normalized deep copy used for diffing and snapshotting.
+**`_desired_snapshot()`** — returns `json.loads(json.dumps({interfaces, routes, aliases}))`: a normalized deep copy used for diffing and snapshotting.
 
 **`_apply_state()`** — re-applies desired state on boot via `ifstatecli apply`. Calls `self._state_file.commit(self._desired_snapshot())` on success.
 
 **`_import_state_from_system()`** — called at boot when the state file is empty; seeds `_interfaces` and `_routes` from `ifstatecli show` output, then calls `self._state_file.save_and_commit(self._desired_snapshot())` so desired and current start identical.
 
-**`_build_ifstate_yaml()`** — serializes `_interfaces`, `_routes`, and `_sysctl` into the YAML format expected by ifstatecli.
+**`_build_ifstate_yaml()`** — serializes `_interfaces` and `_routes` into the YAML format expected by ifstatecli.
 
 **`_run_ifstate(*args)`** — runs `sudo uv run ifstatecli <args>` as a subprocess.
 
@@ -77,7 +78,7 @@ Returns a structured diff between the last applied state (`current_snapshot`) an
 
 ## `POST /discard`
 
-Reverts `_interfaces`, `_routes`, `_sysctl` back to `self._state_file.current_snapshot`. If `current_snapshot` is `None` (never applied), raises 409.
+Reverts `_interfaces`, `_routes`, `_aliases` back to `self._state_file.current_snapshot`. If `current_snapshot` is `None` (never applied), raises 409.
 
 ## Route IDs
 
@@ -104,9 +105,13 @@ Interface alias `PUT`/`DELETE` mutations call `self._state_file.commit(self._des
 | `networking.interface.removed` | `{name}` |
 | `networking.route.added` | `{route_id, to}` |
 | `networking.route.removed` | `{route_id, to}` |
-| `networking.sysctl.changed` | `{key, value}` |
-| `networking.sysctl.removed` | `{key}` |
 | `networking.applied` | `{success, returncode}` |
+
+## Events consumed
+
+| Event | Payload | Action |
+|---|---|---|
+| _(none)_ | — | Emit `host.sysctl.set` when sysctl changes are needed; the host plugin handles apply and persistence. |
 
 ## Config options (`plugin.yaml`)
 

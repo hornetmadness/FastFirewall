@@ -104,6 +104,12 @@ The package index is cached for `os_pkgmgr_max_cache_ttl_secs` seconds (default 
 | `init.command` | `uv run /app/app.py` | command to run |
 | `init.working_dir` | `null` | working directory |
 
+## Events consumed
+
+| Event | Payload | Action |
+|---|---|---|
+| `host.sysctl.set` | `{key, value, persist=true}` | Applies the sysctl via pyinfra (`server_ops.sysctl`), saves it to managed state, and emits `host.sysctl.changed`. Any plugin may emit this instead of calling `sysctl` directly. On failure, logs the error and leaves state unchanged. |
+
 ## Testing
 
 Tests in `test_host_api_routes.py`. Two fixture tiers:
