@@ -11,7 +11,8 @@ enabled: true
 
 plugin_requirements: []
 py_requirements: []    # pyinfra is already a core dependency
-os_requirements: []
+os_requirements:
+  - procps   # provides sysctl
 
 service_ports:
   host:

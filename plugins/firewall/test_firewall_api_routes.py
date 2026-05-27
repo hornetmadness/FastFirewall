@@ -3041,3 +3041,116 @@ def test_pending_changes_in_apply_response(tmp_path):
     pc = r.json()["pending_changes"]
     assert isinstance(pc, dict)
     assert pc["any"] is False
+
+
+# ---------------------------------------------------------------------------
+# Macro snapshot
+# ---------------------------------------------------------------------------
+
+def test_macro_snapshot_saved_after_apply(tmp_path):
+    from plugin_system.core.macros import macro_registry
+    macro_registry.set_service_ports({"dns": {"udp": [53]}})
+    try:
+        inst, mod = _make_inst(tmp_path)
+        inst._apply_nft_script = MagicMock()
+        with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+            inst.setup()
+        app = FastAPI()
+        app.include_router(inst.router, prefix="/v1/firewall")
+        c = TestClient(app)
+        c.post("/v1/firewall/rules", json={"name": "allow-dns", "protocol": "udp", "dst_port": "$service_port.dns.udp", "action": "accept"})
+        with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+            c.post("/v1/firewall/apply")
+        snapshot = inst._state_file.get_macro_snapshot()
+        assert snapshot is not None
+        assert "$service_port.dns.udp" in snapshot
+        assert snapshot["$service_port.dns.udp"] == [53]
+    finally:
+        macro_registry.set_service_ports({})
+
+
+def test_macro_snapshot_persists_across_reload(tmp_path):
+    from plugin_system.core.macros import macro_registry
+    macro_registry.set_service_ports({"dns": {"udp": [53]}})
+    try:
+        inst, mod = _make_inst(tmp_path)
+        inst._apply_nft_script = MagicMock()
+        with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+            inst.setup()
+        app = FastAPI()
+        app.include_router(inst.router, prefix="/v1/firewall")
+        c = TestClient(app)
+        c.post("/v1/firewall/rules", json={"name": "allow-dns", "protocol": "udp", "dst_port": "$service_port.dns.udp", "action": "accept"})
+        with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+            c.post("/v1/firewall/apply")
+        # Reload plugin from the same tmp_path
+        inst2, mod2 = _make_inst(tmp_path)
+        inst2._apply_nft_script = MagicMock()
+        with patch.object(mod2, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+            inst2.setup()
+        snapshot = inst2._state_file.get_macro_snapshot()
+        assert snapshot is not None
+        assert snapshot.get("$service_port.dns.udp") == [53]
+    finally:
+        macro_registry.set_service_ports({})
+
+
+def test_plugins_all_loaded_reapplies_when_macro_changed(tmp_path):
+    from plugin_system.core.macros import macro_registry
+    # service_port macros are NOT populated during setup() — this mirrors real boot order,
+    # where the loader sets service_ports only after all plugins finish loading.
+    macro_registry.set_service_ports({})
+    try:
+        (tmp_path / "data").mkdir()
+        state = {
+            "desired_state": {
+                "rules": [{"id": "m1", "name": "allow-dns", "action": "accept", "protocol": "udp", "dst_port": "$service_port.dns.udp"}],
+                "chains": _BOOT_CHAINS,
+                "sets": {}, "nat_rules": [], "flowtables": {}, "custom_chains": {}, "ingress_rules": [], "verdict_maps": {}, "quotas": {},
+            },
+        }
+        (tmp_path / "data" / "rules.json").write_text(json.dumps(state))
+        inst, mod = _make_inst(tmp_path)
+        inst._apply_nft_script = MagicMock()
+        with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+            inst.setup()
+        # After setup, snapshot has [] for the dns macro (service_port not populated)
+        assert inst._state_file.get_macro_snapshot() == {"$service_port.dns.udp": []}
+        call_count_after_setup = inst._apply_nft_script.call_count
+        # Now service_ports are populated — as plugins.all_loaded timing implies
+        macro_registry.set_service_ports({"dns": {"udp": [53]}})
+        with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+            inst._on_plugins_loaded(Event("plugins.all_loaded", payload={}))
+        # Snapshot changed [] → [53] so a re-apply must have occurred
+        assert inst._apply_nft_script.call_count > call_count_after_setup
+    finally:
+        macro_registry.set_service_ports({})
+
+
+def test_plugins_all_loaded_skips_reapply_when_macro_unchanged(tmp_path):
+    from plugin_system.core.macros import macro_registry
+    # service_port macros populated before setup — snapshot saved as [53]
+    macro_registry.set_service_ports({"dns": {"udp": [53]}})
+    try:
+        (tmp_path / "data").mkdir()
+        state = {
+            "desired_state": {
+                "rules": [{"id": "m1", "name": "allow-dns", "action": "accept", "protocol": "udp", "dst_port": "$service_port.dns.udp"}],
+                "chains": _BOOT_CHAINS,
+                "sets": {}, "nat_rules": [], "flowtables": {}, "custom_chains": {}, "ingress_rules": [], "verdict_maps": {}, "quotas": {},
+            },
+        }
+        (tmp_path / "data" / "rules.json").write_text(json.dumps(state))
+        inst, mod = _make_inst(tmp_path)
+        inst._apply_nft_script = MagicMock()
+        with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+            inst.setup()
+        # Snapshot now holds [53] — matches current registry
+        assert inst._state_file.get_macro_snapshot() == {"$service_port.dns.udp": [53]}
+        call_count_after_setup = inst._apply_nft_script.call_count
+        # Macros unchanged — no re-apply expected
+        with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+            inst._on_plugins_loaded(Event("plugins.all_loaded", payload={}))
+        assert inst._apply_nft_script.call_count == call_count_after_setup
+    finally:
+        macro_registry.set_service_ports({})

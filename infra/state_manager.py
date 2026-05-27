@@ -42,6 +42,7 @@ class PluginStateFile:
         self._mutation_model = mutation_model
         self._desired: Any = None
         self._current: Any = None
+        self._macro_snapshot: dict[str, Any] | None = None
 
     @classmethod
     def from_config(
@@ -93,6 +94,7 @@ class PluginStateFile:
             return default
         raw = self.load(default={})
         self._current = raw.get("current_state")
+        self._macro_snapshot = raw.get("macro_snapshot")
         desired = raw.get("desired_state", default)
         self._desired = desired
         return desired
@@ -132,7 +134,17 @@ class PluginStateFile:
         data: dict[str, Any] = {"desired_state": self._desired}
         if self._current is not None:
             data["current_state"] = self._current
+        if self._macro_snapshot is not None:
+            data["macro_snapshot"] = self._macro_snapshot
         return self.save(data)
+
+    def set_macro_snapshot(self, snapshot: dict[str, Any]) -> None:
+        """Store resolved macro values; written to disk on the next _flush() call."""
+        self._macro_snapshot = snapshot
+
+    def get_macro_snapshot(self) -> dict[str, Any] | None:
+        """Return the last persisted macro snapshot, or None if never set."""
+        return self._macro_snapshot
 
     # ── raw API (kept for backwards compatibility) ───────────────────────────────
 

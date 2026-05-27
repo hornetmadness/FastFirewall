@@ -332,7 +332,7 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
             "action": "accept",
             "protocol": "udp",
             "src_address": lan_subnet,
-            "dst_port": 53,
+            "dst_port": "$service_port.dns.udp",
             "comment": "Allow DNS/UDP from LAN",
             "priority": 20,
         },
@@ -342,7 +342,7 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
             "action": "accept",
             "protocol": "tcp",
             "src_address": lan_subnet,
-            "dst_port": 53,
+            "dst_port": "$service_port.dns.tcp",
             "comment": "Allow DNS/TCP from LAN",
             "priority": 21,
         },
@@ -352,7 +352,7 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
             "action": "accept",
             "protocol": "udp",
             "src_address": lan_subnet,
-            "dst_port": 67,
+            "dst_port": "$service_port.dhcp.udp",
             "comment": "Allow DHCP from LAN",
             "priority": 22,
         },
@@ -368,39 +368,39 @@ def _apply_firewall_rules(client: FFClient, fw: dict[str, Any]) -> None:
             "priority": 50,
         })
 
-    if fw.get("allow_ssh_from_lan", True):
+    if fw.get("allow_ssh_from_any", True):
         rules.append({
-            "name": "allow-ssh-from-lan",
+            "name": "allow-ssh-from-any",
             "chain": "input",
             "action": "accept",
             "protocol": "tcp",
-            "src_address": lan_subnet,
+            "src_address": "any",
             "dst_port": 22,
-            "comment": "Allow SSH from LAN",
+            "comment": "Allow SSH from any where",
             "priority": 30,
         })
 
-    if fw.get("allow_http_from_lan", True):
+    if fw.get("allow_http_from_any", True):
         rules.append({
-            "name": "allow-http-from-lan",
+            "name": "allow-http-from-any",
             "chain": "input",
             "action": "accept",
             "protocol": "tcp",
-            "src_address": lan_subnet,
+            "src_address": "any",
             "dst_port": 80,
-            "comment": "Allow HTTP from LAN",
+            "comment": "Allow HTTP from any where",
             "priority": 40,
         })
 
-    if fw.get("allow_https_from_lan", True):
+    if fw.get("allow_https_from_any", True):
         rules.append({
-            "name": "allow-https-from-lan",
+            "name": "allow-https-from-any",
             "chain": "input",
             "action": "accept",
             "protocol": "tcp",
-            "src_address": lan_subnet,
+            "src_address": "any",
             "dst_port": 443,
-            "comment": "Allow HTTPS from LAN",
+            "comment": "Allow HTTPS from any where",
             "priority": 41,
         })
 
@@ -962,16 +962,16 @@ def _gather_firewall() -> dict[str, Any]:
     masquerade = False
     if allow_forward:
         masquerade = _prompt_yn("Enable WAN masquerade NAT (required for LAN internet access)?", True)
-    allow_ssh = _prompt_yn("Allow SSH from LAN?", True)
-    allow_http = _prompt_yn("Allow HTTP from LAN?", True)
-    allow_https = _prompt_yn("Allow HTTPS from LAN?", True)
+    allow_ssh = _prompt_yn("Allow SSH from any where?", True)
+    allow_http = _prompt_yn("Allow HTTP from any where?", True)
+    allow_https = _prompt_yn("Allow HTTPS from any where?", True)
     return {
         "lan_subnet": lan_subnet,
         "allow_lan_forwarding": allow_forward,
         "masquerade": masquerade,
-        "allow_ssh_from_lan": allow_ssh,
-        "allow_http_from_lan": allow_http,
-        "allow_https_from_lan": allow_https,
+        "allow_ssh_from_any": allow_ssh,
+        "allow_http_from_any": allow_http,
+        "allow_https_from_any": allow_https,
     }
 
 

@@ -37,6 +37,20 @@ MACRO_RE = re.compile(r'^\$([a-z][a-z0-9_]*)(\.[a-zA-Z0-9_]+)+$')
 _PARSE_RE = re.compile(r'^\$([a-z][a-z0-9_]*)\.(.+)$')
 
 
+def extract_macros(data: object) -> set[str]:
+    """Recursively collect every macro string found in a nested structure."""
+    macros: set[str] = set()
+    if isinstance(data, str) and is_macro(data):
+        macros.add(data)
+    elif isinstance(data, dict):
+        for v in data.values():
+            macros |= extract_macros(v)
+    elif isinstance(data, (list, tuple)):
+        for item in data:
+            macros |= extract_macros(item)
+    return macros
+
+
 def is_macro(value: object) -> bool:
     return isinstance(value, str) and MACRO_RE.match(value) is not None
 
@@ -152,6 +166,8 @@ class MacroRegistry:
         if m is None:
             return None
         namespace, rest = m.group(1), m.group(2)
+        if namespace == "service_port":
+            return _resolve_service_port(rest, self._service_ports)
         resolver = self._resolvers.get(namespace)
         if resolver is None:
             return None

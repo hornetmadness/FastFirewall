@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from plugin_system.core.macros import MacroRegistry
+from plugin_system.core.macros import MacroRegistry, extract_macros
 
 
 @pytest.fixture()
@@ -149,3 +149,63 @@ def test_non_macro_strings_not_cached(reg):
 def test_int_literal_not_cached(reg):
     reg.resolve_ports(8080)
     assert len(reg._cache) == 0
+
+
+# ── resolve() service_port namespace ─────────────────────────────────────────
+
+def test_resolve_returns_service_port_list(reg):
+    reg.set_service_ports({"dns": {"udp": [53]}})
+    assert reg.resolve("$service_port.dns.udp") == [53]
+
+
+def test_resolve_returns_empty_list_for_unknown_service(reg):
+    reg.set_service_ports({})
+    assert reg.resolve("$service_port.dns.udp") == []
+
+
+def test_resolve_service_port_not_overridden_by_resolver(reg):
+    reg.set_service_ports({"dns": {"udp": [53]}})
+    reg.register_namespace("service_port", lambda *s: None)  # should be ignored
+    assert reg.resolve("$service_port.dns.udp") == [53]
+
+
+# ── extract_macros ────────────────────────────────────────────────────────────
+
+def test_extract_macros_from_string():
+    assert extract_macros("$service_port.dns.udp") == {"$service_port.dns.udp"}
+
+
+def test_extract_macros_ignores_plain_string():
+    assert extract_macros("not-a-macro") == set()
+
+
+def test_extract_macros_from_dict():
+    data = {"dst_port": "$service_port.dns.udp", "name": "allow-dns"}
+    assert extract_macros(data) == {"$service_port.dns.udp"}
+
+
+def test_extract_macros_from_nested_dict():
+    data = {"rules": [{"dst_port": "$service_port.smtp.tcp", "src_port": "$service_port.dns.udp"}]}
+    assert extract_macros(data) == {"$service_port.smtp.tcp", "$service_port.dns.udp"}
+
+
+def test_extract_macros_from_list():
+    data = ["$service_port.dns.udp", "plain", "$interface.lan.name"]
+    assert extract_macros(data) == {"$service_port.dns.udp", "$interface.lan.name"}
+
+
+def test_extract_macros_from_deeply_nested():
+    data = {"a": {"b": {"c": "$service_port.http.tcp"}}}
+    assert extract_macros(data) == {"$service_port.http.tcp"}
+
+
+def test_extract_macros_returns_empty_set_for_no_macros():
+    assert extract_macros({"name": "foo", "port": 80}) == set()
+
+
+def test_extract_macros_integer_ignored():
+    assert extract_macros(42) == set()
+
+
+def test_extract_macros_none_ignored():
+    assert extract_macros(None) == set()

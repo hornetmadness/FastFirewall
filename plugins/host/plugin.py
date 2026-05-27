@@ -157,6 +157,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
                 "key": sysctl_key,
                 "value": v["value"],
                 "persist": v["persist"],
+                "_sudo": True,
             }))
 
         for user_name, v in self._state.get("users", {}).items():
@@ -165,6 +166,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
                 "user": user_name,
                 "shell": v["shell"],
                 "system": v["system"],
+                "_sudo": True,
             }
             if v.get("home_dir"):
                 user_kw["home"] = v["home_dir"]
@@ -178,6 +180,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
                 "name": f"Restore group {group_name}",
                 "group": group_name,
                 "system": v["system"],
+                "_sudo": True,
             }
             if v.get("gid") is not None:
                 group_kw["gid"] = v["gid"]
@@ -195,6 +198,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
                 "month": v["month"],
                 "day_of_week": v["day_of_week"],
                 "user": v["user"],
+                "_sudo": True,
             }))
 
         if batch_ops:
@@ -402,6 +406,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
                 key=key,
                 value=value,
                 persist=persist,
+                _sudo=True,
             )
         except RuntimeError:
             self.logger.error("Failed to set sysctl %r via event", key, exc_info=True)
@@ -466,12 +471,16 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         return {"hostname": socket.gethostname()}
 
     def _set_hostname(self, body: HostnameBody) -> dict:
-        self._pyinfra_run(
-            server_ops.hostname,
-            name=f"Set hostname to {body.hostname}",
-            hostname=body.hostname,
-            _sudo=True,
-        )
+        try:
+            self._pyinfra_run(
+                server_ops.hostname,
+                name=f"Set hostname to {body.hostname}",
+                hostname=body.hostname,
+                _sudo=True,
+            )
+        except RuntimeError:
+            self.logger.error("Failed to set hostname", exc_info=True)
+            raise HTTPException(500, "Failed to set hostname; check server logs")
         self._emit("host.hostname.changed", {"hostname": body.hostname})
         return {"hostname": body.hostname}
 
@@ -509,13 +518,18 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         return {"sysctl": result}
 
     def _set_sysctl(self, key: str, body: SysctlBody) -> dict:
-        self._pyinfra_run(
-            server_ops.sysctl,
-            name=f"Set sysctl {key}={body.value}",
-            key=key,
-            value=body.value,
-            persist=body.persist,
-        )
+        try:
+            self._pyinfra_run(
+                server_ops.sysctl,
+                name=f"Set sysctl {key}={body.value}",
+                key=key,
+                value=body.value,
+                persist=body.persist,
+                _sudo=True,
+            )
+        except RuntimeError:
+            self.logger.error("Failed to set sysctl %s", key, exc_info=True)
+            raise HTTPException(500, "Failed to set sysctl parameter; check server logs")
         self._state["sysctl"][key] = body.model_dump()
         self._save_state()
         self._emit("host.sysctl.changed", {"key": key, **body.model_dump()})
@@ -571,12 +585,17 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
             "user": name,
             "shell": body.shell,
             "system": body.system,
+            "_sudo": True,
         }
         if body.home_dir:
             kwargs["home"] = body.home_dir
         if body.comment:
             kwargs["comment"] = body.comment
-        self._pyinfra_run(server_ops.user, **kwargs)
+        try:
+            self._pyinfra_run(server_ops.user, **kwargs)
+        except RuntimeError:
+            self.logger.error("Failed to manage user %s", name, exc_info=True)
+            raise HTTPException(500, "Failed to manage user; check server logs")
         self._state["users"][name] = body.model_dump()
         self._save_state()
         self._emit("host.user.changed", {"user": name, **body.model_dump()})
@@ -585,12 +604,17 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
     def _delete_user(self, name: str) -> dict:
         if name not in self._state["users"]:
             raise HTTPException(404, f"User {name!r} not managed")
-        self._pyinfra_run(
-            server_ops.user,
-            name=f"Remove user {name}",
-            user=name,
-            present=False,
-        )
+        try:
+            self._pyinfra_run(
+                server_ops.user,
+                name=f"Remove user {name}",
+                user=name,
+                present=False,
+                _sudo=True,
+            )
+        except RuntimeError:
+            self.logger.error("Failed to delete user %s", name, exc_info=True)
+            raise HTTPException(500, "Failed to delete user; check server logs")
         del self._state["users"][name]
         self._save_state()
         self._emit("host.user.deleted", {"user": name})
@@ -636,10 +660,15 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
             "name": f"Manage group {name}",
             "group": name,
             "system": body.system,
+            "_sudo": True,
         }
         if body.gid is not None:
             kwargs["gid"] = body.gid
-        self._pyinfra_run(server_ops.group, **kwargs)
+        try:
+            self._pyinfra_run(server_ops.group, **kwargs)
+        except RuntimeError:
+            self.logger.error("Failed to manage group %s", name, exc_info=True)
+            raise HTTPException(500, "Failed to manage group; check server logs")
         self._state["groups"][name] = body.model_dump()
         self._save_state()
         self._emit("host.group.changed", {"group": name, **body.model_dump()})
@@ -648,12 +677,17 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
     def _delete_group(self, name: str) -> dict:
         if name not in self._state["groups"]:
             raise HTTPException(404, f"Group {name!r} not managed")
-        self._pyinfra_run(
-            server_ops.group,
-            name=f"Remove group {name}",
-            group=name,
-            present=False,
-        )
+        try:
+            self._pyinfra_run(
+                server_ops.group,
+                name=f"Remove group {name}",
+                group=name,
+                present=False,
+                _sudo=True,
+            )
+        except RuntimeError:
+            self.logger.error("Failed to delete group %s", name, exc_info=True)
+            raise HTTPException(500, "Failed to delete group; check server logs")
         del self._state["groups"][name]
         self._save_state()
         self._emit("host.group.deleted", {"group": name})
@@ -692,11 +726,16 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
     def _add_group_member(self, name: str, body: GroupMemberBody) -> dict:
         if name not in self._state["groups"]:
             raise HTTPException(404, f"Group {name!r} is not managed by FF — import it first")
-        self._pyinfra_run(
-            server_ops.shell,
-            name=f"Add {body.username} to group {name}",
-            commands=[f"gpasswd -a {shlex.quote(body.username)} {shlex.quote(name)}"],
-        )
+        try:
+            self._pyinfra_run(
+                server_ops.shell,
+                name=f"Add {body.username} to group {name}",
+                commands=[f"gpasswd -a {shlex.quote(body.username)} {shlex.quote(name)}"],
+                _sudo=True,
+            )
+        except RuntimeError:
+            self.logger.error("Failed to add %s to group %s", body.username, name, exc_info=True)
+            raise HTTPException(500, "Failed to add group member; check server logs")
         members: list[str] = self._state["groups"][name].setdefault("members", [])
         if body.username not in members:
             members.append(body.username)
@@ -710,11 +749,16 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         members: list[str] = self._state["groups"][name].get("members", [])
         if username not in members:
             raise HTTPException(404, f"{username!r} is not an FF-managed member of {name!r}")
-        self._pyinfra_run(
-            server_ops.shell,
-            name=f"Remove {username} from group {name}",
-            commands=[f"gpasswd -d {shlex.quote(username)} {shlex.quote(name)}"],
-        )
+        try:
+            self._pyinfra_run(
+                server_ops.shell,
+                name=f"Remove {username} from group {name}",
+                commands=[f"gpasswd -d {shlex.quote(username)} {shlex.quote(name)}"],
+                _sudo=True,
+            )
+        except RuntimeError:
+            self.logger.error("Failed to remove %s from group %s", username, name, exc_info=True)
+            raise HTTPException(500, "Failed to remove group member; check server logs")
         members.remove(username)
         self._save_state()
         self._emit("host.group.changed", {"group": name, "members": members})
@@ -816,17 +860,22 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         return {"cron": result}
 
     def _set_cron(self, name: str, body: CronBody) -> dict:
-        self._pyinfra_run(
-            server_ops.crontab,
-            name=f"Manage cron {name}",
-            command=body.command,
-            minute=body.minute,
-            hour=body.hour,
-            day_of_month=body.day_of_month,
-            month=body.month,
-            day_of_week=body.day_of_week,
-            user=body.user,
-        )
+        try:
+            self._pyinfra_run(
+                server_ops.crontab,
+                name=f"Manage cron {name}",
+                command=body.command,
+                minute=body.minute,
+                hour=body.hour,
+                day_of_month=body.day_of_month,
+                month=body.month,
+                day_of_week=body.day_of_week,
+                user=body.user,
+                _sudo=True,
+            )
+        except RuntimeError:
+            self.logger.error("Failed to manage cron %s", name, exc_info=True)
+            raise HTTPException(500, "Failed to manage cron entry; check server logs")
         self._state["cron"][name] = body.model_dump()
         self._save_state()
         self._emit("host.cron.changed", {"name": name, **body.model_dump()})
@@ -836,13 +885,18 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         if name not in self._state["cron"]:
             raise HTTPException(404, f"Cron entry {name!r} not managed")
         entry = self._state["cron"][name]
-        self._pyinfra_run(
-            server_ops.crontab,
-            name=f"Remove cron {name}",
-            command=entry["command"],
-            present=False,
-            user=entry["user"],
-        )
+        try:
+            self._pyinfra_run(
+                server_ops.crontab,
+                name=f"Remove cron {name}",
+                command=entry["command"],
+                present=False,
+                user=entry["user"],
+                _sudo=True,
+            )
+        except RuntimeError:
+            self.logger.error("Failed to delete cron %s", name, exc_info=True)
+            raise HTTPException(500, "Failed to delete cron entry; check server logs")
         del self._state["cron"][name]
         self._save_state()
         self._emit("host.cron.deleted", {"name": name})

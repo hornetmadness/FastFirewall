@@ -15,7 +15,8 @@
       "Bash(git -C /home/emathis/FastFirewall diff --stat HEAD)",
       "Bash(git add *)",
       "Bash(git stash *)",
-      "WebFetch(domain:wiki.nftables.org)"
+      "WebFetch(domain:wiki.nftables.org)",
+      "Bash(git push *)"
     ]
   },
   "hooks": {

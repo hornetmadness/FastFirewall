@@ -1,3 +1,4 @@
+import os
 import pickle
 import subprocess
 import sys
@@ -20,10 +21,18 @@ def pyinfra_run_batch(ops: list[OpSpec]) -> BatchResult:
     every operation is reported as failed.
     """
     payload = pickle.dumps(ops)
+    env = os.environ.copy()
+    sbin_dirs = ["/usr/local/sbin", "/usr/sbin", "/sbin"]
+    path_parts = [p for p in env.get("PATH", "").split(":") if p]
+    for d in reversed(sbin_dirs):
+        if d not in path_parts:
+            path_parts.insert(0, d)
+    env["PATH"] = ":".join(path_parts)
     proc = subprocess.run(
         [sys.executable, str(PYINFRA_WORKER)],
         input=payload,
         capture_output=True,
+        env=env,
     )
     stderr = proc.stderr.decode(errors="replace").strip()
     if proc.returncode != 0:
