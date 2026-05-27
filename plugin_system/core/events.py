@@ -7,6 +7,35 @@ The module-level ``bus`` singleton is the shared channel; import it directly:
 Plugins subscribe via ``bus.subscribe`` / ``bus.unsubscribe`` or the decorator
 helpers in ``plugin_system.core.decorators`` (``@on``, ``@on_any``).
 
+Emitting
+--------
+Construct an ``Event`` with just a name and optional payload, then hand it to
+the bus::
+
+    bus.emit(Event("firewall.rule.added", payload={"rule_id": rule.id}))
+    await bus.emit_async(event)   # awaits async handlers; prefer in async contexts
+
+``source`` and ``timestamp`` are set automatically — do not pass them.
+
+Automatic fields
+----------------
+``emit`` / ``emit_async`` populate two fields on every event before dispatching:
+
+- ``event.source`` — set to ``"<plugin_id>.<function_name>"`` by walking the
+  call stack to the nearest frame whose ``self`` carries a ``plugin_id``
+  (e.g. ``"firewall._apply_rules"``).  Empty string if called outside a plugin.
+- ``event.timestamp`` — UTC ``datetime`` captured at ``Event()`` construction
+  time (not at emit time).
+
+Service injection
+-----------------
+``emit`` / ``emit_async`` also inject into ``event.payload``:
+
+- ``"services"`` — the emitting plugin's declared service list (from
+  ``plugin_services``), added via ``setdefault`` so an existing key is kept.
+- ``"request_id"`` — the active HTTP request ID from ``request_context``, or
+  ``"-"`` when called outside a request.
+
 Bound-method identity
 ---------------------
 Python creates a new object each time a bound method is accessed via an
@@ -21,12 +50,6 @@ reference in ``setup()`` and reuse it in ``teardown()``::
     def teardown(self):
         bus.unsubscribe("some.event", self._h)
 
-Service injection
------------------
-``emit`` / ``emit_async`` automatically set ``event.payload["services"]`` to
-the emitting plugin's declared service list (from ``plugin_services``) unless
-the caller already set that key.
-
 Error isolation
 ---------------
 Exceptions raised by handlers are caught and logged; they never propagate to
@@ -35,9 +58,11 @@ the emitter or abort remaining handlers.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from request_context import get_request_id
@@ -49,13 +74,22 @@ logger = logging.getLogger(__name__)
 class Event:
     """A single bus message.
 
-    ``name`` is the event type identifier subscribers listen on (e.g.
-    ``"plugin.loaded"``).  ``source`` is the plugin_id or system component
-    that emitted the event.  ``payload`` carries arbitrary event data.
+    Only ``name`` and ``payload`` are constructor arguments.  ``source`` and
+    ``timestamp`` are set automatically by the bus at emit time — do not pass
+    them.
+
+    Attributes:
+        name:      Event type identifier subscribers listen on (e.g. ``"firewall.rule.added"``).
+        payload:   Arbitrary event data dict.
+        source:    ``"<plugin_id>.<function>"`` of the emitting call site; empty if
+                   called outside a plugin.  Set by the bus — not a constructor arg.
+        timestamp: UTC datetime captured at construction.  Set at object creation —
+                   not a constructor arg.
     """
     name: str
-    source: str
     payload: dict[str, Any] = field(default_factory=dict)
+    source: str = field(init=False, default="")
+    timestamp: datetime = field(init=False, default_factory=lambda: datetime.now(timezone.utc))
 
 
 # Sync or async callable that accepts an Event.
@@ -101,8 +135,20 @@ class EventBus:
         # Attach the emitting plugin's declared services so handlers can inspect
         # capabilities without having to look up the plugin registry themselves.
         # setdefault preserves an explicit "services" key if the caller set one.
-        if event.source in self.plugin_services:
-            event.payload.setdefault("services", self.plugin_services[event.source])
+        frame = inspect.currentframe()
+        # walk past _inject_services and emit/emit_async to the actual caller
+        for _ in range(2):
+            frame = frame.f_back if frame else None
+        while frame:
+            local_self = frame.f_locals.get("self")
+            plugin_id = getattr(local_self, "plugin_id", None)
+            if plugin_id:
+                event.source = f"{plugin_id}.{frame.f_code.co_name}"
+                break
+            frame = frame.f_back
+        source_plugin = event.source.split(".")[0]
+        if source_plugin in self.plugin_services:
+            event.payload.setdefault("services", self.plugin_services[source_plugin])
         event.payload.setdefault("request_id", get_request_id())
 
     def emit(self, event: Event) -> None:

@@ -524,7 +524,7 @@ def test_handler_fires_when_event_emitted(tmp_path, bus):
     """)
     loader.load_plugin(tmp_path / "fire_plugin")
     from plugin_system.core.events import Event
-    bus.emit(Event("fire.event", "test", payload={"value": 42}))
+    bus.emit(Event("fire.event", payload={"value": 42}))
     mod = sys.modules["_plugin_fire_plugin.plugin"]
     assert mod.received == [42]
 

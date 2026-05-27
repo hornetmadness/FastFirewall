@@ -228,7 +228,7 @@ def test_import_sysctl_missing_key_returns_404(client):
 
 def test_sysctl_set_event_applies_and_persists(plugin):
     from plugin_system.core.events import Event
-    event = Event("host.sysctl.set", source="other_plugin", payload={
+    event = Event("host.sysctl.set", payload={
         "key": "net.ipv4.ip_forward",
         "value": "1",
         "persist": True,
@@ -245,7 +245,7 @@ def test_sysctl_set_event_applies_and_persists(plugin):
 
 def test_sysctl_set_event_persist_default_true(plugin):
     from plugin_system.core.events import Event
-    event = Event("host.sysctl.set", source="other_plugin", payload={
+    event = Event("host.sysctl.set", payload={
         "key": "vm.swappiness",
         "value": "10",
     })
@@ -255,7 +255,7 @@ def test_sysctl_set_event_persist_default_true(plugin):
 
 def test_sysctl_set_event_missing_key_is_ignored(plugin):
     from plugin_system.core.events import Event
-    event = Event("host.sysctl.set", source="other_plugin", payload={"value": "1"})
+    event = Event("host.sysctl.set", payload={"value": "1"})
     plugin._handle_sysctl_set(event)
     plugin._pyinfra_run.assert_not_called()
 
@@ -263,7 +263,7 @@ def test_sysctl_set_event_missing_key_is_ignored(plugin):
 def test_sysctl_set_event_pyinfra_failure_does_not_raise(plugin):
     from plugin_system.core.events import Event
     plugin._pyinfra_run.side_effect = RuntimeError("sysctl failed")
-    event = Event("host.sysctl.set", source="other_plugin", payload={
+    event = Event("host.sysctl.set", payload={
         "key": "vm.swappiness",
         "value": "10",
     })

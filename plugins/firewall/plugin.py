@@ -362,7 +362,6 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         self._save_state()
         bus.emit(Event(
             name="firewall.rule.added",
-            source=self.plugin_id,
             payload={"rule_id": rule.id, "name": rule.name},
         ))
         snap = self._snapshot_rule_map()
@@ -385,7 +384,6 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         self._save_state()
         bus.emit(Event(
             name="firewall.rule.updated",
-            source=self.plugin_id,
             payload={"rule_id": rule_id, "changes": list(updates.keys())},
         ))
         snap = self._snapshot_rule_map()
@@ -398,7 +396,6 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         self._save_state()
         bus.emit(Event(
             name="firewall.rule.deleted",
-            source=self.plugin_id,
             payload={"rule_id": rule_id, "name": deleted.name},
         ))
         return {"deleted": True, "rule_id": rule_id}
@@ -814,7 +811,6 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         self._state_file.commit()
         bus.emit(Event(
             name="firewall.applied",
-            source=self.plugin_id,
             payload={"rule_count": len(enabled), "success": True},
         ))
         return {
@@ -842,7 +838,6 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             fh.write(script)
         bus.emit(Event(
             name="firewall.compiled",
-            source=self.plugin_id,
             payload={"rule_count": len(enabled)},
         ))
         return CompileResult(

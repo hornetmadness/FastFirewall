@@ -12,7 +12,7 @@ class TftpMixin:
     def _update_tftp(self, body: TftpUpdate) -> dict[str, Any]:
         self._tftp.update(body.model_dump(exclude_unset=True))
         self._save_state()
-        bus.emit(Event("dnsmasq.tftp.updated", source=self.plugin_id,
+        bus.emit(Event("dnsmasq.tftp.updated",
                        payload={"enabled": self._tftp.get("enabled")}))
         return dict(self._tftp)
 

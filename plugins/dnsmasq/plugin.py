@@ -382,7 +382,7 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin,
             success = restart_result.returncode == 0
             if success:
                 self._state_file.commit(desired)
-            bus.emit(Event("dnsmasq.applied", source=self.plugin_id,
+            bus.emit(Event("dnsmasq.applied",
                            payload={"success": success, "returncode": restart_result.returncode}))
             resp: dict[str, Any] = {
                 "success": success,

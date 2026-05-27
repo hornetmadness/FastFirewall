@@ -616,7 +616,6 @@ class PluginLoader:
         macro_registry.set_service_ports(all_service_ports)
         self._bus.emit(Event(
             "plugins.all_loaded",
-            source="plugin_loader",
             payload={"service_ports": all_service_ports, "loaded": loaded},
         ))
         self._log_pending_changes()
@@ -829,7 +828,6 @@ class PluginLoader:
         svc_values = [s.value for s in services]
         self._bus.emit(Event(
             "plugin.loaded",
-            source="plugin_loader",
             payload={
                 "plugin_id": plugin_id,
                 "version": meta["version"],
@@ -874,7 +872,6 @@ class PluginLoader:
 
         self._bus.emit(Event(
             "plugin.unloaded",
-            source="plugin_loader",
             payload={
                 "plugin_id": plugin_id,
                 "services": [s.value for s in loaded.services],

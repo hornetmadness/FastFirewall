@@ -542,7 +542,7 @@ def test_smtp_test_event_sends_email(tmp_path):
     inst = _make_inst(tmp_path)
     global_bus.subscribe("smtp.test", inst.on_smtp_test)
     try:
-        global_bus.emit(Event("smtp.test", source="test", payload={
+        global_bus.emit(Event("smtp.test", payload={
             "to": "alert@example.com",
             "subject": "Alert",
         }))
@@ -557,7 +557,7 @@ def test_smtp_test_event_missing_to_is_a_noop(tmp_path):
     inst = _make_inst(tmp_path)
     global_bus.subscribe("smtp.test", inst.on_smtp_test)
     try:
-        global_bus.emit(Event("smtp.test", source="test", payload={}))
+        global_bus.emit(Event("smtp.test", payload={}))
         inst._smtp_send.assert_not_called()
     finally:
         global_bus.unsubscribe("smtp.test", inst.on_smtp_test)
@@ -567,7 +567,7 @@ def test_smtp_send_event_sends_email(tmp_path):
     inst = _make_inst(tmp_path)
     global_bus.subscribe("smtp.send", inst.on_smtp_send)
     try:
-        global_bus.emit(Event("smtp.send", source="host", payload={
+        global_bus.emit(Event("smtp.send", payload={
             "to": "ops@example.com",
             "subject": "Upgrade report",
             "body": "All good.",
@@ -583,7 +583,7 @@ def test_smtp_send_event_missing_to_is_a_noop(tmp_path):
     inst = _make_inst(tmp_path)
     global_bus.subscribe("smtp.send", inst.on_smtp_send)
     try:
-        global_bus.emit(Event("smtp.send", source="host", payload={"subject": "x", "body": "x"}))
+        global_bus.emit(Event("smtp.send", payload={"subject": "x", "body": "x"}))
         inst._smtp_send.assert_not_called()
     finally:
         global_bus.unsubscribe("smtp.send", inst.on_smtp_send)
@@ -594,7 +594,7 @@ def test_smtp_send_event_smtp_error_logged_not_raised(tmp_path):
     inst._smtp_send.side_effect = Exception("connection refused")
     global_bus.subscribe("smtp.send", inst.on_smtp_send)
     try:
-        global_bus.emit(Event("smtp.send", source="host", payload={
+        global_bus.emit(Event("smtp.send", payload={
             "to": "ops@example.com", "subject": "x", "body": "x",
         }))  # must not raise
     finally:

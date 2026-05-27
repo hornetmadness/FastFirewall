@@ -17,7 +17,7 @@ class DhcpMixin:
     def _update_dhcp(self, body: DhcpUpdate) -> dict[str, Any]:
         self._dhcp.update(body.model_dump(exclude_unset=True))
         self._save_state()
-        bus.emit(Event("dnsmasq.dhcp.updated", source=self.plugin_id,
+        bus.emit(Event("dnsmasq.dhcp.updated",
                        payload={"enabled": self._dhcp.get("enabled")}))
         return dict(self._dhcp)
 
@@ -35,7 +35,7 @@ class DhcpMixin:
         range_id = str(uuid.uuid4())[:8]
         self._dhcp_ranges[range_id] = r
         self._save_state()
-        bus.emit(Event("dnsmasq.range.added", source=self.plugin_id, payload={"range_id": range_id}))
+        bus.emit(Event("dnsmasq.range.added", payload={"range_id": range_id}))
         return {"id": range_id, **r}
 
     def _update_range(self, range_id: str, body: DhcpRangeUpdate) -> dict[str, Any]:
@@ -50,7 +50,7 @@ class DhcpMixin:
             raise HTTPException(404, f"DHCP range {range_id!r} not found")
         self._dhcp_ranges.pop(range_id)
         self._save_state()
-        bus.emit(Event("dnsmasq.range.removed", source=self.plugin_id, payload={"range_id": range_id}))
+        bus.emit(Event("dnsmasq.range.removed", payload={"range_id": range_id}))
         return {"deleted": range_id}
 
     def _read_live_leases(self) -> list[dict[str, Any]]:
@@ -90,7 +90,7 @@ class DhcpMixin:
         lease = body.model_dump(exclude_none=True)
         self._static_leases[lease_id] = lease
         self._save_state()
-        bus.emit(Event("dnsmasq.lease.added", source=self.plugin_id,
+        bus.emit(Event("dnsmasq.lease.added",
                        payload={"lease_id": lease_id, "mac": body.mac, "ip": body.ip}))
         return {"id": lease_id, **lease}
 
@@ -106,7 +106,7 @@ class DhcpMixin:
             raise HTTPException(404, f"Static lease {lease_id!r} not found")
         self._static_leases.pop(lease_id)
         self._save_state()
-        bus.emit(Event("dnsmasq.lease.removed", source=self.plugin_id, payload={"lease_id": lease_id}))
+        bus.emit(Event("dnsmasq.lease.removed", payload={"lease_id": lease_id}))
         return {"deleted": lease_id}
 
     def render_config(self) -> list[str]:

@@ -12,7 +12,7 @@ class MdnsMixin:
     def _update_mdns(self, body: MdnsUpdate) -> dict[str, Any]:
         self._mdns.update(body.model_dump(exclude_unset=True))
         self._save_state()
-        bus.emit(Event("dnsmasq.mdns.updated", source=self.plugin_id,
+        bus.emit(Event("dnsmasq.mdns.updated",
                        payload={"enabled": self._mdns.get("enabled")}))
         return dict(self._mdns)
 

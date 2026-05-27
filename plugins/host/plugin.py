@@ -381,7 +381,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
             )
 
     def _emit(self, event_name: str, payload: dict[str, Any]) -> None:
-        bus.emit(Event(event_name, source=self.plugin_id, payload=payload))
+        bus.emit(Event(event_name, payload=payload))
 
     # ── event handlers ─────────────────────────────────────────────────────────
 

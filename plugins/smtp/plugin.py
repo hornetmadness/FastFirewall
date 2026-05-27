@@ -263,7 +263,7 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
             k: {"before": before.get(k, ""), "after": postconf_args[k]}
             for k in updates
         }
-        bus.emit(Event("smtp.config.updated", source=self.plugin_id, payload={"keys": list(updates.keys())}))
+        bus.emit(Event("smtp.config.updated", payload={"keys": list(updates.keys())}))
         return {"updated": list(updates.keys()), "diff": diff}
 
     def _get_queue(self) -> dict:
@@ -277,7 +277,7 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
         if result.returncode != 0:
             self.logger.error("postqueue -f failed: %s", result.stderr.strip())
             raise HTTPException(500, "Failed to flush mail queue; check server logs")
-        bus.emit(Event("smtp.queue.flushed", source=self.plugin_id, payload={}))
+        bus.emit(Event("smtp.queue.flushed", payload={}))
         return {"flushed": True}
 
     def _send(self, body: SendEmailRequest) -> dict:
@@ -294,7 +294,6 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
             raise HTTPException(503, "Cannot reach Postfix SMTP server; check server logs") from exc
         bus.emit(Event(
             "smtp.email.sent",
-            source=self.plugin_id,
             payload={"to": recipients, "subject": body.subject, "from_addr": from_addr},
         ))
         return {"sent": True, "to": recipients, "subject": body.subject, "from": from_addr}
@@ -316,7 +315,6 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
             raise HTTPException(503, "Cannot reach Postfix SMTP server; check server logs") from exc
         bus.emit(Event(
             "smtp.email.sent",
-            source=self.plugin_id,
             payload={"to": [body.to], "subject": body.subject, "from_addr": from_addr},
         ))
         return {"sent": True, "to": body.to, "subject": body.subject, "from": from_addr}
@@ -329,7 +327,7 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
         if result.returncode != 0:
             self.logger.error("postfix reload failed: %s", result.stderr.strip())
             raise HTTPException(500, "Postfix reload failed; check server logs")
-        bus.emit(Event("smtp.postfix.reloaded", source=self.plugin_id, payload={}))
+        bus.emit(Event("smtp.postfix.reloaded", payload={}))
         return {"reloaded": True}
 
     # ── event handler ────────────────────────────────────────────────────────────

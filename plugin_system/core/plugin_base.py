@@ -40,6 +40,18 @@ class PluginBase:
     plugin_dir: Path
     logger: logging.Logger
 
+    def __init__(self) -> None:
+        super().__init__()
+        # Derive plugin_id from the module name so events emitted during __init__
+        # have a non-empty source before the loader sets the authoritative value.
+        # Real loader uses "_plugin_<id>.plugin"; tests use "plugins.<id>.plugin".
+        module = type(self).__module__
+        head = module.split(".")[0]
+        if head.startswith("_plugin_"):
+            self.plugin_id = head[len("_plugin_"):]
+        elif module.startswith("plugins."):
+            self.plugin_id = module.split(".")[1]
+
     def setup(self) -> None:
         """Called once after the plugin is loaded. Override to initialise resources."""
 
