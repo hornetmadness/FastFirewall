@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError,
 from request_context import install_filter
 
 _DEFAULT_PATH = Path(__file__).parent / "app_config.yaml"
-_SERVER_KNOWN_KEYS = {"host", "port", "reload"}
+_SERVER_KNOWN_KEYS = {"host", "port", "reload", "max_payload_bytes", "cors"}
 
 
 class LoggingConfig(BaseModel):
@@ -49,6 +49,11 @@ class AuthConfig(BaseModel):
     )
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
     users: list[dict[str, Any]] = Field(default_factory=list)
+    trusted_proxies: list[str] = Field(default_factory=list)
+
+
+class CorsConfig(BaseModel):
+    allowed_origins: list[str] = Field(default_factory=list)
 
 
 class ServerConfig(BaseModel):
@@ -57,6 +62,8 @@ class ServerConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = Field(8000, ge=1, le=65535)
     reload: bool = False
+    max_payload_bytes: int = Field(5 * 1024 * 1024, ge=1)
+    cors: CorsConfig = Field(default_factory=CorsConfig)
 
 
 class StateBackupConfig(BaseModel):
