@@ -14,6 +14,11 @@ Events emitted:
   host.group.deleted     – payload: {group}
   host.cron.changed      – payload: {name, command, minute, hour, ...}
   host.cron.deleted      – payload: {name}
+
+Events consumed:
+  host.sysctl.set        – payload: {key, value, persist=True}
+                           Any plugin may emit this to import, set, and persist
+                           a sysctl variable under FF management.
 """
 from __future__ import annotations
 
@@ -39,6 +44,7 @@ from pyinfra.operations import systemd as systemd_ops
 
 from infra import pyinfra_run_batch
 from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service
+from plugin_system.core.decorators import on
 from plugin_system.core.events import Event, bus
 
 # ── Pydantic schemas ───────────────────────────────────────────────────────────
@@ -376,6 +382,33 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
 
     def _emit(self, event_name: str, payload: dict[str, Any]) -> None:
         bus.emit(Event(event_name, source=self.plugin_id, payload=payload))
+
+    # ── event handlers ─────────────────────────────────────────────────────────
+
+    @on("host.sysctl.set")
+    def _handle_sysctl_set(self, event: Event) -> None:
+        key = event.payload.get("key", None)
+        value = event.payload.get("value", None)
+        persist = bool(event.payload.get("persist", True))
+        if any([not v for v in [key, value]]):
+            self.logger.warning(
+                "host.sysctl.set event missing 'key' or 'value': %r", event.payload
+            )
+            return
+        try:
+            self._pyinfra_run(
+                server_ops.sysctl,
+                name=f"Set sysctl {key}={value} (via event)",
+                key=key,
+                value=value,
+                persist=persist,
+            )
+        except RuntimeError:
+            self.logger.error("Failed to set sysctl %r via event", key, exc_info=True)
+            return
+        self._state["sysctl"][key] = {"value": value, "persist": persist}
+        self._save_state()
+        self._emit("host.sysctl.changed", {"key": key, "value": value, "persist": persist})
 
     # ── route registration ─────────────────────────────────────────────────────
 

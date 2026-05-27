@@ -97,18 +97,17 @@ def test_status_returns_plugin_metadata(client):
 
 def test_status_managed_counts_start_at_zero(client):
     data = client.get("/v1/networking/status").json()
-    assert data["ff_managed"] == {"interfaces": 0, "routes": 0, "sysctl": 0, "aliases": 0}
+    assert data["ff_managed"] == {"interfaces": 0, "routes": 0, "aliases": 0}
     assert data["pending_changes"] is False
 
 
 def test_status_counts_reflect_additions(client):
     client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
     client.post("/v1/networking/config/routes", json={"to": "default", "via": "192.168.1.1"})
-    client.put("/v1/networking/config/sysctl/net.ipv4.ip_forward", json={"value": "1"})
     # eth0 interface auto-creates alias "eth0" → adding LAN1 makes 2 aliases total
     client.put("/v1/networking/config/aliases/LAN1", json={"interface": "eth0"})
     managed = client.get("/v1/networking/status").json()["ff_managed"]
-    assert managed == {"interfaces": 1, "routes": 1, "sysctl": 1, "aliases": 2}
+    assert managed == {"interfaces": 1, "routes": 1, "aliases": 2}
 
 
 # ── live state (ifstatecli show) ───────────────────────────────────────────────
@@ -456,65 +455,6 @@ def test_delete_route_emits_event(plugin, client):
         global_bus.unsubscribe("networking.route.removed", received.append)
 
 
-# ── config — sysctl ────────────────────────────────────────────────────────────
-
-def test_list_sysctl_empty(client):
-    assert client.get("/v1/networking/config/sysctl").json() == {"sysctl": {}}
-
-
-def test_set_sysctl_creates_entry(client):
-    r = client.put("/v1/networking/config/sysctl/net.ipv4.ip_forward", json={"value": "1"})
-    assert r.status_code == 200
-    assert r.json() == {"key": "net.ipv4.ip_forward", "value": "1"}
-
-
-def test_set_sysctl_updates_value(client):
-    client.put("/v1/networking/config/sysctl/vm.swappiness", json={"value": "60"})
-    client.put("/v1/networking/config/sysctl/vm.swappiness", json={"value": "10"})
-    assert client.get("/v1/networking/config/sysctl").json()["sysctl"]["vm.swappiness"] == "10"
-
-
-def test_list_sysctl_shows_added(client):
-    client.put("/v1/networking/config/sysctl/net.ipv6.conf.all.forwarding", json={"value": "1"})
-    sysctl = client.get("/v1/networking/config/sysctl").json()["sysctl"]
-    assert "net.ipv6.conf.all.forwarding" in sysctl
-
-
-def test_delete_sysctl_removes_entry(client):
-    client.put("/v1/networking/config/sysctl/net.ipv4.ip_forward", json={"value": "1"})
-    r = client.delete("/v1/networking/config/sysctl/net.ipv4.ip_forward")
-    assert r.status_code == 200
-    assert r.json() == {"deleted": "net.ipv4.ip_forward"}
-    assert "net.ipv4.ip_forward" not in client.get("/v1/networking/config/sysctl").json()["sysctl"]
-
-
-def test_delete_sysctl_not_managed_returns_404(client):
-    assert client.delete("/v1/networking/config/sysctl/nonexistent.key").status_code == 404
-
-
-def test_set_sysctl_emits_event(plugin, client):
-    received = []
-    global_bus.subscribe("networking.sysctl.changed", received.append)
-    try:
-        client.put("/v1/networking/config/sysctl/net.ipv4.ip_forward", json={"value": "1"})
-        payload = received[0].payload
-        assert payload["key"] == "net.ipv4.ip_forward"
-        assert payload["value"] == "1"
-    finally:
-        global_bus.unsubscribe("networking.sysctl.changed", received.append)
-
-
-def test_delete_sysctl_emits_event(plugin, client):
-    client.put("/v1/networking/config/sysctl/net.ipv4.ip_forward", json={"value": "1"})
-    received = []
-    global_bus.subscribe("networking.sysctl.removed", received.append)
-    try:
-        client.delete("/v1/networking/config/sysctl/net.ipv4.ip_forward")
-        assert received[0].payload["key"] == "net.ipv4.ip_forward"
-    finally:
-        global_bus.unsubscribe("networking.sysctl.removed", received.append)
-
-
 # ── full config YAML ───────────────────────────────────────────────────────────
 
 def test_get_config_yaml_content_type(client):
@@ -548,15 +488,6 @@ def test_get_config_yaml_link_defaults_to_physical(client):
     config = yaml.safe_load(client.get("/v1/networking/config").text)
     assert config["interfaces"]["eth0"]["link"]["kind"] == "physical"
     assert config["interfaces"]["eth0"]["link"]["state"] == "up"
-
-
-def test_get_config_yaml_excludes_sysctl(client):
-    # sysctl is applied directly via `sysctl -w`, not through ifstatecli.
-    # The ifstate YAML config must NOT include a sysctl block (ifstate's schema
-    # rejects kernel dot-notation keys like net.ipv4.ip_forward).
-    client.put("/v1/networking/config/sysctl/net.ipv4.ip_forward", json={"value": "1"})
-    config = yaml.safe_load(client.get("/v1/networking/config").text)
-    assert "sysctl" not in (config or {})
 
 
 def test_get_config_empty_state_is_valid_yaml(client):
@@ -757,7 +688,6 @@ def test_state_persists_across_plugin_restart(tmp_path):
     c1 = _make_client(p1)
     c1.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
     c1.post("/v1/networking/config/routes", json={"to": "default", "via": "10.0.0.254"})
-    c1.put("/v1/networking/config/sysctl/net.ipv4.ip_forward", json={"value": "1"})
     p1.teardown()
 
     p2 = _make_plugin(tmp_path)
@@ -765,7 +695,6 @@ def test_state_persists_across_plugin_restart(tmp_path):
     names = [i["name"] for i in c2.get("/v1/networking/config/interfaces").json()["interfaces"]]
     assert "eth0" in names
     assert c2.get("/v1/networking/config/routes").json()["count"] == 1
-    assert "net.ipv4.ip_forward" in c2.get("/v1/networking/config/sysctl").json()["sysctl"]
 
 
 def test_deleted_entries_absent_after_restart(tmp_path):
@@ -913,7 +842,6 @@ _BOOT_STATE = {
     "desired_state": {
         "interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}},
         "routes": {},
-        "sysctl": {},
     },
 }
 
@@ -1216,12 +1144,10 @@ def test_load_state_creates_default_aliases_for_existing_interfaces(tmp_path):
         "desired_state": {
             "interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}},
             "routes": {},
-            "sysctl": {},
         },
         "current_state": {
             "interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}},
             "routes": {},
-            "sysctl": {},
         },
     }
     (tmp_path / "data").mkdir()
@@ -1235,13 +1161,11 @@ def test_boot_emits_aliases_updated_when_aliases_exist(tmp_path):
         "desired_state": {
             "interfaces": {},
             "routes": {},
-            "sysctl": {},
             "aliases": {"LAN1": "eth0"},
         },
         "current_state": {
             "interfaces": {},
             "routes": {},
-            "sysctl": {},
             "aliases": {"LAN1": "eth0"},
         },
     }
@@ -1306,14 +1230,14 @@ def test_diff_shows_modified_interface(plugin, client):
     assert modified["to"]["addresses"] == ["10.0.0.2/24"]
 
 
-def test_diff_shows_added_sysctl(plugin, client):
+def test_diff_shows_added_interface(plugin, client):
     plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
     client.post("/v1/networking/apply")
-    client.put("/v1/networking/config/sysctl/net.ipv4.ip_forward", json={"value": "1"})
+    client.put("/v1/networking/config/interfaces/eth1", json={"link": {"state": "up"}})
     r = client.get("/v1/networking/config/diff")
     body = r.json()
     assert body["pending_changes"] is True
-    assert "net.ipv4.ip_forward" in body["diff"]["sysctl"]["added"]
+    assert "eth1" in body["diff"]["interfaces"]["added"]
 
 
 def test_diff_pending_false_after_apply(plugin, client):

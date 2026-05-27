@@ -1,9 +1,9 @@
 """
 Networking Plugin
 ─────────────────
-Manages network interfaces, routes, and sysctl settings declaratively via
-ifstate (ifstatecli).  Desired state is stored in a JSON file; call
-POST /apply to push it to the running kernel.
+Manages network interfaces and routes declaratively via ifstate (ifstatecli).
+Desired state is stored in a JSON file; call POST /apply to push it to the
+running kernel.
 
 Routes mount at /v1/networking/.
 
@@ -12,10 +12,11 @@ Events emitted:
   networking.interface.removed    – payload: {name}
   networking.route.added          – payload: {route_id, to}
   networking.route.removed        – payload: {route_id, to}
-  networking.sysctl.changed       – payload: {key, value}
-  networking.sysctl.removed       – payload: {key}
   networking.aliases_updated      – payload: {aliases: {alias: iface, ...}}
   networking.applied              – payload: {success, returncode}
+
+Sysctl management is delegated to the host plugin. To set a sysctl from
+this plugin emit host.sysctl.set instead of calling sysctl directly.
 """
 from __future__ import annotations
 
@@ -157,16 +158,12 @@ class MtrRequest(BaseModel):
         return _validate_host(v)
 
 
-class SysctlValue(BaseModel):
-    value: str = Field(max_length=64)
-
-
 # ── state diff ─────────────────────────────────────────────────────────────────
 
 def _diff_state(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     """Return a structured diff between two desired-state dicts."""
     diff: dict[str, Any] = {}
-    for section in ("interfaces", "routes", "sysctl"):
+    for section in ("interfaces", "routes"):
         o: dict = old.get(section) or {}
         n: dict = new.get(section) or {}
         added = {k: n[k] for k in n if k not in o}
@@ -197,17 +194,16 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         )
         self._interfaces: dict[str, dict[str, Any]] = {}
         self._routes: dict[str, dict[str, Any]] = {}   # {uuid: route_dict}
-        self._sysctl: dict[str, str] = {}
         self._aliases: dict[str, str] = {}  # {alias_name: interface_name}
         if not self.config.get("ignore_state_on_boot", False):
             self._load_state()
-            if not any([self._interfaces, self._routes, self._sysctl]):
+            if not any([self._interfaces, self._routes]):
                 self._import_state_from_system()
             else:
                 self._apply_state()
         self.logger.info(
-            "Networking plugin loaded: %d interface(s), %d route(s), %d sysctl(s), %d alias(es)",
-            len(self._interfaces), len(self._routes), len(self._sysctl), len(self._aliases),
+            "Networking plugin loaded: %d interface(s), %d route(s), %d alias(es)",
+            len(self._interfaces), len(self._routes), len(self._aliases),
         )
         if self._aliases:
             bus.emit(Event(
@@ -228,7 +224,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         desired = self._state_file.load_desired(default={})
         self._interfaces = desired.get("interfaces", {})
         self._routes = desired.get("routes", {})
-        self._sysctl = desired.get("sysctl", {})
         self._aliases = desired.get("aliases", {})
         self._ensure_default_aliases()
 
@@ -283,37 +278,29 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         return json.loads(json.dumps({
             "interfaces": self._interfaces,
             "routes": self._routes,
-            "sysctl": self._sysctl,
             "aliases": self._aliases,
         }))
 
     def _apply_state(self) -> None:
-        if not any([self._interfaces, self._routes, self._sysctl]):
+        if not any([self._interfaces, self._routes]):
             return
         try:
-            self.logger.info("Applying networking config on boot: %d interface(s), %d route(s), %d sysctl(s)",
-                             len(self._interfaces), len(self._routes), len(self._sysctl))
-            if self._interfaces or self._routes:
-                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
-                    fh.write(self._build_ifstate_yaml())
-                    tmp = fh.name
+            self.logger.info("Applying networking config on boot: %d interface(s), %d route(s)",
+                             len(self._interfaces), len(self._routes))
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
+                fh.write(self._build_ifstate_yaml())
+                tmp = fh.name
+            try:
+                result = self._run_ifstate("-c", tmp, "apply")
+            finally:
                 try:
-                    result = self._run_ifstate("-c", tmp, "apply")
-                finally:
-                    try:
-                        os.unlink(tmp)
-                    except OSError:
-                        pass
-                if result.returncode == 0:
-                    self.logger.info("Re-applied networking config on boot")
-                else:
-                    self.logger.warning("Boot-time networking apply returned non-zero: %s", result.stderr.strip())
-            if self._sysctl:
-                sysctl_errors = self._apply_sysctl()
-                if sysctl_errors:
-                    self.logger.warning("Boot-time sysctl errors: %s", sysctl_errors)
-                else:
-                    self.logger.info("Applied %d sysctl setting(s) on boot", len(self._sysctl))
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            if result.returncode == 0:
+                self.logger.info("Re-applied networking config on boot")
+            else:
+                self.logger.warning("Boot-time networking apply returned non-zero: %s", result.stderr.strip())
         except Exception as exc:
             self.logger.warning("Could not re-apply networking config on boot: %s", exc)
 
@@ -392,21 +379,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
 
         return yaml.dump(config, default_flow_style=False, sort_keys=False) if config else "{}\n"
 
-    # ── sysctl apply ──────────────────────────────────────────────────
-
-    def _apply_sysctl(self) -> list[str]:
-        """Apply self._sysctl via `sysctl -w`.  Returns a list of error strings."""
-        errors: list[str] = []
-        for key, value in self._sysctl.items():
-            result = subprocess.run(
-                ["sudo", "sysctl", "-w", f"{key}={value}"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode != 0:
-                self.logger.error("sysctl -w %s=%s failed: %s", key, value, result.stderr.strip())
-                errors.append(f"{key}: {result.stderr.strip()}")
-        return errors
-
     # ── ifstate CLI wrapper ────────────────────────────────────────────
 
     def _run_ifstate(self, *args: str) -> subprocess.CompletedProcess[str]:
@@ -441,11 +413,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         add("/config/routes",            self._add_route,              methods=["POST"],   summary="Add a route", status_code=201)
         add("/config/routes/{route_id}", self._delete_route,           methods=["DELETE"], summary="Remove a route")
 
-        # managed desired-state — sysctl
-        add("/config/sysctl",            self._list_sysctl,            methods=["GET"],    summary="List sysctl settings")
-        add("/config/sysctl/{key}",      self._set_sysctl,             methods=["PUT"],    summary="Set a sysctl value")
-        add("/config/sysctl/{key}",      self._delete_sysctl,          methods=["DELETE"], summary="Remove a sysctl setting")
-
         # full config + apply / check / discard / diff
         add("/config",                   self._get_config,             methods=["GET"],    summary="Full ifstate config (YAML or JSON)")
         add("/config/diff",              self._diff,                   methods=["GET"],    summary="Diff between current (applied) and desired state")
@@ -471,7 +438,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             "ff_managed": {
                 "interfaces": len(self._interfaces),
                 "routes": len(self._routes),
-                "sysctl": len(self._sysctl),
                 "aliases": len(self._aliases),
             },
             "pending_changes": self._state_file.pending_changes,
@@ -683,33 +649,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
 
         return {"imported": imported, "skipped": skipped, "not_found": not_found}
 
-    # ── managed config — sysctl ────────────────────────────────────────
-
-    def _list_sysctl(self) -> dict:
-        return {"sysctl": self._sysctl}
-
-    def _set_sysctl(self, key: str, body: SysctlValue) -> dict:
-        self._sysctl[key] = body.value
-        self._save_state()
-        bus.emit(Event(
-            name="networking.sysctl.changed",
-            source=self.plugin_id,
-            payload={"key": key, "value": body.value},
-        ))
-        return {"key": key, "value": body.value}
-
-    def _delete_sysctl(self, key: str) -> dict:
-        if key not in self._sysctl:
-            raise HTTPException(404, f"Sysctl key {key!r} not managed")
-        del self._sysctl[key]
-        self._save_state()
-        bus.emit(Event(
-            name="networking.sysctl.removed",
-            source=self.plugin_id,
-            payload={"key": key},
-        ))
-        return {"deleted": key}
-
     # ── full config ────────────────────────────────────────────────────
 
     def _get_config(self, format: str = "yaml") -> Any:
@@ -758,14 +697,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                     self.logger.info("[debug] output=%r", output)
                 success = result.returncode == 0
 
-            # Apply sysctl directly — ifstate's schema does not accept kernel
-            # dot-notation keys (e.g. net.ipv4.ip_forward).
-            if self._sysctl:
-                sysctl_errors = self._apply_sysctl()
-                if sysctl_errors:
-                    errors.extend(sysctl_errors)
-                    success = False
-
             if success:
                 self._state_file.commit(desired)
             bus.emit(Event(
@@ -796,7 +727,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         changes = _diff_state(self._desired_snapshot(), current)
         self._interfaces = dict(current.get("interfaces", {}))
         self._routes = dict(current.get("routes", {}))
-        self._sysctl = dict(current.get("sysctl", {}))
         self._aliases = dict(current.get("aliases", {}))
         self._save_state()
         return {"discarded": True, "changes": changes}

@@ -547,8 +547,8 @@ def run_gateway(client: FFClient, cfg: dict[str, Any]) -> None:
     # 5. IP forwarding
     _print_step("Enabling IPv4 forwarding")
     client.put(
-        "/v1/networking/config/sysctl/net.ipv4.ip_forward",
-        {"value": "1"},
+        "/v1/host/sysctl/net.ipv4.ip_forward",
+        {"value": "1", "persist": True},
         description="Enable IPv4 forwarding for routing",
     )
     _print_ok("net.ipv4.ip_forward = 1")
