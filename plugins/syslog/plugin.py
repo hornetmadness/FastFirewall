@@ -81,7 +81,7 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
         except Exception:
             codename = "trixie"
         src = f"deb [signed-by={_FB_KEY_DEST}] {_FB_REPO_URL}/{codename} {codename} main"
-        bus.emit(Event("pkg_management.add.repo", source="syslog", payload={
+        bus.emit(Event("pkg_management.add.repo", payload={
             "name": "fluent-bit",
             "key_url": _FB_KEY_URL,
             "key_dest": _FB_KEY_DEST,
@@ -132,7 +132,6 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
         self.logger.info("Syslog plugin ready; log_dir=%s", self._log_dir)
         bus.emit(Event(
             name="syslog.ready",
-            source=self.plugin_id,
             payload={"log_dir": str(self._log_dir), "fastfirewall_conf": str(self._fastfirewall_conf)},
         ))
 
@@ -178,7 +177,6 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
 
         bus.emit(Event(
             name="syslog.setup.complete",
-            source=self.plugin_id,
             payload={
                 "log_dir": str(self._log_dir),
                 "fastfirewall_conf": str(self._fastfirewall_conf),
@@ -353,7 +351,7 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
             self.logger.error("Config written but fluent-bit reload failed", exc_info=True)
             raise HTTPException(500, "Config written but reload failed; check server logs") from exc
 
-        bus.emit(Event("syslog.config.updated", source=self.plugin_id, payload=self._get_config()))
+        bus.emit(Event("syslog.config.updated", payload=self._get_config()))
         return self._get_config()
 
     def _reload(self) -> dict:
@@ -467,7 +465,7 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
         except Exception as exc:
             self.logger.error("Config written but logrotate apply failed", exc_info=True)
             raise HTTPException(500, "Config written but logrotate apply failed; check server logs") from exc
-        bus.emit(Event("syslog.logrotate.updated", source=self.plugin_id, payload=self._get_logrotate()))
+        bus.emit(Event("syslog.logrotate.updated", payload=self._get_logrotate()))
         return self._get_logrotate()
 
     def _run_logrotate(self) -> dict:
@@ -478,7 +476,7 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
         if proc.returncode != 0:
             self.logger.error("logrotate failed: %s", proc.stderr.strip())
             raise HTTPException(500, "logrotate failed; check server logs")
-        bus.emit(Event("syslog.logrotate.ran", source=self.plugin_id, payload={"logrotate_conf": str(self._logrotate_conf)}))
+        bus.emit(Event("syslog.logrotate.ran", payload={"logrotate_conf": str(self._logrotate_conf)}))
         return {"rotated": True}
 
     # ── file listing ───────────────────────────────────────────────────────────

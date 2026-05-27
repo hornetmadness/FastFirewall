@@ -73,7 +73,7 @@ os_requirements:
 
 ```python
 # Wrong — do not emit this event to install your own package
-bus.emit(Event("pkg_management.add.package", source=self.plugin_id, payload={"name": "fluent-bit"}))
+bus.emit(Event("pkg_management.add.package", payload={"name": "fluent-bit"}))
 ```
 
 **Third-party repos** are a different matter. If a plugin's `os_requirements` package lives in a repo that is not in the default apt/yum/dnf sources, the plugin must register that repo *before* the loader installs `os_requirements`. Do this by emitting `pkg_management.add.repo` from `__init__` (not `setup()`), so the repo is added before the loader proceeds to package installation:
@@ -82,7 +82,7 @@ bus.emit(Event("pkg_management.add.package", source=self.plugin_id, payload={"na
 def __init__(self) -> None:
     super().__init__()
     # repo must exist before the loader installs os_requirements
-    bus.emit(Event("pkg_management.add.repo", source="myplugin", payload={
+    bus.emit(Event("pkg_management.add.repo", payload={
         "name": "vendor-repo",
         "key_url": "https://vendor.example.com/gpg.key",
         "key_dest": "/usr/share/keyrings/vendor.gpg",
@@ -280,13 +280,19 @@ Decorators also work on `PluginBase` instance methods.
 
 **Emitting:**
 ```python
-bus.emit(Event("firewall.rule.added", source=self.plugin_id, payload={"rule_id": rule.id}))
+bus.emit(Event("firewall.rule.added", payload={"rule_id": rule.id}))
 await bus.emit_async(event)   # awaits async handlers; prefer in async contexts
 ```
 
+Only `name` and `payload` are constructor arguments. `source` and `timestamp` are set automatically by the bus — do not pass them.
+
 `emit()` is fire-and-forget for async handlers (scheduled as a task on the running loop, or run via `asyncio.run` if no loop exists). `emit_async()` awaits each handler.
 
-The bus auto-injects the emitting plugin's `services` list into `event.payload` unless the caller already set a `"services"` key.
+The bus auto-populates three fields on every event before dispatching to handlers:
+- `event.source` — `"<plugin_id>.<function_name>"` derived from the call stack; empty if called outside a plugin.
+- `event.timestamp` — UTC `datetime` set at `Event()` construction time.
+- `event.payload["services"]` — the emitting plugin's declared service list (via `setdefault`, so an existing key is preserved).
+- `event.payload["request_id"]` — the active HTTP request ID, or `"-"` outside a request.
 
 ### Macro system
 

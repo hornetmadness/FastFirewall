@@ -14,7 +14,7 @@ class DnsMixin:
     def _update_dns(self, body: DnsUpdate) -> dict[str, Any]:
         self._dns.update(body.model_dump(exclude_unset=True))
         self._save_state()
-        bus.emit(Event("dnsmasq.dns.updated", source=self.plugin_id, payload={"config": self._dns}))
+        bus.emit(Event("dnsmasq.dns.updated", payload={"config": self._dns}))
         return dict(self._dns)
 
     def _list_records(self) -> dict[str, Any]:
@@ -28,7 +28,7 @@ class DnsMixin:
         record = body.model_dump(exclude_none=True)
         self._records[record_id] = record
         self._save_state()
-        bus.emit(Event("dnsmasq.record.added", source=self.plugin_id,
+        bus.emit(Event("dnsmasq.record.added",
                        payload={"record_id": record_id, "type": record["type"], "name": record["name"]}))
         return {"id": record_id, **record}
 
@@ -37,7 +37,7 @@ class DnsMixin:
             raise HTTPException(404, f"DNS record {record_id!r} not found")
         self._records.pop(record_id)
         self._save_state()
-        bus.emit(Event("dnsmasq.record.removed", source=self.plugin_id, payload={"record_id": record_id}))
+        bus.emit(Event("dnsmasq.record.removed", payload={"record_id": record_id}))
         return {"deleted": record_id}
 
     def render_config(self) -> list[str]:

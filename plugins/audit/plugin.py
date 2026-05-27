@@ -11,7 +11,6 @@ entry shows both the original macro and its resolved value:
 
   payload={'src_port': '$service_port.dns.udp', 'src_port_resolved': [53]}
 """
-import datetime
 from typing import Any
 
 from plugin_system.core import PluginBase, Service, on, on_any
@@ -59,7 +58,7 @@ class AuditPlugin(PluginBase):
     def record(self, event: Event):
         if event.name in self._ignored:
             return
-        ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        ts = event.timestamp.isoformat(timespec="seconds")
         parts = [f"{ts} | {event.name}"]
         if event.source:
             parts.append(f"source={event.source}")

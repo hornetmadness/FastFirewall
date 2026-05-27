@@ -1060,7 +1060,7 @@ def test_add_package_event_installs_package(tmp_path):
     with patch("shutil.which", side_effect=lambda b: "/usr/bin/apt-get" if b == "apt-get" else None):
         plugin = _make_plugin(tmp_path)
     try:
-        global_bus.emit(Event("pkg_management.add.package", source="other_plugin", payload={"name": "htop"}))
+        global_bus.emit(Event("pkg_management.add.package", payload={"name": "htop"}))
         pkg_calls = [c for c in plugin._pyinfra_run.call_args_list if c[0][0] is apt_ops.packages]
         assert len(pkg_calls) == 1
         assert pkg_calls[0][1]["packages"] == ["htop"]
@@ -1074,7 +1074,7 @@ def test_add_package_event_persists_to_state(tmp_path):
     with patch("shutil.which", side_effect=lambda b: "/usr/bin/apt-get" if b == "apt-get" else None):
         plugin = _make_plugin(tmp_path)
     try:
-        global_bus.emit(Event("pkg_management.add.package", source="other_plugin", payload={"name": "curl", "latest": True}))
+        global_bus.emit(Event("pkg_management.add.package", payload={"name": "curl", "latest": True}))
         assert plugin._state["packages"]["curl"] == {"present": True, "latest": True}
     finally:
         plugin.teardown()
@@ -1085,7 +1085,7 @@ def test_add_package_event_missing_name_logs_error(tmp_path):
     plugin = _make_plugin(tmp_path)
     try:
         with patch.object(plugin.logger, "error") as mock_err:
-            global_bus.emit(Event("pkg_management.add.package", source="bad_plugin", payload={}))
+            global_bus.emit(Event("pkg_management.add.package", payload={}))
             mock_err.assert_called_once()
             assert "name" in mock_err.call_args[0][0]
     finally:
@@ -1099,7 +1099,7 @@ def test_add_package_event_pyinfra_failure_logs_and_does_not_raise(tmp_path):
     plugin._pyinfra_run.side_effect = RuntimeError("apt locked")
     try:
         with patch.object(plugin.logger, "error") as mock_err:
-            global_bus.emit(Event("pkg_management.add.package", source="other_plugin", payload={"name": "curl"}))
+            global_bus.emit(Event("pkg_management.add.package", payload={"name": "curl"}))
             mock_err.assert_called_once()
     finally:
         plugin._pyinfra_run.side_effect = None
@@ -1112,7 +1112,7 @@ def test_add_repo_event_adds_apt_repo(tmp_path):
     with patch("shutil.which", side_effect=lambda b: "/usr/bin/apt-get" if b == "apt-get" else None):
         plugin = _make_plugin(tmp_path)
     try:
-        global_bus.emit(Event("pkg_management.add.repo", source="other_plugin", payload={
+        global_bus.emit(Event("pkg_management.add.repo", payload={
             "name": "myrepo",
             "src": "deb https://example.com/apt focal main",
         }))
@@ -1129,7 +1129,7 @@ def test_add_repo_event_missing_name_logs_error(tmp_path):
     plugin = _make_plugin(tmp_path)
     try:
         with patch.object(plugin.logger, "error") as mock_err:
-            global_bus.emit(Event("pkg_management.add.repo", source="bad_plugin", payload={"src": "deb https://x.com focal main"}))
+            global_bus.emit(Event("pkg_management.add.repo", payload={"src": "deb https://x.com focal main"}))
             mock_err.assert_called_once()
             assert "name" in mock_err.call_args[0][0]
     finally:
@@ -1141,7 +1141,7 @@ def test_add_service_event_configures_service(tmp_path):
     from pyinfra.operations import server as server_ops
     plugin = _make_plugin(tmp_path)
     try:
-        global_bus.emit(Event("pkg_management.add.service", source="other_plugin", payload={
+        global_bus.emit(Event("pkg_management.add.service", payload={
             "service": "nginx",
             "running": True,
             "enabled": True,
@@ -1159,7 +1159,7 @@ def test_add_service_event_defaults_running_and_enabled(tmp_path):
     from plugin_system.core.events import bus as global_bus, Event
     plugin = _make_plugin(tmp_path)
     try:
-        global_bus.emit(Event("pkg_management.add.service", source="other_plugin", payload={"service": "sshd"}))
+        global_bus.emit(Event("pkg_management.add.service", payload={"service": "sshd"}))
         assert plugin._state["services"]["sshd"] == {"running": True, "enabled": True}
     finally:
         plugin.teardown()
@@ -1170,7 +1170,7 @@ def test_add_service_event_missing_service_logs_error(tmp_path):
     plugin = _make_plugin(tmp_path)
     try:
         with patch.object(plugin.logger, "error") as mock_err:
-            global_bus.emit(Event("pkg_management.add.service", source="bad_plugin", payload={}))
+            global_bus.emit(Event("pkg_management.add.service", payload={}))
             mock_err.assert_called_once()
             assert "service" in mock_err.call_args[0][0]
     finally:
@@ -1184,5 +1184,5 @@ def test_teardown_unsubscribes_event_handlers(tmp_path):
     plugin.teardown()
     # After teardown, emitting pkg_management.add.package must not call the plugin's pyinfra_run
     plugin._pyinfra_run.reset_mock()
-    global_bus.emit(Event("pkg_management.add.package", source="other_plugin", payload={"name": "curl"}))
+    global_bus.emit(Event("pkg_management.add.package", payload={"name": "curl"}))
     plugin._pyinfra_run.assert_not_called()

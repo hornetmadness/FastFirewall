@@ -228,7 +228,6 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
 
         bus.emit(Event(
             "apt_cacher_ng.config.updated",
-            source=self.plugin_id,
             payload={"keys": list(updates.keys())},
         ))
         return {"updated": list(updates.keys())}
@@ -239,7 +238,7 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
         except RuntimeError as exc:
             self.logger.error("apt-cacher-ng reload failed", exc_info=True)
             raise HTTPException(500, "Service reload failed; check server logs") from exc
-        bus.emit(Event("apt_cacher_ng.service.reloaded", source=self.plugin_id, payload={}))
+        bus.emit(Event("apt_cacher_ng.service.reloaded", payload={}))
         return {"reloaded": True}
 
     def _get_proxy_url(self) -> dict:
@@ -304,7 +303,6 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
             raise HTTPException(500, "Cache flush failed; check server logs")
         bus.emit(Event(
             "apt_cacher_ng.cache.flushed",
-            source=self.plugin_id,
             payload={"cache_dir": str(self._cache_dir)},
         ))
         return {"flushed": True, "cache_dir": str(self._cache_dir)}

@@ -208,7 +208,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         if self._aliases:
             bus.emit(Event(
                 name="networking.aliases_updated",
-                source=self.plugin_id,
                 payload={"aliases": dict(self._aliases)},
             ))
         self.add_macro_namespace("interface", self._resolve_interface_macro)
@@ -506,7 +505,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         self._save_state()
         bus.emit(Event(
             name="networking.interface.configured",
-            source=self.plugin_id,
             payload={"name": name, **existing},
         ))
         return {"name": name, **existing}
@@ -518,7 +516,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         self._save_state()
         bus.emit(Event(
             name="networking.interface.removed",
-            source=self.plugin_id,
             payload={"name": name},
         ))
         return {"deleted": name}
@@ -558,7 +555,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             imported.append(name)
             bus.emit(Event(
                 name="networking.interface.configured",
-                source=self.plugin_id,
                 payload={"name": name, **entry},
             ))
 
@@ -586,7 +582,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         self._save_state()
         bus.emit(Event(
             name="networking.route.added",
-            source=self.plugin_id,
             payload={"route_id": route_id, "to": route["to"]},
         ))
         return {"id": route_id, **route}
@@ -598,7 +593,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         self._save_state()
         bus.emit(Event(
             name="networking.route.removed",
-            source=self.plugin_id,
             payload={"route_id": route_id, "to": route.get("to")},
         ))
         return {"deleted": route_id}
@@ -640,7 +634,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             imported.append(route_id)
             bus.emit(Event(
                 name="networking.route.added",
-                source=self.plugin_id,
                 payload={"route_id": route_id, "to": route["to"]},
             ))
 
@@ -701,7 +694,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 self._state_file.commit(desired)
             bus.emit(Event(
                 name="networking.applied",
-                source=self.plugin_id,
                 payload={"success": success, "returncode": 0 if success else 1},
             ))
             resp: dict[str, Any] = {"success": success, "returncode": 0 if success else 1, "changes": changes, "output": output}
@@ -771,7 +763,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         self._state_file.commit(self._desired_snapshot())
         bus.emit(Event(
             name="networking.aliases_updated",
-            source=self.plugin_id,
             payload={"aliases": dict(self._aliases)},
         ))
         return {"name": name, "interface": body.interface}
@@ -784,7 +775,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         self._state_file.commit(self._desired_snapshot())
         bus.emit(Event(
             name="networking.aliases_updated",
-            source=self.plugin_id,
             payload={"aliases": dict(self._aliases)},
         ))
         return {"deleted": name}

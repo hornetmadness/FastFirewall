@@ -15,7 +15,7 @@ class PxeMixin:
     def _update_pxe(self, body: PxeUpdate) -> dict[str, Any]:
         self._pxe.update(body.model_dump(exclude_unset=True))
         self._save_state()
-        bus.emit(Event("dnsmasq.pxe.updated", source=self.plugin_id,
+        bus.emit(Event("dnsmasq.pxe.updated",
                        payload={"enabled": self._pxe.get("enabled")}))
         return dict(self._pxe)
 

@@ -98,7 +98,7 @@ class BlocklistMixin:
             "last_fetched": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
         self._save_state()
-        bus.emit(Event("dnsmasq.blocklist.added", source=self.plugin_id,
+        bus.emit(Event("dnsmasq.blocklist.added",
                        payload={"blocklist_id": blocklist_id, "name": body.name, "domain_count": len(domains)}))
         return {"id": blocklist_id, "name": body.name, "domain_count": len(domains)}
 
@@ -107,7 +107,7 @@ class BlocklistMixin:
             raise HTTPException(404, f"Blocklist {blocklist_id!r} not found")
         self._blocklists.pop(blocklist_id)
         self._save_state()
-        bus.emit(Event("dnsmasq.blocklist.removed", source=self.plugin_id,
+        bus.emit(Event("dnsmasq.blocklist.removed",
                        payload={"blocklist_id": blocklist_id}))
         return {"deleted": blocklist_id}
 
