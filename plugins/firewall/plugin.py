@@ -34,7 +34,6 @@ from _nft.compiler import (  # noqa: E402
     _addr_family,
     _compile_to_script,
     _port_set,
-    _resolve_port_value,
     _rule_to_nft_expr,
 )
 
@@ -81,26 +80,7 @@ _DEFAULT_CHAINS: dict[str, dict] = {
     "output":  {"policy": "accept", "priority": 0, "preamble": []},
 }
 
-_DEFAULT_RULES: list[RuleCreate] = [
-    RuleCreate(
-        name="allow-ssh",
-        chain="input",
-        action="accept",
-        protocol="tcp",
-        dst_port=22,
-        comment="Allow SSH from any source",
-        priority=10,
-    ),
-    RuleCreate(
-        name="allow-fastfirewall-api",
-        chain="input",
-        action="accept",
-        protocol="tcp",
-        dst_port=8000,
-        comment="Allow FastFirewall API from any source",
-        priority=11,
-    ),
-]
+
 
 
 # ── plugin class ───────────────────────────────────────────────────────────────
@@ -225,6 +205,26 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             self.logger.error("Failed to parse quotas, starting empty", exc_info=True)
             self._quotas = {}
         if fresh_install:
+            _DEFAULT_RULES: list[RuleCreate] = [
+                RuleCreate(
+                    name="allow-ssh",
+                    chain="input",
+                    action="accept",
+                    protocol="tcp",
+                    dst_port="$service_port.ssh.tcp",
+                    comment="Allow SSH from any source",
+                    priority=10,
+                ),
+                RuleCreate(
+                    name="allow-fastfirewall-api",
+                    chain="input",
+                    action="accept",
+                    protocol="tcp",
+                    dst_port="$service_port.fastfirewall-api.tcp",
+                    comment="Allow FastFirewall API from any source",
+                    priority=11,
+                ),
+            ]
             for rule_create in _DEFAULT_RULES:
                 rule_data = rule_create.model_dump()
                 rule_id = _rule_hash(rule_data)

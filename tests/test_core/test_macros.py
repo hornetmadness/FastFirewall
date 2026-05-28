@@ -11,72 +11,35 @@ def reg() -> MacroRegistry:
     return MacroRegistry()
 
 
-# ── resolve_ports ─────────────────────────────────────────────────────────────
-
-def test_resolve_ports_int_passthrough(reg):
-    assert reg.resolve_ports(53) == [53]
-
-
-def test_resolve_ports_non_macro_string(reg):
-    assert reg.resolve_ports("not-a-macro") == []
-
-
-def test_resolve_ports_service_port(reg):
-    reg.set_service_ports({"dns": {"udp": [53]}})
-    assert reg.resolve_ports("$service_port.dns.udp") == [53]
-
-
-def test_resolve_ports_falls_back_to_etc_services(reg):
-    reg.set_service_ports({})
-    assert reg.resolve_ports("$service_port.ssh.tcp") == [22]
-
-
-def test_resolve_ports_etc_services_unknown_returns_empty(reg):
-    reg.set_service_ports({})
-    assert reg.resolve_ports("$service_port.unknown_xyz_service.tcp") == []
-
+# ── register_service_port ──────────────────────────────────────────────────────
 
 def test_resolve_ports_plugin_declaration_beats_etc_services(reg):
     reg.set_service_ports({"ssh": {"tcp": [2222]}})
-    assert reg.resolve_ports("$service_port.ssh.tcp") == [2222]
+    assert reg.resolve("$service_port.ssh.tcp") == [2222]
 
 
 def test_register_service_port(reg):
     reg.register_service_port("fastfirewall-api", "tcp", [8000])
-    assert reg.resolve_ports("$service_port.fastfirewall-api.tcp") == [8000]
+    assert reg.resolve("$service_port.fastfirewall-api.tcp") == [8000]
 
 
 def test_register_service_port_cached(reg):
     reg.register_service_port("fastfirewall-api", "tcp", [8000])
-    reg.resolve_ports("$service_port.fastfirewall-api.tcp")
-    assert ("ports", "$service_port.fastfirewall-api.tcp") in reg._cache
+    reg.resolve("$service_port.fastfirewall-api.tcp")
+    assert ("resolve", "$service_port.fastfirewall-api.tcp") in reg._cache
 
 
 def test_register_service_port_does_not_clobber_existing(reg):
     reg.set_service_ports({"dns": {"udp": [53]}})
     reg.register_service_port("fastfirewall-api", "tcp", [8000])
-    assert reg.resolve_ports("$service_port.dns.udp") == [53]
-    assert reg.resolve_ports("$service_port.fastfirewall-api.tcp") == [8000]
+    assert reg.resolve("$service_port.dns.udp") == [53]
+    assert reg.resolve("$service_port.fastfirewall-api.tcp") == [8000]
 
 
 def test_etc_services_cached(reg):
     reg.set_service_ports({})
-    reg.resolve_ports("$service_port.ssh.tcp")
-    assert ("ports", "$service_port.ssh.tcp") in reg._cache
-
-
-def test_resolve_ports_unknown_namespace(reg):
-    assert reg.resolve_ports("$unknown.foo.bar") == []
-
-
-def test_resolve_ports_plugin_namespace_list(reg):
-    reg.register_namespace("myns", lambda *s: [80, 443] if s == ("web",) else None)
-    assert reg.resolve_ports("$myns.web") == [80, 443]
-
-
-def test_resolve_ports_plugin_namespace_int(reg):
-    reg.register_namespace("myns", lambda *s: 8080)
-    assert reg.resolve_ports("$myns.anything") == [8080]
+    reg.resolve("$service_port.ssh.tcp")
+    assert ("resolve", "$service_port.ssh.tcp") in reg._cache
 
 
 # ── resolve / resolve_string ──────────────────────────────────────────────────
@@ -90,8 +53,10 @@ def test_resolve_unknown_namespace(reg):
     assert reg.resolve("$nope.x") is None
 
 
-def test_resolve_malformed(reg):
-    assert reg.resolve("not-a-macro") is None
+def test_resolve_passthrough(reg):
+    assert reg.resolve("not-a-macro") == "not-a-macro"
+    assert reg.resolve("192.168.1.1") == "192.168.1.1"
+    assert reg.resolve(53) == 53
 
 
 def test_resolve_string(reg):
@@ -107,25 +72,25 @@ def test_resolve_string_none_result(reg):
 # ── service_port cache ────────────────────────────────────────────────────────
 
 def test_service_port_cache_hit(reg):
-    """resolve_ports for service_port should invoke _resolve_service_port only once."""
+    """service_port results are cached — resolver only called once."""
     reg.set_service_ports({"dns": {"udp": [53]}})
-    first = reg.resolve_ports("$service_port.dns.udp")
-    second = reg.resolve_ports("$service_port.dns.udp")
+    first = reg.resolve("$service_port.dns.udp")
+    second = reg.resolve("$service_port.dns.udp")
     assert first == second == [53]
-    assert ("ports", "$service_port.dns.udp") in reg._cache
+    assert ("resolve", "$service_port.dns.udp") in reg._cache
 
 
 def test_service_port_cache_invalidated_on_set_service_ports(reg):
     reg.set_service_ports({"dns": {"udp": [53]}})
-    assert reg.resolve_ports("$service_port.dns.udp") == [53]
+    assert reg.resolve("$service_port.dns.udp") == [53]
     reg.set_service_ports({"dns": {"udp": [5353]}})
-    assert reg.resolve_ports("$service_port.dns.udp") == [5353], \
+    assert reg.resolve("$service_port.dns.udp") == [5353], \
         "cache must reflect updated service ports after set_service_ports()"
 
 
 def test_service_port_cache_invalidated_on_register_namespace(reg):
     reg.set_service_ports({"dns": {"udp": [53]}})
-    reg.resolve_ports("$service_port.dns.udp")
+    reg.resolve("$service_port.dns.udp")
     assert len(reg._cache) == 1
     reg.register_namespace("other", lambda *s: None)
     assert len(reg._cache) == 0, "register_namespace should wipe the cache"
@@ -134,7 +99,7 @@ def test_service_port_cache_invalidated_on_register_namespace(reg):
 def test_service_port_cache_invalidated_on_unregister_namespace(reg):
     reg.set_service_ports({"dns": {"udp": [53]}})
     reg.register_namespace("other", lambda *s: None)
-    reg.resolve_ports("$service_port.dns.udp")
+    reg.resolve("$service_port.dns.udp")
     assert len(reg._cache) == 1
     reg.unregister_namespace("other")
     assert len(reg._cache) == 0, "unregister_namespace should wipe the cache"
@@ -142,15 +107,15 @@ def test_service_port_cache_invalidated_on_unregister_namespace(reg):
 
 # ── plugin-defined namespaces are NOT cached ──────────────────────────────────
 
-def test_plugin_namespace_resolve_ports_not_cached(reg):
+def test_plugin_namespace_not_cached(reg):
     """Plugin-defined namespace results must not be cached: their resolvers read live state."""
     calls = []
     def resolver(*s):
         calls.append(s)
         return [80]
     reg.register_namespace("ns", resolver)
-    reg.resolve_ports("$ns.web")
-    reg.resolve_ports("$ns.web")
+    reg.resolve("$ns.web")
+    reg.resolve("$ns.web")
     assert len(calls) == 2, "resolver must be called on every invocation — plugin state can change"
     assert len(reg._cache) == 0
 
@@ -174,14 +139,13 @@ def test_resolve_string_not_cached(reg):
 
 
 def test_non_macro_strings_not_cached(reg):
-    reg.resolve_ports("plain")
     reg.resolve("plain")
     reg.resolve_string("plain")
     assert len(reg._cache) == 0
 
 
 def test_int_literal_not_cached(reg):
-    reg.resolve_ports(8080)
+    reg.resolve(8080)
     assert len(reg._cache) == 0
 
 

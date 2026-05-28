@@ -1,5 +1,5 @@
 import re
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional, Union
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -9,9 +9,9 @@ _MAC_RE = re.compile(r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$")
 
 
 class DnsUpdate(BaseModel):
-    port: Optional[int] = Field(default=None, ge=1, le=65535)
-    listen_addresses: Optional[list[Annotated[str, Field(max_length=39)]]] = None
-    interface: Optional[str] = Field(default=None, max_length=15)
+    port: Optional[Union[int, str]] = None
+    listen_addresses: Optional[list[Annotated[str, Field(max_length=100)]]] = None
+    interface: Optional[str] = Field(default=None, max_length=100)
     upstream: Optional[list[Annotated[str, Field(max_length=50)]]] = None
     cache_size: Optional[int] = Field(default=None, ge=0)
     no_resolv: Optional[bool] = None

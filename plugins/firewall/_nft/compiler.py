@@ -11,7 +11,7 @@ import ipaddress
 import json
 from typing import Any
 
-from plugin_system.core.macros import is_macro, macro_registry
+from plugin_system.core.macros import macro_registry
 
 
 # ── address / port helpers ─────────────────────────────────────────────────────
@@ -32,13 +32,16 @@ def _resolve_address_macro(
 ) -> tuple[str, str] | None:
     """Resolve an address macro to (nft_family, nft_address_expr), or None to skip."""
     resolved = macro_registry.resolve(value)
-    if not resolved:
+    if resolved is None:
         logger.warning(
-            "Skipping rule %r: macro %r resolved to no addresses (plugin not loaded?)",
+            "Skipping rule %r: macro %r could not be resolved (plugin not loaded?)",
             rule_name, value,
         )
         return None
     addrs = [resolved] if isinstance(resolved, str) else [str(a) for a in resolved]
+    if not addrs:
+        return None
+    
     ipv4 = [a for a in addrs if _addr_family(a) == "ip"]
     ipv6 = [a for a in addrs if _addr_family(a) == "ip6"]
     if ipv4 and ipv6:
@@ -47,25 +50,11 @@ def _resolve_address_macro(
             rule_name, value, field,
         )
         addrs = ipv4
-    if not addrs:
-        return None
+    
     fam = _addr_family(addrs[0])
     expr = addrs[0] if len(addrs) == 1 else "{ " + ", ".join(addrs) + " }"
     return fam, expr
 
-
-def _resolve_port_value(value: int | str, rule_name: str, logger: Any) -> list[int] | None:
-    """Resolve a port field to a list of ints, or None to skip the rule."""
-    if isinstance(value, int):
-        return [value]
-    ports = macro_registry.resolve_ports(value)
-    if not ports and is_macro(value):
-        logger.warning(
-            "Skipping rule %r: macro %r resolved to no ports (plugin not loaded?)",
-            rule_name, value,
-        )
-        return None
-    return ports or []
 
 
 def _port_set(ports: list[int]) -> str:
@@ -93,13 +82,10 @@ def _rule_to_nft_expr(rule: Any, logger: Any, sets: dict[str, Any] | None = None
         family = "ip6" if set_def and getattr(set_def, "type", "") == "ipv6_addr" else "ip"
         parts.append(f"{family} saddr @{src_set}")
     elif rule.src_address and rule.src_address != "any":
-        if is_macro(rule.src_address):
-            result = _resolve_address_macro(rule.src_address, "src_address", rule.name, logger)
-            if result is None:
-                return None
-            fam, addr_expr = result
-        else:
-            fam, addr_expr = _addr_family(rule.src_address), rule.src_address
+        result = _resolve_address_macro(rule.src_address, "src_address", rule.name, logger)
+        if result is None:
+            return None
+        fam, addr_expr = result
         parts.append(f"{fam} saddr {addr_expr}")
 
     dst_set = getattr(rule, "dst_address_set", None)
@@ -108,13 +94,10 @@ def _rule_to_nft_expr(rule: Any, logger: Any, sets: dict[str, Any] | None = None
         family = "ip6" if set_def and getattr(set_def, "type", "") == "ipv6_addr" else "ip"
         parts.append(f"{family} daddr @{dst_set}")
     elif rule.dst_address and rule.dst_address != "any":
-        if is_macro(rule.dst_address):
-            result = _resolve_address_macro(rule.dst_address, "dst_address", rule.name, logger)
-            if result is None:
-                return None
-            fam, addr_expr = result
-        else:
-            fam, addr_expr = _addr_family(rule.dst_address), rule.dst_address
+        result = _resolve_address_macro(rule.dst_address, "dst_address", rule.name, logger)
+        if result is None:
+            return None
+        fam, addr_expr = result
         parts.append(f"{fam} daddr {addr_expr}")
 
     # §12 verdict maps — when set, the vmap is the verdict; skip normal port+verdict
@@ -128,8 +111,10 @@ def _rule_to_nft_expr(rule: Any, logger: Any, sets: dict[str, Any] | None = None
             # src port — suppressed when src_vmap provides the verdict
             if not src_vmap:
                 if rule.src_port is not None:
-                    ports = _resolve_port_value(rule.src_port, rule.name, logger)
-                    if ports is None:
+                    raw = macro_registry.resolve(rule.src_port)
+                    ports = [raw] if isinstance(raw, int) else (raw or [])
+                    if not ports:
+                        logger.warning("Skipping rule %r: port %r resolved to no ports", rule.name, rule.src_port)
                         return None
                     parts.append(f"{proto} sport {_port_set(ports)}")
                 elif rule.src_port_range is not None:  # §9d
@@ -138,8 +123,10 @@ def _rule_to_nft_expr(rule: Any, logger: Any, sets: dict[str, Any] | None = None
             # dst port — suppressed when dst_vmap provides the verdict
             if not dst_vmap:
                 if rule.dst_port is not None:
-                    ports = _resolve_port_value(rule.dst_port, rule.name, logger)
-                    if ports is None:
+                    raw = macro_registry.resolve(rule.dst_port)
+                    ports = [raw] if isinstance(raw, int) else (raw or [])
+                    if not ports:
+                        logger.warning("Skipping rule %r: port %r resolved to no ports", rule.name, rule.dst_port)
                         return None
                     parts.append(f"{proto} dport {_port_set(ports)}")
                 elif rule.dst_port_range is not None:  # §9d
@@ -247,22 +234,16 @@ def _nat_rule_to_nft_expr(rule: Any, logger: Any) -> str | None:
         parts.append(f'oif "{rule.out_interface}"')
 
     if rule.src_address and rule.src_address != "any":
-        if is_macro(rule.src_address):
-            result = _resolve_address_macro(rule.src_address, "src_address", rule.name, logger)
-            if result is None:
-                return None
-            fam, addr_expr = result
-        else:
-            fam, addr_expr = _addr_family(rule.src_address), rule.src_address
+        result = _resolve_address_macro(rule.src_address, "src_address", rule.name, logger)
+        if result is None:
+            return None
+        fam, addr_expr = result
         parts.append(f"{fam} saddr {addr_expr}")
     if rule.dst_address and rule.dst_address != "any":
-        if is_macro(rule.dst_address):
-            result = _resolve_address_macro(rule.dst_address, "dst_address", rule.name, logger)
-            if result is None:
-                return None
-            fam, addr_expr = result
-        else:
-            fam, addr_expr = _addr_family(rule.dst_address), rule.dst_address
+        result = _resolve_address_macro(rule.dst_address, "dst_address", rule.name, logger)
+        if result is None:
+            return None
+        fam, addr_expr = result
         parts.append(f"{fam} daddr {addr_expr}")
 
     proto = rule.protocol
@@ -270,8 +251,10 @@ def _nat_rule_to_nft_expr(rule: Any, logger: Any) -> str | None:
         if rule.src_port is not None:
             parts.append(f"{proto} sport {rule.src_port}")
         if rule.dst_port is not None:
-            ports = _resolve_port_value(rule.dst_port, rule.name, logger)
-            if ports is None:
+            raw = macro_registry.resolve(rule.dst_port)
+            ports = [raw] if isinstance(raw, int) else (raw or [])
+            if not ports:
+                logger.warning("Skipping rule %r: port %r resolved to no ports", rule.name, rule.dst_port)
                 return None
             parts.append(f"{proto} dport {_port_set(ports)}")
 
@@ -315,13 +298,10 @@ def _ingress_rule_to_nft_expr(rule: Any, logger: Any, sets: dict[str, Any] | Non
         family = "ip6" if set_def and getattr(set_def, "type", "") == "ipv6_addr" else "ip"
         parts.append(f"{family} saddr @{src_set}")
     elif rule.src_address and rule.src_address != "any":
-        if is_macro(rule.src_address):
-            result = _resolve_address_macro(rule.src_address, "src_address", rule.name, logger)
-            if result is None:
-                return None
-            fam, addr_expr = result
-        else:
-            fam, addr_expr = _addr_family(rule.src_address), rule.src_address
+        result = _resolve_address_macro(rule.src_address, "src_address", rule.name, logger)
+        if result is None:
+            return None
+        fam, addr_expr = result
         parts.append(f"{fam} saddr {addr_expr}")
 
     dst_set = getattr(rule, "dst_address_set", None)
@@ -330,26 +310,27 @@ def _ingress_rule_to_nft_expr(rule: Any, logger: Any, sets: dict[str, Any] | Non
         family = "ip6" if set_def and getattr(set_def, "type", "") == "ipv6_addr" else "ip"
         parts.append(f"{family} daddr @{dst_set}")
     elif rule.dst_address and rule.dst_address != "any":
-        if is_macro(rule.dst_address):
-            result = _resolve_address_macro(rule.dst_address, "dst_address", rule.name, logger)
-            if result is None:
-                return None
-            fam, addr_expr = result
-        else:
-            fam, addr_expr = _addr_family(rule.dst_address), rule.dst_address
+        result = _resolve_address_macro(rule.dst_address, "dst_address", rule.name, logger)
+        if result is None:
+            return None
+        fam, addr_expr = result
         parts.append(f"{fam} daddr {addr_expr}")
 
     proto = rule.protocol
     if proto and proto != "any":
         if proto in ("tcp", "udp"):
             if rule.src_port is not None:
-                ports = _resolve_port_value(rule.src_port, rule.name, logger)
-                if ports is None:
+                raw = macro_registry.resolve(rule.src_port)
+                ports = [raw] if isinstance(raw, int) else (raw or [])
+                if not ports:
+                    logger.warning("Skipping rule %r: port %r resolved to no ports", rule.name, rule.src_port)
                     return None
                 parts.append(f"{proto} sport {_port_set(ports)}")
             if rule.dst_port is not None:
-                ports = _resolve_port_value(rule.dst_port, rule.name, logger)
-                if ports is None:
+                raw = macro_registry.resolve(rule.dst_port)
+                ports = [raw] if isinstance(raw, int) else (raw or [])
+                if not ports:
+                    logger.warning("Skipping rule %r: port %r resolved to no ports", rule.name, rule.dst_port)
                     return None
                 parts.append(f"{proto} dport {_port_set(ports)}")
         elif proto in ("icmp", "icmpv6", "esp", "ah"):

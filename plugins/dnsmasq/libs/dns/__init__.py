@@ -3,6 +3,7 @@ from typing import Any
 
 from fastapi import HTTPException
 from plugin_system.core.events import Event, bus
+from plugin_system.core.macros import macro_registry
 
 from ..models import DnsRecordCreate, DnsUpdate
 
@@ -43,12 +44,17 @@ class DnsMixin:
     def render_config(self) -> list[str]:
         lines: list[str] = []
         dns = self._dns
-        lines.append(f"port={dns.get('port', self.config.get('service_ports', {}).get('dns', {}).get('udp', [53])[0])}")
+        port_raw = macro_registry.resolve(dns.get("port", 53))
+        port = port_raw[0] if isinstance(port_raw, list) else port_raw
+        lines.append(f"port={port}")
         for addr in dns.get("listen_addresses") or ["0.0.0.0"]:
-            lines.append(f"listen-address={addr}")
+            resolved = macro_registry.resolve(addr)
+            for a in (resolved if isinstance(resolved, list) else [resolved]):
+                lines.append(f"listen-address={a}")
         iface = dns.get("interface")
         if iface:
-            lines.append(f"interface={iface}")
+            resolved = macro_registry.resolve(iface)
+            lines.append(f"interface={resolved if isinstance(resolved, str) else iface}")
         if dns.get("no_resolv"):
             lines.append("no-resolv")
         for upstream in dns.get("upstream") or []:

@@ -15,7 +15,7 @@ from typing import Any
 
 from plugin_system.core import PluginBase, Service, on, on_any
 from plugin_system.core.events import Event
-from plugin_system.core.macros import is_macro, macro_registry
+from plugin_system.core.macros import macro_registry
 
 
 class AuditPlugin(PluginBase):
@@ -44,14 +44,9 @@ class AuditPlugin(PluginBase):
         out: dict[str, Any] = {}
         for k, v in payload.items():
             out[k] = v
-            if isinstance(v, str) and is_macro(v):
-                resolved_str = macro_registry.resolve_string(v)
-                if resolved_str is not None:
-                    out[f"{k}_resolved"] = resolved_str
-                    continue
-                resolved_ports = macro_registry.resolve_ports(v)
-                if resolved_ports:
-                    out[f"{k}_resolved"] = resolved_ports
+            resolved = macro_registry.resolve(v)
+            if resolved is not None and resolved != v:
+                out[f"{k}_resolved"] = resolved
         return out
 
     @on_any
