@@ -16,8 +16,10 @@ Events consumed:
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import re
 import shutil
 import smtplib
 import subprocess
@@ -27,13 +29,59 @@ from pathlib import Path
 from typing import Any, List, Optional, Union
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service, on
 from plugin_system.core.events import Event, bus
+from plugin_system.core.macros import macro_registry
 
 
 # ── Pydantic schemas ────────────────────────────────────────────────────────────
+
+# Matches $interface.<alias>.address macro tokens (e.g. $interface.lan.address)
+_INET_MACRO_RE = re.compile(r'^\$interface\.[A-Za-z][A-Za-z0-9_]*\.address$')
+
+
+def _validate_inet_interfaces(value: str) -> str:
+    """Accept 'all', 'loopback-only', 'localhost', macro refs, or a CSV of IP addresses."""
+    v = value.strip()
+    if v in ("all", "loopback-only", "localhost"):
+        return v
+    for part in v.split(","):
+        token = part.strip()
+        if _INET_MACRO_RE.match(token):
+            continue
+        addr = token.strip("[]")
+        try:
+            ipaddress.ip_address(addr)
+        except ValueError:
+            raise ValueError(
+                f"{token!r} is not a valid inet_interfaces token; expected 'all', "
+                "'loopback-only', a macro like '$interface.lan.address', "
+                "or a comma-separated list of IP addresses"
+            )
+    return v
+
+
+def _resolve_inet_interfaces(value: str) -> str:
+    """Expand $interface.*.address macros to IPs; wrap IPv6 in brackets for Postfix."""
+    if value in ("all", "loopback-only", "localhost"):
+        return value
+    parts: list[str] = []
+    for token in (t.strip() for t in value.split(",")):
+        if _INET_MACRO_RE.match(token):
+            raw = macro_registry.resolve(token)
+            ips: list[str] = raw if isinstance(raw, list) else ([raw] if raw else [])
+            for ip_str in ips:
+                try:
+                    addr = ipaddress.ip_address(str(ip_str))
+                    parts.append(f"[{ip_str}]" if addr.version == 6 else str(ip_str))
+                except ValueError:
+                    parts.append(str(ip_str))
+        else:
+            parts.append(token)
+    return ", ".join(parts)
+
 
 class PostfixSettingsUpdate(BaseModel):
     myhostname: Optional[str] = Field(default=None, max_length=253)
@@ -42,6 +90,13 @@ class PostfixSettingsUpdate(BaseModel):
     mynetworks: Optional[str] = Field(default=None, max_length=1024)
     inet_interfaces: Optional[str] = Field(default=None, max_length=256)
     relayhost: Optional[str] = Field(default=None, max_length=253)
+
+    @field_validator("inet_interfaces")
+    @classmethod
+    def validate_inet_interfaces(cls, v: object) -> object:
+        if v is None:
+            return v
+        return _validate_inet_interfaces(str(v))
     smtp_tls_security_level: Optional[str] = Field(default=None, max_length=32)
     smtp_sasl_auth_enable: Optional[bool] = None
     smtp_sasl_password_maps: Optional[str] = Field(default=None, max_length=512)
@@ -95,15 +150,24 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
         settings = self._state.get("postfix_settings", {})
         if not settings:
             return
-        postconf_args = {
-            k: ("yes" if v is True else "no" if v is False else str(v))
-            for k, v in settings.items()
-        }
+        postconf_args = self._build_postconf_args(settings)
         try:
             self._postconf_set(postconf_args)
             self.logger.info("Re-applied %d postfix setting(s) from state on boot", len(settings))
         except HTTPException as exc:
             self.logger.warning("Could not re-apply postfix settings on boot: %s", exc.detail)
+
+    def _build_postconf_args(self, settings: dict[str, Any]) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for k, v in settings.items():
+            if isinstance(v, bool):
+                result[k] = "yes" if v else "no"
+            else:
+                s = str(v)
+                if k == "inet_interfaces":
+                    s = _resolve_inet_interfaces(s)
+                result[k] = s
+        return result
 
     # ── system helpers (mockable) ────────────────────────────────────────────────
 
@@ -251,10 +315,7 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
         updates = body.model_dump(exclude_none=True)
         if not updates:
             raise HTTPException(400, "No settings provided")
-        postconf_args: dict[str, str] = {
-            k: ("yes" if v is True else "no" if v is False else str(v))
-            for k, v in updates.items()
-        }
+        postconf_args = self._build_postconf_args(updates)
         before = self._postconf_get(list(updates.keys()))
         self._postconf_set(postconf_args)
         self._state.setdefault("postfix_settings", {}).update(updates)

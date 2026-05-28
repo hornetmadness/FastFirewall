@@ -21,7 +21,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 
 from plugin_system import manager_cli
 from app_config import AppConfig
-from plugin_system.core import PluginLoader, bus
+from plugin_system.core import PluginLoader, bus, macro_registry
 from infra.state_manager import configure as configure_state
 from request_context import request_tracing_middleware
 from ff_auth import (
@@ -147,6 +147,7 @@ loader = PluginLoader(bus=bus, app=app, logger=cfg.logger)
 only_plugins, ignore_plugins_states, show_macros = manager_cli.run(loader, cfg.plugins_dir())
 loader.ignore_state_on_boot = ignore_plugins_states
 loader.load_directory(cfg.plugins_dir(), only=only_plugins, skip_requirements=show_macros)
+macro_registry.register_service_port("fastfirewall-api", "tcp", [cfg.server.port])
 
 if show_macros:
     import sys

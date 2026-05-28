@@ -26,6 +26,7 @@ Plugin-defined namespaces:
 from __future__ import annotations
 
 import re
+import socket
 from typing import Any, Callable, Optional, Union
 
 
@@ -35,6 +36,20 @@ MACRO_RE = re.compile(r'^\$([a-z][a-z0-9_]*)(\.[a-zA-Z0-9_]+)+$')
 
 # Extracts namespace + everything after the first dot for dispatch.
 _PARSE_RE = re.compile(r'^\$([a-z][a-z0-9_]*)\.(.+)$')
+
+
+def extract_macros(data: object) -> set[str]:
+    """Recursively collect every macro string found in a nested structure."""
+    macros: set[str] = set()
+    if isinstance(data, str) and is_macro(data):
+        macros.add(data)
+    elif isinstance(data, dict):
+        for v in data.values():
+            macros |= extract_macros(v)
+    elif isinstance(data, (list, tuple)):
+        for item in data:
+            macros |= extract_macros(item)
+    return macros
 
 
 def is_macro(value: object) -> bool:
@@ -52,12 +67,21 @@ def validate_macro_syntax(value: str) -> str:
 
 
 def _resolve_service_port(rest: str, data: dict[str, dict[str, list[int]]]) -> list[int]:
-    """Resolve $service_port.<service>.<proto> → port list."""
+    """Resolve $service_port.<service>.<proto> → port list.
+
+    Precedence: plugin/app declaration → /etc/services → [].
+    """
     parts = rest.split(".", 1)
     if len(parts) != 2:
         return []
     svc, proto = parts
-    return data.get(svc, {}).get(proto, [])
+    declared = data.get(svc, {}).get(proto)
+    if declared:
+        return declared
+    try:
+        return [socket.getservbyname(svc, proto)]
+    except OSError:
+        return []
 
 
 class MacroRegistry:
@@ -94,6 +118,11 @@ class MacroRegistry:
     def set_service_ports(self, service_ports: dict[str, dict[str, list[int]]]) -> None:
         """Called by the loader after all plugins are loaded."""
         self._service_ports = dict(service_ports)
+        self._invalidate()
+
+    def register_service_port(self, svc: str, proto: str, ports: list[int]) -> None:
+        """Register one service port entry without replacing the whole map."""
+        self._service_ports.setdefault(svc, {})[proto] = ports
         self._invalidate()
 
     @property
@@ -152,6 +181,8 @@ class MacroRegistry:
         if m is None:
             return None
         namespace, rest = m.group(1), m.group(2)
+        if namespace == "service_port":
+            return _resolve_service_port(rest, self._service_ports)
         resolver = self._resolvers.get(namespace)
         if resolver is None:
             return None

@@ -1,5 +1,14 @@
 {
-  "postfix_settings": {
-    "relayhost": "relay.themathis.house"
+  "desired_state": {
+    "postfix_settings": {
+      "inet_interfaces": "$interface.lan.address, $interface.lo.address",
+      "relayhost": "relay.themathis.house"
+    }
+  },
+  "current_state": {
+    "postfix_settings": {
+      "inet_interfaces": "$interface.lan.address, $interface.lo.address",
+      "relayhost": "relay.themathis.house"
+    }
   }
 }

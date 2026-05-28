@@ -66,8 +66,9 @@ from models import (  # noqa: E402
 )
 
 from plugin_system.core import ApiRouterPlugin, PluginBase, PluginStateFile, Service
+from plugin_system.core.decorators import on
 from plugin_system.core.events import Event, bus
-from plugin_system.core.macros import macro_registry
+from plugin_system.core.macros import extract_macros, macro_registry
 
 
 def _rule_hash(data: dict) -> str:
@@ -138,6 +139,20 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         self._save_state()
         self.logger.info("Shut down — state saved")
 
+    @on("plugins.all_loaded")
+    def _on_plugins_loaded(self, event: Event) -> None:
+        if self.config.get("ignore_state_on_boot", False):
+            return
+        current = self._collect_macro_snapshot()
+        if not current:
+            return
+        stored = self._state_file.get_macro_snapshot()
+        if stored == current:
+            return
+        changed = {k for k in current if current.get(k) != (stored or {}).get(k)}
+        self.logger.info("Macro values changed since last apply (%s) — re-applying", ", ".join(sorted(changed)))
+        self._apply_state()
+
     # ── persistence ────────────────────────────────────────────────────
 
     def _desired_snapshot(self) -> dict:
@@ -155,6 +170,10 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     def _save_state(self) -> None:
         self._state_file.save_desired(self._desired_snapshot())
+
+    def _collect_macro_snapshot(self) -> dict:
+        macros = extract_macros(self._desired_snapshot())
+        return {m: macro_registry.resolve(m) for m in sorted(macros)}
 
     def _load_state(self) -> None:
         fresh_install = not self._state_file.path.exists()
@@ -230,6 +249,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
                 quotas=self._quotas,
             )
             self._apply_nft_script(script)
+            self._state_file.set_macro_snapshot(self._collect_macro_snapshot())
             self._state_file.commit(self._desired_snapshot())
             self.logger.info("Re-applied %d rules on boot", len(enabled))
         except Exception as exc:
@@ -808,6 +828,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         except RuntimeError:
             self.logger.error("Failed to apply compiled firewall rules", exc_info=True)
             raise HTTPException(500, "Failed to apply firewall rules; check server logs")
+        self._state_file.set_macro_snapshot(self._collect_macro_snapshot())
         self._state_file.commit()
         bus.emit(Event(
             name="firewall.applied",

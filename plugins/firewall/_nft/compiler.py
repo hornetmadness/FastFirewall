@@ -24,6 +24,36 @@ def _addr_family(addr: str) -> str:
         return "ip"
 
 
+def _resolve_address_macro(
+    value: str,
+    field: str,
+    rule_name: str,
+    logger: Any,
+) -> tuple[str, str] | None:
+    """Resolve an address macro to (nft_family, nft_address_expr), or None to skip."""
+    resolved = macro_registry.resolve(value)
+    if not resolved:
+        logger.warning(
+            "Skipping rule %r: macro %r resolved to no addresses (plugin not loaded?)",
+            rule_name, value,
+        )
+        return None
+    addrs = [resolved] if isinstance(resolved, str) else [str(a) for a in resolved]
+    ipv4 = [a for a in addrs if _addr_family(a) == "ip"]
+    ipv6 = [a for a in addrs if _addr_family(a) == "ip6"]
+    if ipv4 and ipv6:
+        logger.warning(
+            "Rule %r: macro %r has mixed IPv4/IPv6 addresses; using IPv4 only for %s",
+            rule_name, value, field,
+        )
+        addrs = ipv4
+    if not addrs:
+        return None
+    fam = _addr_family(addrs[0])
+    expr = addrs[0] if len(addrs) == 1 else "{ " + ", ".join(addrs) + " }"
+    return fam, expr
+
+
 def _resolve_port_value(value: int | str, rule_name: str, logger: Any) -> list[int] | None:
     """Resolve a port field to a list of ints, or None to skip the rule."""
     if isinstance(value, int):
@@ -63,8 +93,14 @@ def _rule_to_nft_expr(rule: Any, logger: Any, sets: dict[str, Any] | None = None
         family = "ip6" if set_def and getattr(set_def, "type", "") == "ipv6_addr" else "ip"
         parts.append(f"{family} saddr @{src_set}")
     elif rule.src_address and rule.src_address != "any":
-        fam = _addr_family(rule.src_address)
-        parts.append(f"{fam} saddr {rule.src_address}")
+        if is_macro(rule.src_address):
+            result = _resolve_address_macro(rule.src_address, "src_address", rule.name, logger)
+            if result is None:
+                return None
+            fam, addr_expr = result
+        else:
+            fam, addr_expr = _addr_family(rule.src_address), rule.src_address
+        parts.append(f"{fam} saddr {addr_expr}")
 
     dst_set = getattr(rule, "dst_address_set", None)
     if dst_set:
@@ -72,8 +108,14 @@ def _rule_to_nft_expr(rule: Any, logger: Any, sets: dict[str, Any] | None = None
         family = "ip6" if set_def and getattr(set_def, "type", "") == "ipv6_addr" else "ip"
         parts.append(f"{family} daddr @{dst_set}")
     elif rule.dst_address and rule.dst_address != "any":
-        fam = _addr_family(rule.dst_address)
-        parts.append(f"{fam} daddr {rule.dst_address}")
+        if is_macro(rule.dst_address):
+            result = _resolve_address_macro(rule.dst_address, "dst_address", rule.name, logger)
+            if result is None:
+                return None
+            fam, addr_expr = result
+        else:
+            fam, addr_expr = _addr_family(rule.dst_address), rule.dst_address
+        parts.append(f"{fam} daddr {addr_expr}")
 
     # §12 verdict maps — when set, the vmap is the verdict; skip normal port+verdict
     dst_vmap = getattr(rule, "dst_port_vmap", None)
@@ -205,11 +247,23 @@ def _nat_rule_to_nft_expr(rule: Any, logger: Any) -> str | None:
         parts.append(f'oif "{rule.out_interface}"')
 
     if rule.src_address and rule.src_address != "any":
-        fam = _addr_family(rule.src_address)
-        parts.append(f"{fam} saddr {rule.src_address}")
+        if is_macro(rule.src_address):
+            result = _resolve_address_macro(rule.src_address, "src_address", rule.name, logger)
+            if result is None:
+                return None
+            fam, addr_expr = result
+        else:
+            fam, addr_expr = _addr_family(rule.src_address), rule.src_address
+        parts.append(f"{fam} saddr {addr_expr}")
     if rule.dst_address and rule.dst_address != "any":
-        fam = _addr_family(rule.dst_address)
-        parts.append(f"{fam} daddr {rule.dst_address}")
+        if is_macro(rule.dst_address):
+            result = _resolve_address_macro(rule.dst_address, "dst_address", rule.name, logger)
+            if result is None:
+                return None
+            fam, addr_expr = result
+        else:
+            fam, addr_expr = _addr_family(rule.dst_address), rule.dst_address
+        parts.append(f"{fam} daddr {addr_expr}")
 
     proto = rule.protocol
     if proto:
@@ -261,8 +315,14 @@ def _ingress_rule_to_nft_expr(rule: Any, logger: Any, sets: dict[str, Any] | Non
         family = "ip6" if set_def and getattr(set_def, "type", "") == "ipv6_addr" else "ip"
         parts.append(f"{family} saddr @{src_set}")
     elif rule.src_address and rule.src_address != "any":
-        fam = _addr_family(rule.src_address)
-        parts.append(f"{fam} saddr {rule.src_address}")
+        if is_macro(rule.src_address):
+            result = _resolve_address_macro(rule.src_address, "src_address", rule.name, logger)
+            if result is None:
+                return None
+            fam, addr_expr = result
+        else:
+            fam, addr_expr = _addr_family(rule.src_address), rule.src_address
+        parts.append(f"{fam} saddr {addr_expr}")
 
     dst_set = getattr(rule, "dst_address_set", None)
     if dst_set:
@@ -270,8 +330,14 @@ def _ingress_rule_to_nft_expr(rule: Any, logger: Any, sets: dict[str, Any] | Non
         family = "ip6" if set_def and getattr(set_def, "type", "") == "ipv6_addr" else "ip"
         parts.append(f"{family} daddr @{dst_set}")
     elif rule.dst_address and rule.dst_address != "any":
-        fam = _addr_family(rule.dst_address)
-        parts.append(f"{fam} daddr {rule.dst_address}")
+        if is_macro(rule.dst_address):
+            result = _resolve_address_macro(rule.dst_address, "dst_address", rule.name, logger)
+            if result is None:
+                return None
+            fam, addr_expr = result
+        else:
+            fam, addr_expr = _addr_family(rule.dst_address), rule.dst_address
+        parts.append(f"{fam} daddr {addr_expr}")
 
     proto = rule.protocol
     if proto and proto != "any":
