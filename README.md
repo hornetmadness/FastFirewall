@@ -1,8 +1,8 @@
 # FastFirewall
 
-An API-first firewall and router management system. FastFirewall exposes a REST API for managing firewall rules, network interfaces, DNS, DHCP, system users, and more — everything you'd configure manually on a Linux router or gateway, controllable via HTTP from anywhere on your network.
+An API-first firewall and router (network appliance) management system. FastFirewall exposes a REST API for managing firewall rules, network interfaces, DNS, DHCP, system users, and more — everything you'd configure manually on a Linux router or gateway, controllable via HTTP from anywhere on your network.
 
-Built on FastAPI and driven entirely by plugins. Every feature is a plugin; the core app has no routes of its own.
+Built on FastAPI and driven entirely by plugins. Every feature is a plugin; the core app has only a few API routes of its own.
 
 ---
 
@@ -299,7 +299,7 @@ uv run python app.py --ignore-plugins-states
 
 **Routes:** `/v1/firewall/`
 
-Manages firewall rules and compiles them to nftables using [aerleon](https://github.com/aerleon/aerleon). Rules are defined declaratively via the API; call `POST /apply` to push them to the kernel.
+Manages firewall rules and compiles them to an nftables script applied via a sudo wrapper (`nft_cmd`). Rules are defined declaratively via the API; call `POST /apply` to push them to the kernel.
 
 Rules are stored in a JSON file. An implicit `deny all` is always appended at the end of the compiled policy — you only need to write `accept` rules.
 
@@ -307,17 +307,98 @@ Rules are stored in a JSON file. An implicit `deny all` is always appended at th
 
 **Rule IDs** are a content hash of the rule fields. Submitting an identical rule twice returns `409 Conflict` instead of creating a duplicate.
 
+**`PUT /rules/{id}`** accepts a partial body — only the fields you include are changed; omitted fields keep their current values.
+
 | Route | Method | Description |
 |---|---|---|
 | `/rules` | GET | List all rules |
 | `/rules` | POST | Create a rule |
-| `/rules/{id}` | GET / PUT / DELETE | Read, update, or delete a rule |
-| `/check` | POST | Dry-run compile — validates without applying |
+| `/rules/{id}` | GET | Get a rule |
+| `/rules/{id}` | PUT | Partially update a rule (omitted fields unchanged) |
+| `/rules/{id}` | DELETE | Delete a rule |
+| `/chains` | GET | List chains and their policies |
+| `/chains/{name}` | GET | Get a chain |
+| `/chains/{name}` | PUT | Update chain policy, priority, or preamble |
+| `/sets` | GET | List named sets |
+| `/sets` | POST | Create a named set |
+| `/sets/{name}` | GET / DELETE | Get or delete a named set |
+| `/sets/{name}/elements` | POST / DELETE | Add or remove set elements |
+| `/nat/rules` | GET | List NAT rules |
+| `/nat/rules` | POST | Create a NAT rule |
+| `/nat/rules/{id}` | GET / PUT / DELETE | Read, update, or delete a NAT rule |
+| `/custom-chains` | GET | List custom chains |
+| `/custom-chains` | POST | Create a custom chain |
+| `/custom-chains/{name}` | GET / DELETE | Get or delete a custom chain |
+| `/flowtables` | GET | List flowtables |
+| `/flowtables` | POST | Create a flowtable |
+| `/flowtables/{name}` | GET / DELETE | Get or delete a flowtable |
+| `/ingress/rules` | GET | List ingress (netdev) rules |
+| `/ingress/rules` | POST | Create an ingress rule |
+| `/ingress/rules/{id}` | GET / PUT / DELETE | Read, update, or delete an ingress rule |
+| `/quotas` | GET | List named quotas |
+| `/quotas` | POST | Create a named quota |
+| `/quotas/{name}` | GET / DELETE | Get or delete a named quota |
+| `/maps` | GET | List verdict maps |
+| `/maps` | POST | Create a verdict map |
+| `/maps/{name}` | GET / DELETE | Get or delete a verdict map |
+| `/maps/{name}/entries` | POST / DELETE | Add or remove verdict map entries |
+| `/counters` | GET | Live counter values from the kernel |
+| `/counters/{name}/reset` | POST | Atomically reset a named counter |
+| `/table` | GET | Current table name, family, and chain list |
+| `/check` | POST | Dry-run validate — validates without applying |
 | `/apply` | POST | Compile and apply to nftables |
-| `/compile` | POST | Preview compiled output for any supported platform |
-| `/policy` | GET | Show the raw aerleon policy YAML |
-| `/platforms` | GET | List supported target platforms |
-| `/status` | GET | Plugin status, pending changes, compiled output path |
+| `/compile` | POST | Compile to nft script (preview, no apply) |
+| `/discard` | POST | Revert pending changes to last applied state |
+| `/live-state` | GET | Current kernel ruleset as parsed JSON |
+| `/status` | GET | Plugin status and pending changes |
+
+**Rule fields:**
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `name` | `str` | required | max 100 chars |
+| `chain` | `str` | `"input"` | hook chain or custom chain name |
+| `action` | `"accept" \| "deny" \| "reject" \| "jump" \| "return"` | `"deny"` | `reject` sends ICMP unreachable; `deny` silently drops |
+| `jump_target` | `str` | `null` | required when `action` is `"jump"` |
+| `protocol` | `"tcp" \| "udp" \| "icmp" \| "icmpv6" \| "esp" \| "ah" \| "any"` | `null` | |
+| `src_address` | `str` | `"any"` | IPv4/IPv6 CIDR or `"any"` |
+| `dst_address` | `str` | `"any"` | IPv4/IPv6 CIDR or `"any"` |
+| `src_address_set` | `str` | `null` | named set reference, e.g. `@blocked-ips` |
+| `dst_address_set` | `str` | `null` | named set reference |
+| `src_interface` | `str` | `null` | `iif` match |
+| `dst_interface` | `str` | `null` | `oif` match |
+| `src_port` | `int \| macro` | `null` | TCP/UDP only; accepts `$service_port.*` macros |
+| `dst_port` | `int \| macro` | `null` | TCP/UDP only; accepts `$service_port.*` macros |
+| `src_port_range` | `[int, int]` | `null` | TCP/UDP port range |
+| `dst_port_range` | `[int, int]` | `null` | TCP/UDP port range |
+| `src_port_vmap` | `str` | `null` | verdict map for `sport vmap @name` |
+| `dst_port_vmap` | `str` | `null` | verdict map for `dport vmap @name` |
+| `tcp_flags` | `list[str]` | `null` | flag match: `syn`, `ack`, `fin`, `rst`, `urg`, `psh` |
+| `tcp_flags_mask` | `list[str]` | `null` | mask for `tcp_flags` |
+| `icmp_type` | `int \| str` | `null` | ICMP type, e.g. `"echo-request"` or `8` |
+| `ct_state` | `list[str]` | `null` | CT state: `new`, `established`, `related`, `invalid` |
+| `counter_name` | `str` | `null` | named counter; emits `counter name <n>` before the verdict |
+| `quota_name` | `str` | `null` | named quota; emits `quota name <n>` before the verdict |
+| `mark` | `int` | `null` | packet mark match |
+| `dscp` | `int \| str` | `null` | DSCP match, e.g. `"cs0"` or `0` |
+| `pkttype` | `"unicast" \| "broadcast" \| "multicast"` | `null` | packet type match |
+| `rate_limit` | object | `null` | rate-limiting; emits `limit rate [over] N/unit [burst M]` |
+| `log` | object | `null` | logging; emits `log prefix "..." level ...` before the verdict |
+| `comment` | `str` | `null` | max 255 chars |
+| `priority` | `int` | `100` | lower = matched first |
+| `enabled` | `bool` | `true` | disabled rules are compiled out |
+
+**Chains and preamble:**
+
+Each chain has a `preamble` — a list of raw nft expressions inserted before user rules. The defaults are:
+
+| Chain | Default policy | Default preamble |
+|---|---|---|
+| `input` | `drop` | `["iif lo accept", "ct state established,related accept", "ct state invalid drop"]` |
+| `forward` | `drop` | `["ct state established,related accept"]` |
+| `output` | `accept` | `[]` |
+
+Preamble rules are stored in state and compiled into the script. Update them via `PUT /chains/{name}` with `{"preamble": [...]}`. Changes are deferred; `POST /apply` is required.
 
 **Example — create and apply a rule:**
 ```bash
@@ -334,10 +415,6 @@ curl -su admin:admin -X POST http://localhost:8000/v1/firewall/check
 curl -su admin:admin -X POST http://localhost:8000/v1/firewall/apply
 ```
 
-**Supported platforms:** `nftables` (default, auto-applied), `checkpoint`, `ciscoasa`, `juniper`, `paloalto`, `arista`, `gce`, and others for generating configs to paste elsewhere.
-
-**Debugging:** set `debug: true` in `plugin.yaml` config to have aerleon's intermediate `networks.yaml` and `policy.yaml` written to `plugins/firewall/data/aerleon_debug/` on every compile. The `debug_dir` path appears in `GET /status`.
-
 ---
 
 ### Networking Plugin
@@ -345,7 +422,7 @@ curl -su admin:admin -X POST http://localhost:8000/v1/firewall/apply
 **Routes:** `/v1/networking/`  
 **Depends on:** host plugin
 
-Manages network interfaces, static routes, and kernel sysctl settings via [ifstate](https://github.com/ipinfra/ifstate) (`ifstatecli`). Desired state is stored in a JSON file; nothing is applied to the kernel until `POST /apply`.
+Manages network interfaces and static routes via [ifstate](https://github.com/ipinfra/ifstate) (`ifstatecli`). Desired state is stored in a JSON file; nothing is applied to the kernel until `POST /apply`. Sysctl parameters are managed by the host plugin (`PUT /v1/host/sysctl/{key}`).
 
 **Deferred apply model:** mutations (PUT/POST/DELETE) only update the state file. `GET /status` will show `pending_changes: true` until you apply.
 
@@ -357,7 +434,6 @@ Manages network interfaces, static routes, and kernel sysctl settings via [ifsta
 | `/config/routes` | GET | List managed routes |
 | `/config/routes` | POST | Add a route |
 | `/config/routes/{id}` | DELETE | Remove a route |
-| `/config/sysctl/{key}` | PUT / DELETE | Set or remove a sysctl value |
 | `/config/diff` | GET | Diff between last applied and desired state |
 | `/config` | GET | Full desired state (YAML or JSON) |
 | `/interfaces` | GET | Live interface state from `ifstatecli show` |
@@ -581,7 +657,7 @@ The bootstrap wizard (`tools/bootstrap.py`) drives the API to configure common s
 
 **Interactive wizard:**
 ```bash
-uv run tools/bootstrap.py
+uv run tools/bootstrap.py --save init.json
 ```
 
 The wizard will ask you to choose a scenario:
@@ -696,7 +772,7 @@ curl -su admin:admin -X PUT http://localhost:8000/v1/networking/config/interface
 
 ```bash
 curl -su admin:admin -X PUT \
-  http://localhost:8000/v1/networking/config/sysctl/net.ipv4.ip_forward \
+  http://localhost:8000/v1/host/sysctl/net.ipv4.ip_forward \
   -H "Content-Type: application/json" \
   -d '{"value":"1"}'
 ```
@@ -819,6 +895,9 @@ server:
   host: "0.0.0.0"
   port: 8000
   reload: false                   # set true during development
+  max_payload_bytes: 5242880      # 5 MB — requests larger than this return 413
+  cors:
+    allowed_origins: []           # e.g. ["https://myfirewall.local"] — empty = no CORS headers
 
 state:
   backup:
@@ -839,6 +918,7 @@ auth:
   rate_limit:
     max_attempts: 5       # failed /token attempts before 429
     window_seconds: 300   # sliding window length in seconds
+  trusted_proxies: []     # IPs whose X-Forwarded-For is trusted for rate limiting
   users:
     - username: admin
       password: "admin"           # plaintext — hashed at startup
