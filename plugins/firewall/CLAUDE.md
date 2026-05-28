@@ -17,7 +17,7 @@ Manages firewall rules and compiles them to nftables scripts applied via a sudo 
 | `DELETE` | `/rules/{rule_id}` | Delete a firewall rule |
 | `GET` | `/chains` | List chains and their policies |
 | `GET` | `/chains/{name}` | Get a single chain |
-| `PUT` | `/chains/{name}` | Update chain policy or priority |
+| `PUT` | `/chains/{name}` | Update chain policy, priority, or preamble |
 | `GET` | `/sets` | List named sets |
 | `POST` | `/sets` | Create a named set |
 | `GET` | `/sets/{name}` | Get a named set |
@@ -101,17 +101,13 @@ Every rule and chain response includes `applied: bool`. It is computed at respon
 
 The compiler always generates all three chains regardless of whether user rules target them:
 
-| Chain | Hook | Default policy | Notes |
+| Chain | Hook | Default policy | Default preamble |
 |---|---|---|---|
-| `input` | `input` | `drop` | traffic destined for the host |
-| `forward` | `forward` | `drop` | traffic routed through the host (gateway use) |
-| `output` | `output` | `accept` | traffic originating from the host |
+| `input` | `input` | `drop` | `["iif lo accept", "ct state established,related accept", "ct state invalid drop"]` |
+| `forward` | `forward` | `drop` | `["ct state established,related accept"]` |
+| `output` | `output` | `accept` | `[]` |
 
-Chain policies and priorities can be updated via `PUT /chains/{name}`. Changes are deferred — `POST /apply` is required to push them to the kernel.
-
-## Stateful connection tracking
-
-`ct state established,related accept` is injected by the compiler as the first rule in both `input` and `forward` chains when their policy is `drop`. It is **not** stored in the rule list and cannot be removed — it is a compiler invariant that ensures return traffic for established connections is never dropped. If a chain's policy is changed to `accept`, the ct state rule is not injected for that chain.
+Each chain has a `preamble` — a list of raw nft expressions compiled into the script before user rules. Preamble rules are stored in state and are editable via `PUT /chains/{name}` with `{"preamble": [...]}`. Changes are deferred — `POST /apply` is required to push them to the kernel.
 
 ## Rule IDs
 
@@ -136,9 +132,9 @@ On first boot (when the state file does not yet exist), the plugin seeds two def
       {"id": "...", "name": "allow-ssh", "chain": "input", "action": "accept", "protocol": "tcp", ...}
     ],
     "chains": {
-      "input":   {"policy": "drop",   "priority": 0},
-      "forward": {"policy": "drop",   "priority": 0},
-      "output":  {"policy": "accept", "priority": 0}
+      "input":   {"policy": "drop",   "priority": 0, "preamble": ["iif lo accept", "ct state established,related accept", "ct state invalid drop"]},
+      "forward": {"policy": "drop",   "priority": 0, "preamble": ["ct state established,related accept"]},
+      "output":  {"policy": "accept", "priority": 0, "preamble": []}
     }
   },
   "current_state": {
