@@ -148,6 +148,7 @@ only_plugins, ignore_plugins_states, show_macros = manager_cli.run(loader, cfg.p
 loader.ignore_state_on_boot = ignore_plugins_states
 loader.load_directory(cfg.plugins_dir(), only=only_plugins, skip_requirements=show_macros)
 macro_registry.register_service_port("fastfirewall-api", "tcp", [cfg.server.port])
+loader.finished()
 
 if show_macros:
     import sys

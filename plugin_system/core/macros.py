@@ -32,7 +32,7 @@ from typing import Any, Callable, Optional, Union
 
 # Validates the general macro shape: $namespace.seg1[.seg2...]
 # Namespace must be lowercase; segments may be mixed-case (e.g. $interface.LAN1).
-MACRO_RE = re.compile(r'^\$([a-z][a-z0-9_]*)(\.[a-zA-Z0-9_]+)+$')
+MACRO_RE = re.compile(r'^\$([a-z][a-z0-9_]*)(\.[a-zA-Z0-9_-]+)+$')
 
 # Extracts namespace + everything after the first dot for dispatch.
 _PARSE_RE = re.compile(r'^\$([a-z][a-z0-9_]*)\.(.+)$')
@@ -134,55 +134,31 @@ class MacroRegistry:
         result.extend(self._resolvers.keys())
         return result
 
-    def resolve_ports(self, value: Union[int, str]) -> list[int]:
-        """
-        Resolve a port macro or literal to a list of port numbers.
-
-        - int            → [value]
-        - literal string → []  (use int() on the caller side if needed)
-        - macro string   → dispatch to namespace; [] if unresolvable.
-
-        Results for the ``service_port`` namespace are cached because those
-        values are static between set_service_ports() calls.  Plugin-defined
-        namespace resolvers may read live state that changes without a
-        register_namespace call, so their results are never cached.
-        """
-        if isinstance(value, int):
-            return [value]
-        m = _PARSE_RE.match(value)
-        if m is None:
-            return []
-        namespace, rest = m.group(1), m.group(2)
-        if namespace == "service_port":
-            cache_key = ("ports", value)
-            if cache_key in self._cache:
-                return self._cache[cache_key]
-            result: list[int] = _resolve_service_port(rest, self._service_ports)
-            self._cache[cache_key] = result
-            return result
-        resolver = self._resolvers.get(namespace)
-        if resolver is None:
-            return []
-        raw = resolver(*rest.split("."))
-        if isinstance(raw, list):
-            try:
-                return [int(x) for x in raw]
-            except (TypeError, ValueError):
-                return []
-        if isinstance(raw, int):
-            return [raw]
-        return []
-
-    def resolve(self, value: str) -> Any:
+    def resolve(self, value: Union[int, str]) -> Any:
         """Resolve a macro and return the raw result without type coercion.
-        Returns None if the namespace is unknown, the macro is malformed, or the
-        resolver returns None."""
+
+        - non-macro str  → string itself (e.g. "http" → "http")
+        - macro string   → dispatch to namespace; None if unresolvable.
+
+        Results for the ``service_port`` namespace are cached. Plugin-defined
+        namespace results are not cached.
+        """
+        if not isinstance(value, str):
+            return value
+
+        if not value.startswith("$"):
+            return value
         m = _PARSE_RE.match(value)
         if m is None:
             return None
         namespace, rest = m.group(1), m.group(2)
         if namespace == "service_port":
-            return _resolve_service_port(rest, self._service_ports)
+            cache_key = ("resolve", value)
+            if cache_key in self._cache:
+                return self._cache[cache_key]
+            result: Any = _resolve_service_port(rest, self._service_ports)
+            self._cache[cache_key] = result
+            return result
         resolver = self._resolvers.get(namespace)
         if resolver is None:
             return None

@@ -156,8 +156,9 @@ This is a **FastAPI application driven entirely by plugins**. The app itself (`a
 2. `manager_cli.run(loader, plugins_dir)` parses CLI args; exits early for management commands, otherwise returns an optional plugin allow-list.
 3. `PluginLoader.load_directory()` scans the configured `plugins/` directory and derives load order via topological sort of `plugin_requirements` (dependencies before dependents; alphabetical tiebreaker). Pass `only=[...]` to restrict which plugins are loaded; transitive dependencies are included automatically. If a plugin fails to load, all plugins that depend on it (directly or transitively) are skipped rather than erroring out.
 4. For each plugin directory with a `plugin.yaml` + `plugin.py`: the loader imports the module, instantiates any `PluginBase` subclass, wires up event handlers, calls `setup()`, then mounts FastAPI routes if the plugin is an `ApiRouterPlugin` and registers macro namespaces if the plugin is a `MacroProviderPlugin`. **Instantiation (calling `__init__`) happens before `os_requirements` are installed** — plugins that need a third-party apt/yum/dnf repo for their `os_requirements` package must emit `pkg_management.add.repo` from `__init__` so the repo exists when the loader proceeds to install packages.
-5. After all plugins are loaded, the loader populates `macro_registry` with the aggregated `service_port` data (ports with `-1`-only entries are omitted), then emits `plugins.all_loaded` on the bus.
-6. A `plugin.loaded` event is emitted on the bus after each individual plugin loads.
+5. After all plugins are loaded, the loader populates `macro_registry` with the aggregated `service_port` data (ports with `-1`-only entries are omitted). `load_directory()` then returns — it does **not** emit `plugins.all_loaded` itself.
+6. `app.py` performs any post-load setup (e.g. `macro_registry.register_service_port("fastfirewall-api", ...)`) and then calls `loader.finished()`, which emits `plugins.all_loaded` on the bus. This ordering guarantees that all macro namespaces are fully populated when handlers fire.
+7. A `plugin.loaded` event is emitted on the bus after each individual plugin loads.
 
 ### Plugin anatomy
 
@@ -308,25 +309,34 @@ Populated by `MacroProviderPlugin` subclasses (see Plugin base classes above). T
 
 **Resolution API**
 
+`resolve()` is the single resolution entry point. It handles every case — callers never need `is_macro()` pre-checks:
+
 ```python
 from plugin_system.core.macros import macro_registry
 
-# Resolve to a list of port integers (also accepts a bare int)
-ports: list[int] = macro_registry.resolve_ports("$service_port.dns.udp")   # → [53]
+# Macro → raw value from the resolver (list, string, int, …)
+raw: Any = macro_registry.resolve("$service_port.dns.udp")   # → [53]
+raw: Any = macro_registry.resolve("$interface.lan.address")  # → ["192.168.0.1"]
+raw: Any = macro_registry.resolve("$host.fqdn")              # → "myhost.example.com"
 
-# Resolve to a string (string-valued macros only)
-name: str | None = macro_registry.resolve_string("$interface.lan.name")    # → "enp0s25"
+# Non-macro string → returned as-is (passthrough)
+raw: Any = macro_registry.resolve("192.168.1.1")             # → "192.168.1.1"
 
-# Resolve without type coercion — returns the raw value from the resolver
-raw: Any = macro_registry.resolve("$interface.lan.address")                # → ["192.168.0.1"]
+# Non-string (int, etc.) → returned as-is
+raw: Any = macro_registry.resolve(8080)                      # → 8080
+
+# Unknown namespace or malformed macro → None
+raw: Any = macro_registry.resolve("$unknown.x")              # → None
 
 # All currently registered namespaces
-namespaces: list[str] = macro_registry.namespaces   # e.g. ["service_port", "interface"]
+namespaces: list[str] = macro_registry.namespaces   # e.g. ["service_port", "interface", "host"]
 ```
 
-`resolve_ports` returns `[]` and `resolve_string` / `resolve` return `None` for unknown macros or malformed syntax — callers should treat these as "unresolvable" rather than errors.
+`resolve()` returns `None` for unknown namespaces and malformed macros — callers should treat this as "unresolvable". Non-macro values (plain strings, ints) pass through unchanged, so callers can call `resolve()` unconditionally without a prior `is_macro()` check.
 
-`resolve_ports` caches results for the `service_port` namespace (the hot path in firewall rule compilation) in an internal dict and invalidates it on `register_namespace`, `unregister_namespace`, and `set_service_ports`. Plugin-defined namespace results (e.g. `$interface.*`) are **not** cached because their resolvers read live plugin state that can change without a `register_namespace` call.
+`resolve()` caches results for the `service_port` namespace (the hot path in firewall rule compilation) and invalidates the cache on `register_namespace`, `unregister_namespace`, and `set_service_ports`. Plugin-defined namespace results (e.g. `$interface.*`, `$host.*`) are **not** cached because their resolvers read live plugin state that can change without a `register_namespace` call.
+
+Macro segment syntax allows hyphens: `$service_port.fastfirewall-api.tcp` is valid.
 
 **Testing with macros**
 

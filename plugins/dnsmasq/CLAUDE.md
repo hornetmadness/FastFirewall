@@ -26,6 +26,18 @@ Config-level settings (not keyed resources) are managed via dedicated `GET`/`PUT
 
 Additional routes: `GET /status`, `GET /dhcp/leases`, `GET /config`, `POST /apply`, `POST /check`, `POST /discard`.
 
+## DNS macro support
+
+Three fields in the `dns` config section accept macro strings that are resolved at `POST /apply` time (stored as-is in the state file, expanded when `render_config()` builds the dnsmasq config):
+
+| Field | Type | Macro example |
+|---|---|---|
+| `port` | `int \| str` | `"$service_port.dns.udp"` → first element of the resolved list |
+| `listen_addresses` | `list[int \| str]` | `["$interface.lan.address"]` → expanded in-place to all resolved addresses |
+| `interface` | `str` | `"$interface.lan.name"` → resolved to the interface device name |
+
+Non-macro values (plain integers and strings) pass through unchanged. Unresolvable macros fall back to the raw macro string so the config file always contains something meaningful.
+
 ## State file
 
 `data/dnsmasq_state.json` — two top-level keys:
@@ -33,7 +45,7 @@ Additional routes: `GET /status`, `GET /dhcp/leases`, `GET /config`, `POST /appl
 ```json
 {
   "desired_state": {
-    "dns": { "port": 53, "listen_addresses": ["0.0.0.0"], "interface": "*", "upstream": ["8.8.8.8", "1.1.1.1"], ... },
+    "dns": { "port": "$service_port.dns.udp", "listen_addresses": ["$interface.lan.address"], "interface": "$interface.lan.name", "upstream": ["8.8.8.8", "1.1.1.1"], ... },
     "records": {},
     "dhcp": { "enabled": false, "authoritative": true, "options": {} },
     "dhcp_ranges": {},
@@ -79,7 +91,7 @@ Ten dicts/lists are kept in memory, populated from the state file by `_load_stat
 
 **`_desired_snapshot()`** — returns `json.loads(json.dumps({dns, records, dhcp, ...}))`: a normalized deep copy used as the argument to `save_desired()` and `commit()`. Also the response body of `GET /config`.
 
-**`_build_config()`** — serializes all in-memory state into a dnsmasq config string. DNS section emits `interface=` for every non-empty value (including `"*"`), `listen-address=`, upstream `server=`, per-domain `server=/domain/ns`, `local=/domain/`, `cache-size=`, `dnssec`, `log-queries`, `domain=`, `local-ttl=`, `neg-ttl=`, `strict-order`, `stop-dns-rebind`, `rebind-localhost-ok`. Record directives: `address=/name/ip`, `aaaa=/name/ip`, `cname=`, `txt-record=`, `mx-host=`, `srv-host=`, `ptr-record=`. DHCP section (when enabled): `dhcp-authoritative`, `dhcp-leasefile=`, `dhcp-range=`, `dhcp-host=`, `dhcp-option=`. TFTP: `enable-tftp`, `tftp-root=`, `tftp-secure`, `tftp-no-fail`. PXE: `pxe-service=`, `pxe-prompt=`. mDNS: `enable-ra`, `interface=`.
+**`_build_config()`** — serializes all in-memory state into a dnsmasq config string. DNS `port`, `listen_addresses`, and `interface` values are resolved via `macro_registry.resolve()` before writing — macros expand to their current values; plain values pass through unchanged. DNS section emits `interface=` for every non-empty value (including `"*"`), `listen-address=`, upstream `server=`, per-domain `server=/domain/ns`, `local=/domain/`, `cache-size=`, `dnssec`, `log-queries`, `domain=`, `local-ttl=`, `neg-ttl=`, `strict-order`, `stop-dns-rebind`, `rebind-localhost-ok`. Record directives: `address=/name/ip`, `aaaa=/name/ip`, `cname=`, `txt-record=`, `mx-host=`, `srv-host=`, `ptr-record=`. DHCP section (when enabled): `dhcp-authoritative`, `dhcp-leasefile=`, `dhcp-range=`, `dhcp-host=`, `dhcp-option=`. TFTP: `enable-tftp`, `tftp-root=`, `tftp-secure`, `tftp-no-fail`. PXE: `pxe-service=`, `pxe-prompt=`. mDNS: `enable-ra`, `interface=`.
 
 **`_build_blocklist_config()`** — iterates `_blocklists`, emitting one `address=/{domain}/#` line per blocked domain.
 
@@ -91,7 +103,7 @@ Deduplicates while preserving order via `dict.fromkeys`.
 
 ## DNS `interface` field
 
-`_default_dns()` sets `"interface": "*"`. The value is always emitted as `interface=<value>` in the generated config — `"*"` is emitted literally as `interface=*`. Set to a specific interface name (e.g. `"eth0"`) to restrict dnsmasq to that interface; clear it (empty string) to omit the directive.
+`_default_dns()` sets `"interface": "*"`. The value is resolved via `macro_registry.resolve()` at config-build time — a macro like `"$interface.lan.name"` expands to the device name; plain strings (including `"*"`) pass through unchanged. `"*"` is emitted literally as `interface=*`. Set to a specific interface name (e.g. `"eth0"`) or a macro to restrict dnsmasq to that interface; clear it (empty string) to omit the directive.
 
 ## `GET /config`
 

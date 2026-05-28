@@ -614,13 +614,21 @@ class PluginLoader:
                     if filtered:
                         all_service_ports[svc_name] = filtered
         macro_registry.set_service_ports(all_service_ports)
+        self._loaded = loaded
+        self._all_service_ports = all_service_ports
+        self._log_pending_changes()
+
+        return loaded
+
+    def finished(self) -> None:
+        """Emit ``plugins.all_loaded`` after any post-load setup (e.g. registering
+        additional macro namespaces or service ports) has been applied."""
+        loaded = getattr(self, "_loaded", [])
+        all_service_ports = getattr(self, "_all_service_ports", {})
         self._bus.emit(Event(
             "plugins.all_loaded",
             payload={"service_ports": all_service_ports, "loaded": loaded},
         ))
-        self._log_pending_changes()
-
-        return loaded
 
     def _log_pending_changes(self) -> None:
         pending = [

@@ -3114,7 +3114,7 @@ def test_plugins_all_loaded_reapplies_when_macro_changed(tmp_path):
         inst._apply_nft_script = MagicMock()
         with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
             inst.setup()
-        # After setup, snapshot has [] for the dns macro (service_port not populated)
+        # After setup, snapshot stores [] — service_port not yet populated at this point
         assert inst._state_file.get_macro_snapshot() == {"$service_port.dns.udp": []}
         call_count_after_setup = inst._apply_nft_script.call_count
         # Now service_ports are populated — as plugins.all_loaded timing implies

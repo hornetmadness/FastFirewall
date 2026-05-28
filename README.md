@@ -401,11 +401,13 @@ Manages dnsmasq for DNS forwarding/caching and DHCP. Supports static DNS records
 | Blocklists | `GET /blocklists` | `POST /blocklists` |
 | Full config | `GET /config` | — |
 
+The `dns` config fields `port`, `listen_addresses`, and `interface` accept macro strings that are resolved at apply time. For example, `"listen_addresses": ["$interface.lan.address"]` automatically expands to the LAN interface's current IP.
+
 ```bash
-# Set upstream DNS and local domain
+# Set upstream DNS, domain, and listen on the LAN interface via macro
 curl -su admin:admin -X PUT http://localhost:8000/v1/dnsmasq/dns \
   -H "Content-Type: application/json" \
-  -d '{"domain":"home.lan","upstream":["8.8.8.8","1.1.1.1"],"listen_addresses":["192.168.0.1"]}'
+  -d '{"domain":"home.lan","upstream":["8.8.8.8","1.1.1.1"],"listen_addresses":["$interface.lan.address"],"interface":"$interface.lan.name"}'
 
 # Add a DHCP scope
 curl -su admin:admin -X POST http://localhost:8000/v1/dnsmasq/dhcp/ranges \
@@ -440,7 +442,7 @@ curl -su admin:admin -X POST http://localhost:8000/v1/dnsmasq/apply
 
 **Routes:** `/v1/host/`
 
-Manages local system configuration: users, groups, cron jobs, packages, repos, sysctl, and services — all via pyinfra operations.
+Manages local system configuration: hostname, domain name, users, groups, cron jobs, packages, repos, sysctl, and services — all via pyinfra operations.
 
 **Immediate apply model:** every mutation calls the system tool inline and returns. There is no `/apply` step — changes take effect immediately.
 
@@ -454,6 +456,31 @@ Manages local system configuration: users, groups, cron jobs, packages, repos, s
 | Repos | `GET /repos` | `POST /repos/{name}` | `DELETE /repos/{name}` | — |
 | Services | `GET /services` | `PUT /services/{name}` | `DELETE /services/{name}` | `POST /services/{name}/import` |
 | Sysctl | `GET /sysctl` | `PUT /sysctl/{key}` | `DELETE /sysctl/{key}` | — |
+
+**Hostname and domain name** are managed via dedicated endpoints:
+
+```bash
+# Get/set the short hostname
+curl -su admin:admin http://localhost:8000/v1/host/hostname
+curl -su admin:admin -X PUT http://localhost:8000/v1/host/hostname \
+  -H "Content-Type: application/json" -d '{"hostname":"gateway"}'
+
+# Get/set/delete the domain name (applied as the full FQDN)
+curl -su admin:admin http://localhost:8000/v1/host/domainname
+curl -su admin:admin -X PUT http://localhost:8000/v1/host/domainname \
+  -H "Content-Type: application/json" -d '{"domainname":"home.lan"}'
+curl -su admin:admin -X DELETE http://localhost:8000/v1/host/domainname
+```
+
+The host plugin also registers the **`$host` macro namespace**:
+
+| Macro | Resolves to |
+|---|---|
+| `$host.hostname` | Short hostname (live from OS) |
+| `$host.domainname` | FF-managed domain, falling back to OS FQDN-derived domain |
+| `$host.fqdn` | `hostname.domainname` |
+
+On first boot the domain is automatically seeded from the OS FQDN so `$host.fqdn` resolves correctly without manual configuration.
 
 ```bash
 # Create a user
@@ -746,7 +773,7 @@ Macros let plugins and rules reference each other by name rather than hardcoded 
 
 Automatically populated from each plugin's `service_ports` declaration in `plugin.yaml`. For example, if the dnsmasq plugin declares `dns: { udp: [53] }`, then `$service_port.dns.udp` resolves to `[53]`.
 
-**Plugin-defined namespaces: `$interface`**
+**Plugin-defined namespaces: `$interface`, `$host`**
 
 The networking plugin exposes interface aliases as the `$interface` namespace. Each alias provides two sub-keys:
 
@@ -754,8 +781,17 @@ The networking plugin exposes interface aliases as the `$interface` namespace. E
 |---|---|
 | `$interface.lan.name` | OS device name (e.g. `"enp3s0"`) |
 | `$interface.lan.address` | L3 addresses on that device (e.g. `["192.168.0.1"]`) |
+| `$interface.lan.net_addr` | Network address (e.g. `["192.168.0.0/24"]`) |
 
 Set an alias with `PUT /v1/networking/config/aliases/lan` `{"interface": "enp3s0"}` and both macros become available immediately.
+
+The host plugin exposes the `$host` namespace:
+
+| Macro | Resolves to |
+|---|---|
+| `$host.hostname` | Short hostname (live from OS) |
+| `$host.domainname` | FF-managed domain (or OS FQDN-derived domain) |
+| `$host.fqdn` | Full FQDN (`hostname.domainname`) |
 
 ```bash
 # See all registered macros and their current values

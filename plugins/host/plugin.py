@@ -43,7 +43,7 @@ from pyinfra.operations import server as server_ops
 from pyinfra.operations import systemd as systemd_ops
 
 from infra import pyinfra_run_batch
-from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service
+from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, MacroProviderPlugin, Service
 from plugin_system.core.decorators import on
 from plugin_system.core.events import Event, bus
 
@@ -95,9 +95,13 @@ class CronImportBody(BaseModel):
     source_key: str = Field(max_length=200)
 
 
+class DomainnameBody(BaseModel):
+    domainname: str = Field(max_length=253)
+
+
 # ── Plugin ─────────────────────────────────────────────────────────────────────
 
-class HostPlugin(PluginBase, ApiRouterPlugin):
+class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
     services = [Service.HOST, Service.SYSCTL, Service.CRON, Service.USERS, Service.GROUPS]
 
     _EMPTY_STATE: dict[str, Any] = {
@@ -120,6 +124,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
             self._state = self._load_state()
             self._apply_state()
         self._register_routes()
+        self.add_macro_namespace("host", self._resolve_host_macro)
         init_cfg: dict[str, Any] = self.config.get("init") or {}
         if init_cfg.get("enable_init_script", False):
             self._run_init_script(init_cfg)
@@ -130,9 +135,14 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
     # ── persistence ────────────────────────────────────────────────────────────
 
     def _load_state(self) -> dict[str, Any]:
-        desired = self._state_file.load_desired(default={})
+        system_domain = self._get_system_domain()
+        default: dict[str, Any] = {}
+        if system_domain:
+            default["domainname"] = system_domain
+        desired = self._state_file.load_desired(default=default)
         state = {k: {} for k in self._EMPTY_STATE}
         state.update({k: v for k, v in desired.items() if k in self._EMPTY_STATE})
+        state["domainname"] = desired.get("domainname")
         return state
 
     def _save_state(self) -> None:
@@ -146,6 +156,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
             return
 
         applied: dict[str, Any] = {k: {} for k in self._EMPTY_STATE}
+        applied["domainname"] = self._state.get("domainname")
 
         tracked: list[tuple[str, str, Any]] = []
         batch_ops: list[tuple[Any, dict[str, Any]]] = []
@@ -425,6 +436,10 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
         add("/hostname",            self._get_hostname,     methods=["GET"],    summary="Get current hostname")
         add("/hostname",            self._set_hostname,     methods=["PUT"],    summary="Set system hostname")
 
+        add("/domainname",          self._get_domainname,   methods=["GET"],    summary="Get managed domain name")
+        add("/domainname",          self._set_domainname,   methods=["PUT"],    summary="Set system domain name")
+        add("/domainname",          self._delete_domainname, methods=["DELETE"], summary="Remove managed domain name")
+
         add("/sysctl",                     self._list_sysctl,      methods=["GET"],    summary="List all sysctl parameters with ff_managed flag")
         add("/sysctl-all",                 self._list_all_sysctl,  methods=["GET"],    summary="List all sysctl parameters")
         add("/sysctl/{key}",               self._set_sysctl,       methods=["PUT"],    summary="Set a sysctl kernel parameter")
@@ -456,6 +471,8 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
             "plugin": self.meta["name"],
             "version": self.meta["version"],
             "hostname": socket.gethostname(),
+            "domainname": self._state.get("domainname"),
+            "fqdn": self._resolve_host_macro("fqdn"),
             "managed": {
                 "sysctl":   len(self._state["sysctl"]),
                 "users":    len(self._state["users"]),
@@ -483,6 +500,71 @@ class HostPlugin(PluginBase, ApiRouterPlugin):
             raise HTTPException(500, "Failed to set hostname; check server logs")
         self._emit("host.hostname.changed", {"hostname": body.hostname})
         return {"hostname": body.hostname}
+
+    # ── domainname ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_system_domain() -> str | None:
+        fqdn = socket.getfqdn()
+        hostname = socket.gethostname()
+        if fqdn != hostname and fqdn.startswith(hostname + "."):
+            return fqdn[len(hostname) + 1:]
+        return None
+
+    def macro_snapshot(self) -> dict[str, dict]:
+        hostname = socket.gethostname()
+        domain = self._state.get("domainname") or self._get_system_domain()
+        entries: dict[str, Any] = {"hostname": hostname}
+        if domain:
+            entries["domainname"] = domain
+        entries["fqdn"] = f"{hostname}.{domain}" if domain else hostname
+        return {"host": entries}
+
+    def _resolve_host_macro(self, *segments: str):
+        if not segments:
+            return None
+        key = segments[0]
+        if key == "hostname":
+            return socket.gethostname()
+        if key == "domainname":
+            return self._state.get("domainname") or self._get_system_domain()
+        if key == "fqdn":
+            hostname = socket.gethostname()
+            domain = self._state.get("domainname") or self._get_system_domain()
+            return f"{hostname}.{domain}" if domain else hostname
+        return None
+
+    def _get_domainname(self) -> dict:
+        return {
+            "domainname": self._state.get("domainname"),
+            "system_domain": self._get_system_domain(),
+        }
+
+    def _set_domainname(self, body: DomainnameBody) -> dict:
+        hostname = socket.gethostname()
+        fqdn = f"{hostname}.{body.domainname}"
+        try:
+            self._pyinfra_run(
+                server_ops.hostname,
+                name=f"Set FQDN to {fqdn}",
+                hostname=fqdn,
+                _sudo=True,
+            )
+        except RuntimeError:
+            self.logger.error("Failed to set domain name", exc_info=True)
+            raise HTTPException(500, "Failed to set domain name; check server logs")
+        self._state["domainname"] = body.domainname
+        self._save_state()
+        self._emit("host.domainname.changed", {"domainname": body.domainname, "fqdn": fqdn})
+        return {"domainname": body.domainname, "fqdn": fqdn}
+
+    def _delete_domainname(self) -> dict:
+        if not self._state.get("domainname"):
+            raise HTTPException(404, "No managed domain name set")
+        removed = self._state.pop("domainname")
+        self._save_state()
+        self._emit("host.domainname.deleted", {"domainname": removed})
+        return {"deleted": removed}
 
     # ── sysctl ─────────────────────────────────────────────────────────────────
 
