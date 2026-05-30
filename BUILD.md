@@ -46,7 +46,7 @@ You need a Gitea API token with `package:write` scope.
 
 ```bash
 uv publish \
-  --publish-url http://git.themathis.house:3010/api/packages/$GITEA_OWNER/pypi/ \
+  --publish-url http://<gitea-host>/api/packages/$GITEA_OWNER/pypi/ \
   --token ${GITEA_API_TOKEN}
 ```
 
@@ -58,12 +58,12 @@ FastFirewall packages live on Gitea; their transitive dependencies (fastapi, bcr
 # Core framework only
 uv pip install fastfirewall-core \
   --index-strategy unsafe-best-match \
-  --extra-index-url http://${GITEA_API_TOKEN}@git.themathis.house:3010/api/packages/${GITEA_OWNER}/pypi/simple/
+  --extra-index-url http://${GITEA_API_TOKEN}@<gitea-host>/api/packages/${GITEA_OWNER}/pypi/simple/
 
 # Full appliance stack (core + all plugins)
 uv pip install fastfirewall \
   --index-strategy unsafe-best-match \
-  --extra-index-url http://${GITEA_API_TOKEN}@git.themathis.house:3010/api/packages/${GITEA_OWNER}/pypi/simple/
+  --extra-index-url http://${GITEA_API_TOKEN}@<gitea-host>/api/packages/${GITEA_OWNER}/pypi/simple/
 ```
 
 `--index-strategy unsafe-best-match` tells uv to look across all indexes and pick the best available version rather than stopping at the first index that has the package.

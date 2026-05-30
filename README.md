@@ -52,13 +52,13 @@ uv sync
 
 ### From the package registry (production)
 
-FastFirewall is published as a uv/pip workspace to a private Gitea PyPI registry. Install the full stack with pipx so the `fastfirewall-api` command lands in your PATH:
+FastFirewall is published as a uv/pip workspace to a Gitea PyPI registry. Install the full stack with pipx so the `fastfirewall-api` command lands in your PATH:
 
 ```bash
 pipx install fastfirewall \
   --pip-args "--index-strategy unsafe-best-match \
               --extra-index-url https://pypi.org/simple/ \
-              --index-url http://<token>@git.themathis.house:3010/api/packages/<owner>/pypi/simple/"
+              --index-url http://<token>@<gitea-host>/api/packages/<owner>/pypi/simple/"
 ```
 
 Or into an explicit venv:
@@ -68,7 +68,7 @@ uv venv ~/fastfirewall-venv
 uv pip install fastfirewall \
   --python ~/fastfirewall-venv/bin/python \
   --index-strategy unsafe-best-match \
-  --extra-index-url "http://<token>@git.themathis.house:3010/api/packages/<owner>/pypi/simple/"
+  --extra-index-url "http://<token>@<gitea-host>/api/packages/<owner>/pypi/simple/"
 ```
 
 See [BUILD.md](BUILD.md) for how to build and publish packages.

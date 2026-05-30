@@ -149,7 +149,7 @@ uv build --package fastfirewall-core
 
 # Publish all packages to the Gitea PyPI registry
 uv publish \
-  --publish-url http://git.themathis.house:3010/api/packages/$GITEA_OWNER/pypi/ \
+  --publish-url http://<gitea-host>/api/packages/$GITEA_OWNER/pypi/ \
   --token $GITEA_API_TOKEN
 ```
 
