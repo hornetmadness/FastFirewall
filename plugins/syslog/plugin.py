@@ -15,7 +15,6 @@ import hashlib
 import io
 import json
 import os
-import platform
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -50,11 +49,6 @@ class LogrotateConfigUpdate(BaseModel):
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
-_FB_KEY_URL      = "https://packages.fluentbit.io/fluentbit.key"
-_FB_KEY_DEST     = "/usr/share/keyrings/fluentbit-keyring.gpg"
-_FB_REPO_URL     = "https://packages.fluentbit.io/debian"
-_FB_REPO_FILE    = "fluent-bit"
-
 _VALID_SYSLOG_MODES = {"udp", "tcp", "tcp+udp"}
 _VALID_UNIX_MODES = {"unix_udp", "unix_tcp"}
 
@@ -76,18 +70,8 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
 
     def __init__(self) -> None:
         super().__init__()
-        try:
-            codename = platform.freedesktop_os_release().get("VERSION_CODENAME", "trixie")
-        except Exception:
-            codename = "trixie"
-        src = f"deb [signed-by={_FB_KEY_DEST}] {_FB_REPO_URL}/{codename} {codename} main"
-        bus.emit(Event("pkg_management.add.repo", payload={
-            "name": "fluent-bit",
-            "key_url": _FB_KEY_URL,
-            "key_dest": _FB_KEY_DEST,
-            "src": src,
-            "filename": _FB_REPO_FILE,
-        }))
+        # fluent-bit apt repo is declared in plugin.yaml repos: and registered
+        # by the loader before any module is imported — no runtime action needed.
 
     def setup(self) -> None:
         self._log_dir = Path(self.config.get("log_dir", "/var/log/fastfirewall"))
@@ -95,7 +79,7 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
         self._fluent_bit_main_conf = Path(self.config.get("fluent_bit_main_conf", "/etc/fluent-bit/fluent-bit.conf"))
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "overrides_file", "syslog_overrides.json", self.logger,
-            mutation_model="immediate",
+            mutation_model="immediate", data_dir=self.data_dir,
         )
 
         if self.config.get("ignore_state_on_boot", False):

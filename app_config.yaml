@@ -7,6 +7,19 @@ logging:
 plugins:
   directory: plugins        # relative to the repo root; resolved at startup
 
+  # Extra directories scanned for plugins after the main directory.
+  # Checked in order; a plugin found here is skipped if already loaded from
+  # a higher-priority directory.  ~ is expanded.
+  scan_dirs:
+    - /etc/fastfirewall/plugins
+    - ~/.config/fastfirewall/plugins
+
+  # When set, plugin state files are stored at <data_dir>/<plugin_id>/
+  # instead of inside the plugin package directory.  Recommended for
+  # production installs so state persists across package upgrades.
+  # Null = keep state inside each plugin's own directory (dev default).
+  data_dir:   # e.g. ~/.config/fastfirewall/plugins
+
 # ── Server (uvicorn / FastAPI) ────────────────────────────────────────────────
 server:
   host: "0.0.0.0"

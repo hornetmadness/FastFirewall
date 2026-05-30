@@ -9,8 +9,6 @@ author: hornetmadness@gmail.com
 
 enabled: true
 plugin_requirements: ["networking"]
-py_requirements:
-  - pyyaml
 os_requirements:
   - dnsmasq
 

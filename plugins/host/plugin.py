@@ -116,7 +116,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
     def setup(self) -> None:
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "state_file", "host_state.json", self.logger,
-            mutation_model="immediate",
+            mutation_model="immediate", data_dir=self.data_dir,
         )
         if self.config.get("ignore_state_on_boot", False):
             self._state: dict[str, Any] = {k: {} for k in self._EMPTY_STATE}

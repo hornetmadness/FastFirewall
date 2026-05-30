@@ -54,9 +54,16 @@ class PluginStateFile:
         logger: logging.Logger | None = None,
         *,
         mutation_model: str = "deferred",
+        data_dir: Path | None = None,
     ) -> "PluginStateFile":
-        """Resolve plugin_dir/data/<config[key] or default_filename> and return a PluginStateFile."""
-        return cls(plugin_dir / "data" / config.get(key, default_filename), logger, mutation_model=mutation_model)
+        """Resolve the state file path and return a PluginStateFile.
+
+        When *data_dir* is provided it is used directly as the containing
+        directory; otherwise falls back to plugin_dir/data (the default for
+        dev / filesystem plugins).
+        """
+        base = data_dir if data_dir is not None else (plugin_dir / "data")
+        return cls(base / config.get(key, default_filename), logger, mutation_model=mutation_model)
 
     @property
     def path(self) -> Path:

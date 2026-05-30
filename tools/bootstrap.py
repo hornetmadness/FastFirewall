@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.11"
-# dependencies = ["requests", "pyyaml"]
-# ///
 """
 FastFirewall bootstrap wizard.
 
@@ -14,10 +10,10 @@ Scenarios:
   dns-dhcp  — DNS and DHCP via dnsmasq only
 
 Usage:
-  uv run tools/bootstrap.py                           # interactive wizard
-  uv run tools/bootstrap.py --config config.yaml      # non-interactive, from YAML/JSON
-  uv run tools/bootstrap.py --save requests.json      # also save all API calls to file
-  uv run tools/bootstrap.py --apply requests.json     # replay a previously saved session
+  fastfirewall-bootstrap                               # interactive wizard
+  fastfirewall-bootstrap --config config.yaml         # non-interactive, from YAML/JSON
+  fastfirewall-bootstrap --save requests.json         # also save all API calls to file
+  fastfirewall-bootstrap --apply requests.json        # replay a previously saved session
 """
 
 from __future__ import annotations
@@ -1135,22 +1131,22 @@ def main() -> None:
 
             Examples:
               # Interactive wizard
-              uv run tools/bootstrap.py
+              fastfirewall-bootstrap
 
               # Run from a config file (non-interactive)
-              uv run tools/bootstrap.py --config tools/examples/gateway.yaml
+              fastfirewall-bootstrap --config examples/gateway.yaml
 
               # Interactive wizard + save every API call for later replay
-              uv run tools/bootstrap.py --save my-setup.json
+              fastfirewall-bootstrap --save my-setup.json
 
               # Apply a previously saved session (re-authenticates fresh)
-              uv run tools/bootstrap.py --apply my-setup.json
+              fastfirewall-bootstrap --apply my-setup.json
 
               # Apply against a different server
-              uv run tools/bootstrap.py --apply my-setup.json --host http://10.0.0.1:8000
+              fastfirewall-bootstrap --apply my-setup.json --host http://10.0.0.1:8000
 
               # Show every API request and response
-              uv run tools/bootstrap.py --config tools/examples/firewall.yaml --verbose
+              fastfirewall-bootstrap --config examples/firewall.yaml --verbose
         """),
     )
     parser.add_argument("--config", metavar="FILE",

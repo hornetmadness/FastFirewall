@@ -51,9 +51,9 @@ On boot: `load_desired(default={})` returns the overrides dict, which is merged 
 
 ## Bootstrap — fluent-bit repo
 
-The syslog plugin's `__init__` emits `pkg_management.add.repo` to register the fluent-bit apt repo **before the loader installs `os_requirements`**. This is necessary because fluent-bit is not in Debian's default sources. The repo, GPG key URL, and key destination path are read from the constants at the top of `plugin.py` (`_FB_KEY_URL`, `_FB_KEY_DEST`, `_FB_REPO_URL`, `_FB_REPO_FILE`) and can be overridden via `plugin.yaml` config keys. The OS codename is detected via `platform.freedesktop_os_release()`, defaulting to `trixie`.
+The fluent-bit apt repo is declared as a `repos:` entry in `plugin.yaml`. The loader reads it at parse time — before any module is imported — and registers the GPG key and apt source list entry via `pyinfra_run_batch`. It then runs a single `apt-get install fluent-bit logrotate` for all plugins together. `plugin.py` has no repo registration code in `__init__`.
 
-`fluent-bit` and `logrotate` are declared in `os_requirements`; the loader installs them after `__init__` returns.
+`fluent-bit` and `logrotate` are declared in `os_requirements`; the loader installs them as part of the batch OS install before any `setup()` runs.
 
 ## Key methods
 
@@ -122,7 +122,7 @@ The syslog plugin's `__init__` emits `pkg_management.add.repo` to register the f
 
 Tests in `test_syslog_plugin.py`. pyinfra calls are mocked via `plugin._pyinfra_run = MagicMock()` before `setup()`. `subprocess.run` is patched with `unittest.mock.patch` for all tests that trigger systemctl, journalctl, or logrotate calls.
 
-Because `__init__` emits `pkg_management.add.repo` on the global bus, test helpers that construct the plugin must ensure no `pkg_management` handler is subscribed, or they must instantiate the plugin before `pkg_management` subscribes. In practice, since tests do not load `pkg_management`, the event fires with no subscribers and is silently dropped.
+The fluent-bit repo is now declared in `plugin.yaml` and registered by the loader — `__init__` has no side effects, so there is no bus interaction to worry about when constructing the plugin in tests.
 
 ```python
 plugin._pyinfra_run = MagicMock()

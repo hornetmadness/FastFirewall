@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 
-def run(loader, plugins_dir: str | Path) -> tuple[list[str] | None, bool, bool]:
+def run(loader, plugins_dir: str | Path, cfg) -> tuple[list[str] | None, bool, bool]:
     """
     Parse CLI arguments, handle any management commands, and return
     ``(only, ignore_plugins_states, show_macros)`` for normal server startup.
@@ -18,6 +18,14 @@ def run(loader, plugins_dir: str | Path) -> tuple[list[str] | None, bool, bool]:
 
     if args.help:
         parser.print_help()
+        sys.exit(0)
+
+    if args.showcfg:
+        print_cfg(cfg)
+        sys.exit(0)
+
+    if args.makecfg:
+        make_cfg(Path(args.makecfg).expanduser().resolve(), cfg)
         sys.exit(0)
 
     if args.enable_plugin:
@@ -107,6 +115,101 @@ def print_macros(loader) -> None:
         print()
 
 
+def print_cfg(cfg) -> None:
+    """Print the active config file path and all resolved plugin paths."""
+
+    def _status(p: Path) -> str:
+        return "exists" if p.is_dir() or p.is_file() else "missing"
+
+    print(f"Config file:  {cfg.config_path}  [{_status(cfg.config_path)}]")
+    print()
+    print(f"Server:       {cfg.server.host}:{cfg.server.port}")
+    print(f"Auth:         {'enabled' if cfg.auth.enabled else 'disabled'}")
+    backup = cfg.state.backup
+    if backup.enabled:
+        print(f"State backup: enabled → {backup.directory}")
+    else:
+        print(f"State backup: disabled")
+    print()
+
+    plugins_dir = cfg.plugins_dir()
+    print(f"plugins.directory:  {plugins_dir}  [{_status(plugins_dir)}]")
+
+    scan_dirs = cfg.plugins_scan_dirs()
+    if scan_dirs:
+        print(f"plugins.scan_dirs:")
+        for d in scan_dirs:
+            print(f"  {d}  [{_status(d)}]")
+    else:
+        print(f"plugins.scan_dirs:  (none configured)")
+
+    data_dir = cfg.plugins_data_dir()
+    if data_dir:
+        print(f"plugins.data_dir:   {data_dir}  [{_status(data_dir)}]")
+    else:
+        print(f"plugins.data_dir:   (not set — state stored inside each plugin directory)")
+
+
+def make_cfg(dest: Path, cfg) -> None:
+    """Scaffold a production config directory tree at *dest*."""
+    import yaml as _yaml
+
+    created = []
+    for d in [dest, dest / "plugins", dest / "backups"]:
+        if not d.exists():
+            d.mkdir(parents=True, exist_ok=True)
+            created.append(d)
+
+    cfg_file = dest / "app_config.yaml"
+    if not cfg_file.exists():
+        starter = {
+            "logging": {
+                "level": cfg.logging.level,
+                "format": cfg.logging.format,
+            },
+            "plugins": {
+                "directory": "plugins",
+                "scan_dirs": [str(dest / "plugins")],
+                "data_dir": str(dest / "plugins"),
+            },
+            "server": {
+                "host": cfg.server.host,
+                "port": cfg.server.port,
+                "reload": False,
+            },
+            "state": {
+                "backup": {
+                    "enabled": True,
+                    "directory": str(dest / "backups"),
+                }
+            },
+            "auth": {
+                "enabled": cfg.auth.enabled,
+                "secret_key": (
+                    cfg.auth.secret_key
+                    if cfg.auth.secret_key != "CHANGE-ME"
+                    else "CHANGE-ME-generate-with-openssl-rand-hex-32"
+                ),
+                "algorithm": cfg.auth.algorithm,
+                "token_expire_minutes": cfg.auth.token_expire_minutes,
+                "users": cfg.auth.users,
+            },
+        }
+        cfg_file.write_text(_yaml.dump(starter, default_flow_style=False, sort_keys=False))
+        created.append(cfg_file)
+
+    if created:
+        print("Created:")
+        for p in created:
+            print(f"  {p}")
+    else:
+        print(f"Nothing to create — {dest} is already fully set up.")
+
+    print()
+    print("Point fastfirewall at this config:")
+    print(f"  FASTFIREWALL_CONFIG={cfg_file} fastfirewall-api")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fastfirewall-api",
@@ -150,6 +253,16 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="ignore_plugins_states",
         action="store_true",
         help="Skip re-applying saved state files on boot (all plugins).",
+    )
+    parser.add_argument(
+        "--showcfg",
+        action="store_true",
+        help="Show the active config file and all resolved plugin paths, then exit.",
+    )
+    parser.add_argument(
+        "--makecfg",
+        metavar="PATH",
+        help="Scaffold a config directory tree at PATH with a starter app_config.yaml, then exit.",
     )
     return parser
 

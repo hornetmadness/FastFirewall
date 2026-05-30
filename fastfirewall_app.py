@@ -8,7 +8,9 @@ Authentication: every route except those in auth.exempt_paths requires a valid
 credential.  Clients may use either HTTP Basic or an OAuth2 Bearer JWT (obtained
 from POST /token).  Both schemes are visible in the /docs "Authorize" dialog.
 """
+import argparse
 import logging
+import sys
 from typing import Annotated
 
 from fastapi.exceptions import RequestValidationError
@@ -41,6 +43,23 @@ from ff_auth import (
 log = logging.getLogger("app")
 
 cfg = AppConfig.load()
+
+# Handle --showcfg and --makecfg before auth setup so they work even when
+# the secret_key placeholder hasn't been replaced yet.
+_early = argparse.ArgumentParser(add_help=False)
+_early.add_argument("--showcfg", action="store_true")
+_early.add_argument("--makecfg", metavar="PATH", default=None)
+_ea, _ = _early.parse_known_args()
+if _ea.showcfg:
+    from plugin_system import manager_cli as _mcli
+    _mcli.print_cfg(cfg)
+    sys.exit(0)
+if _ea.makecfg:
+    from pathlib import Path as _Path
+    from plugin_system import manager_cli as _mcli
+    _mcli.make_cfg(_Path(_ea.makecfg).expanduser().resolve(), cfg)
+    sys.exit(0)
+
 auth_setup(cfg.auth)
 configure_state(
     backup_enabled=cfg.state.backup.enabled,
@@ -144,12 +163,22 @@ async def validation_exception_handler(
     )
 
 loader = PluginLoader(bus=bus, app=app, logger=cfg.logger)
-only_plugins, ignore_plugins_states, show_macros = manager_cli.run(loader, cfg.plugins_dir())
+only_plugins, ignore_plugins_states, show_macros = manager_cli.run(loader, cfg.plugins_dir(), cfg)
 loader.ignore_state_on_boot = ignore_plugins_states
+data_dir = cfg.plugins_data_dir()
+
+# 1. Dev / cwd plugins directory (highest priority)
 plugins_dir = cfg.plugins_dir()
 if plugins_dir.is_dir():
-    loader.load_directory(plugins_dir, only=only_plugins, skip_requirements=show_macros)
-loader.load_installed(only=only_plugins, skip_requirements=show_macros)
+    loader.load_directory(plugins_dir, only=only_plugins, skip_requirements=show_macros, data_dir=data_dir)
+
+# 2. Configured scan dirs: /etc/fastfirewall/plugins, ~/.config/fastfirewall/plugins, …
+for scan_dir in cfg.plugins_scan_dirs():
+    if scan_dir.is_dir():
+        loader.load_directory(scan_dir, only=only_plugins, skip_requirements=show_macros, data_dir=data_dir)
+
+# 3. Installed package entry points (fills in anything not found on the filesystem)
+loader.load_installed(only=only_plugins, skip_requirements=show_macros, data_dir=data_dir)
 macro_registry.register_service_port("fastfirewall-api", "tcp", [cfg.server.port])
 loader.finished()
 

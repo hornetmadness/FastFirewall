@@ -54,4 +54,4 @@ override-dependencies = [
 ]
 
 [tool.uv.workspace]
-members = ["plugins/*", "meta"]
+members = ["plugins/*", "meta", "tools"]

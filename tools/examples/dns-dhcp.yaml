@@ -4,7 +4,7 @@
 # Does not touch networking interfaces or firewall rules.
 #
 # Run with:
-#   uv run tools/bootstrap.py --config tools/examples/dns-dhcp.yaml
+#   fastfirewall-bootstrap --config examples/dns-dhcp.yaml
 
 server:
   host: "http://localhost:8000"

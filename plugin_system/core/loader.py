@@ -36,15 +36,22 @@ service_ports:
 # Set true for plugins that manage an already-running OS service (skips OS port check).
 skip_host_os_port_check: false
 
-# --- python package dependencies (installed via uv using pyinfra) ---
-py_requirements:
-  - requests>=2.28
-  - boto3
-
 # --- OS package dependencies (installed via the native package manager using pyinfra) ---
 os_requirements:
   - curl
   - libpq-dev
+
+# --- third-party apt/yum repos required before os_requirements can be installed ---
+# Processed by the loader at parse time, before any module is imported.
+# For apt: loader fetches the GPG key, writes the source list entry, then runs
+# the batch apt-get install.  Only apt is supported today.
+repos:
+  - name: vendor-repo               # unique identifier; duplicates across plugins are merged
+    key_url: https://vendor.example.com/gpg.key
+    key_dest: /usr/share/keyrings/vendor.gpg  # dearmored key destination
+    repo_url: https://vendor.example.com/apt  # base URL; loader appends /<codename> <codename> main
+    filename: vendor                # filename under /etc/apt/sources.list.d/ (no .list extension)
+    # src: "deb [signed-by=...] ..."  # optional: override the constructed src line
 
 # --- arbitrary config passed to the plugin ---
 config:
@@ -58,25 +65,14 @@ import inspect
 import logging
 import platform
 import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pyinfra.api.config import Config
-from pyinfra.api.inventory import Inventory
-from pyinfra.api.state import State
-from pyinfra.api.connect import connect_all
-from pyinfra.api.operations import run_ops
-from pyinfra.context import ctx_host, ctx_state
-from pyinfra.operations import apk as apk_ops
-from pyinfra.operations import apt as apt_ops
-from pyinfra.operations import brew as brew_ops
-from pyinfra.operations import dnf as dnf_ops
-from pyinfra.operations import pacman as pacman_ops
-from pyinfra.operations import uv as uv_ops
-from pyinfra.operations import yum as yum_ops
+from infra import pyinfra_run_batch
 
 from .decorators import _HANDLER_EVENTS_ATTR, _WILDCARD_ATTR
 from .events import Event, EventBus, bus as default_bus
@@ -144,7 +140,9 @@ class PluginLoader:
     loader.load_plugin("plugins/my_plugin")
     loader.unload_plugin("my_plugin")
 
-    py_requirements are installed into the current environment via uv using pyinfra.
+    Python dependencies are managed by each plugin's pyproject.toml; the loader
+    runs ``uv sync --no-dev --frozen`` once at boot to install them all.
+    OS dependencies are batch-installed via the native package manager.
     """
 
     def __init__(
@@ -163,6 +161,7 @@ class PluginLoader:
         self._loaded: set[str] = set()  # all successfully loaded plugin ids (accumulates)
         self._all_service_ports: dict[str, dict[str, list[int]]] = {}
         self.ignore_state_on_boot: bool = False
+        self._pkg_manager: str | None = None  # cached OS package manager name
 
     # ------------------------------------------------------------------
     # Public API
@@ -466,7 +465,7 @@ class PluginLoader:
                 return
         raise PluginError(f"Plugin {plugin_id!r} not found in {root}")
 
-    def load_directory(self, directory: str | Path, only: list[str] | None = None, skip_requirements: bool = False) -> list[str]:
+    def load_directory(self, directory: str | Path, only: list[str] | None = None, skip_requirements: bool = False, data_dir: Path | None = None) -> list[str]:
         """
         Scan *directory* for plugin sub-directories and load each one.
         Returns a list of successfully loaded plugin ids.
@@ -496,15 +495,19 @@ class PluginLoader:
                 self.logger.warning("Could not read %s, skipping", yaml_path)
                 continue
             pid = raw.get("id", child.name)
+            if pid in self._loaded:
+                continue  # already loaded from a higher-priority directory
             discovered[pid] = {
                 "path": child,
                 "enabled": bool(raw.get("enabled", True)),
                 "requirements": list(raw.get("plugin_requirements") or []),
+                "os_requirements": list(raw.get("os_requirements") or []),
+                "repos": list(raw.get("repos") or []),
             }
 
-        return self._load_discovered(discovered, only=only, skip_requirements=skip_requirements, source=str(root))
+        return self._load_discovered(discovered, only=only, skip_requirements=skip_requirements, source=str(root), data_dir=data_dir)
 
-    def load_installed(self, only: list[str] | None = None, skip_requirements: bool = False) -> list[str]:
+    def load_installed(self, only: list[str] | None = None, skip_requirements: bool = False, data_dir: Path | None = None) -> list[str]:
         """
         Discover plugins declared under the ``fastfirewall.plugins`` entry-point
         group and load any that have not already been loaded (e.g. from the
@@ -547,6 +550,8 @@ class PluginLoader:
                 "path": plugin_dir,
                 "enabled": bool(raw.get("enabled", True)),
                 "requirements": list(raw.get("plugin_requirements") or []),
+                "os_requirements": list(raw.get("os_requirements") or []),
+                "repos": list(raw.get("repos") or []),
             }
 
         if not discovered:
@@ -556,8 +561,9 @@ class PluginLoader:
             discovered,
             only=only,
             skip_requirements=skip_requirements,
-            skip_py_requirements=True,  # py_requirements already installed by pip
+            skip_py_requirements=True,  # Python deps already satisfied by pip; skip uv sync
             source="installed packages",
+            data_dir=data_dir,
         )
 
     def _load_discovered(
@@ -567,6 +573,7 @@ class PluginLoader:
         skip_requirements: bool = False,
         skip_py_requirements: bool = False,
         source: str = "<unknown>",
+        data_dir: Path | None = None,
     ) -> list[str]:
         """
         Common steps for load_directory() and load_installed(): filter,
@@ -631,7 +638,18 @@ class PluginLoader:
                 f"Circular dependency detected among plugins: {', '.join(cycle_members)}"
             )
 
-        # ── 7. Load in resolved order ──────────────────────────────────────
+        # ── 7. Pre-install: repos → OS packages → Python packages ─────────────
+        # All packages are installed once here before any plugin module is
+        # imported, so setup() never runs against a missing system dependency.
+        if not skip_requirements:
+            self._register_repos(active, discovered)
+            batch_os = self._collect_os_requirements(active, discovered)
+            if batch_os:
+                self._install_os_requirements("<batch>", batch_os)
+            if not skip_py_requirements:
+                self._install_py_requirements_uv_sync()
+
+        # ── 8. Load in resolved order ──────────────────────────────────────
         loaded: list[str] = []
         errored: list[tuple[str, str]] = []
         failed: set[str] = set()  # plugins that failed or were skipped due to dep failure
@@ -646,7 +664,13 @@ class PluginLoader:
                 failed.add(pid)
                 continue
             try:
-                loaded_id = self.load_plugin(active[pid]["path"], skip_requirements=skip_requirements, skip_py_requirements=skip_py_requirements)
+                loaded_id = self.load_plugin(
+                    active[pid]["path"],
+                    skip_requirements=skip_requirements,
+                    skip_py_requirements=skip_py_requirements,
+                    _batch_installed=not skip_requirements,
+                    data_dir=data_dir,
+                )
                 loaded.append(loaded_id)
             except Exception as exc:
                 self.logger.exception("Failed to load plugin from %s", active[pid]["path"])
@@ -713,7 +737,7 @@ class PluginLoader:
                 ", ".join(pending),
             )
 
-    def load_plugin(self, path: str | Path, skip_requirements: bool = False, skip_py_requirements: bool = False) -> str:
+    def load_plugin(self, path: str | Path, skip_requirements: bool = False, skip_py_requirements: bool = False, _batch_installed: bool = False, data_dir: Path | None = None) -> str:
         """
         Load a single plugin from *path* (the plugin directory).
         Returns the plugin id on success.
@@ -743,7 +767,6 @@ class PluginLoader:
             config["ignore_state_on_boot"] = True
         plugin_id: str = raw.get("id", path.name)
         enabled: bool = raw.get("enabled", True)
-        py_requirements: list[str] = raw.get("py_requirements", []) or []
         os_requirements: list[str] = raw.get("os_requirements", []) or []
         skip_host_os_port_check: bool = bool(raw.get("skip_host_os_port_check", False))
 
@@ -773,6 +796,8 @@ class PluginLoader:
                 instance.config = config
                 instance.plugin_dir = path.resolve()
                 instance.logger = self.logger.getChild(plugin_id)
+                if data_dir is not None:
+                    instance._data_dir = data_dir / plugin_id
                 break
 
         # --- resolve and check service claims from the class ----------
@@ -832,7 +857,7 @@ class PluginLoader:
                             "Auto-loading required dependency %r for plugin %r",
                             dep, plugin_id,
                         )
-                        self.load_plugin(dep_path, skip_requirements=skip_requirements, skip_py_requirements=skip_py_requirements)
+                        self.load_plugin(dep_path, skip_requirements=skip_requirements, skip_py_requirements=skip_py_requirements, _batch_installed=_batch_installed, data_dir=data_dir)
                     else:
                         raise PluginError(
                             f"Plugin {plugin_id!r} requires {dep!r} which is not loaded"
@@ -840,17 +865,10 @@ class PluginLoader:
         finally:
             self._loading.discard(plugin_id)
 
-        # --- install python requirements via pyinfra + pipx -----------
-        if py_requirements and not skip_requirements and not skip_py_requirements:
-            self.logger.info(
-                "Plugin %r needs Python packages: %s",
-                plugin_id,
-                ", ".join(py_requirements),
-            )
-            self._install_py_requirements(plugin_id, py_requirements)
-
-        # --- install OS requirements via pyinfra ----------------------
-        if os_requirements and not skip_requirements:
+        # --- install OS requirements (fallback for direct load_plugin() calls) ---
+        # When called via load_directory/load_installed, _batch_installed=True and
+        # the batch apt-get install has already run; skip per-plugin install.
+        if os_requirements and not skip_requirements and not _batch_installed:
             self.logger.info(
                 "Plugin %r needs OS packages: %s",
                 plugin_id,
@@ -968,66 +986,181 @@ class PluginLoader:
     # ------------------------------------------------------------------
 
     def _pyinfra_state(self):
-        """Return a connected pyinfra local State."""
+        """Return a connected pyinfra local State (lazy-imports pyinfra)."""
+        from pyinfra.api.config import Config
+        from pyinfra.api.inventory import Inventory
+        from pyinfra.api.state import State
+        from pyinfra.api.connect import connect_all
         inventory = Inventory(([("@local", {})], {}))
         state = State(inventory, Config())
         connect_all(state)
         return state
 
-    def _install_py_requirements(self, plugin_id: str, packages: list[str]) -> None:
-        """Install plugin Python requirements via uv using pyinfra."""
-        self.logger.info(
-            "Installing py_requirements for plugin %r via uv: %s",
-            plugin_id,
-            ", ".join(packages),
-        )
+    def _install_py_requirements_uv_sync(self) -> None:
+        """Install all workspace Python dependencies via a single uv sync call.
 
-        state = self._pyinfra_state()
-        with ctx_state.use(state):
-            for host in state.activated_hosts:
-                with ctx_host.use(host):
-                    uv_ops.packages(packages=packages)
-        run_ops(state)
+        Replaces per-plugin uv pip install. OS packages must be installed first
+        so any Python extension packages that need system libraries can compile.
+        """
+        uv = shutil.which("uv")
+        if uv is None:
+            self.logger.warning(
+                "uv not found on PATH; skipping uv sync (Python deps must be pre-installed)"
+            )
+            return
+        # loader.py → core/ → plugin_system/ → <workspace root>
+        workspace_root = Path(__file__).parents[2]
+        self.logger.info("Running uv sync --no-dev --frozen in %s", workspace_root)
+        proc = subprocess.run(
+            [uv, "sync", "--no-dev", "--frozen"],
+            capture_output=True,
+            text=True,
+            cwd=str(workspace_root),
+        )
+        if proc.returncode != 0:
+            self.logger.error("uv sync failed:\n%s", proc.stderr.strip())
+            raise PluginError("uv sync failed; check server logs")
+        self.logger.info("uv sync complete")
+
+    def _detect_pkg_manager(self) -> str:
+        """Return the name of the local OS package manager, cached after first detection."""
+        if self._pkg_manager is not None:
+            return self._pkg_manager
+        system = platform.system()
+        if system == "Darwin":
+            self._pkg_manager = "brew"
+        elif system == "Linux":
+            for mgr, cmd in [
+                ("apt", "apt-get"),
+                ("dnf", "dnf"),
+                ("yum", "yum"),
+                ("pacman", "pacman"),
+                ("apk", "apk"),
+            ]:
+                if shutil.which(cmd):
+                    self._pkg_manager = mgr
+                    break
+        if self._pkg_manager is None:
+            raise PluginError(
+                f"No supported OS package manager found (system={system!r})"
+            )
+        return self._pkg_manager
+
+    def _detect_os_codename(self) -> str:
+        """Return the OS version codename for apt repo src line construction."""
+        try:
+            return platform.freedesktop_os_release().get("VERSION_CODENAME", "trixie")
+        except Exception:
+            return "trixie"
+
+    def _collect_os_requirements(
+        self,
+        active: dict[str, dict[str, Any]],
+        discovered: dict[str, dict[str, Any]],
+    ) -> list[str]:
+        """Return a deduplicated sorted list of all OS packages from active plugins."""
+        pkgs: set[str] = set()
+        for pid in active:
+            pkgs.update(discovered[pid].get("os_requirements") or [])
+        return sorted(pkgs)
+
+    def _register_repos(
+        self,
+        active: dict[str, dict[str, Any]],
+        discovered: dict[str, dict[str, Any]],
+    ) -> None:
+        """Register third-party apt repos declared in plugin.yaml before the batch OS install."""
+        seen: set[str] = set()
+        repos: list[dict[str, Any]] = []
+        for pid in active:
+            for repo in discovered[pid].get("repos") or []:
+                name = repo.get("name", "")
+                if name and name not in seen:
+                    seen.add(name)
+                    repos.append(repo)
+
+        if not repos:
+            return
+
+        mgr = self._detect_pkg_manager()
+        if mgr != "apt":
+            self.logger.warning(
+                "repos: in plugin.yaml is only supported for apt; "
+                "skipping repo registration on %r", mgr,
+            )
+            return
+
+        codename = self._detect_os_codename()
+        ops: list[tuple[str, str, dict[str, Any]]] = []
+        for repo in repos:
+            name = repo["name"]
+            key_url = repo.get("key_url", "")
+            key_dest = repo.get("key_dest", "")
+            filename = repo.get("filename", name)
+            src = repo.get("src") or (
+                f"deb [signed-by={key_dest}] {repo['repo_url']}/{codename} {codename} main"
+                if repo.get("repo_url") else ""
+            )
+            if not src:
+                self.logger.warning("Repo %r has no 'src' or 'repo_url'; skipping", name)
+                continue
+            if key_url and key_dest:
+                ops.append((
+                    "pyinfra.operations.apt", "key",
+                    {"name": f"Import GPG key for {name}", "src": key_url, "dest": key_dest, "_sudo": True},
+                ))
+            ops.append((
+                "pyinfra.operations.apt", "repo",
+                {"name": f"Add apt repo {name}", "src": src, "present": True, "filename": filename, "_sudo": True},
+            ))
+
+        if not ops:
+            return
+
+        self.logger.info(
+            "Registering %d apt repo(s): %s",
+            len(repos), ", ".join(r["name"] for r in repos),
+        )
+        results = pyinfra_run_batch(ops)
+        for op, (success, err) in zip(ops, results):
+            if not success:
+                self.logger.error("Failed to register repo %r: %s", op[2].get("name"), err)
+                raise PluginError("Failed to register apt repos; check server logs")
 
     def _install_os_requirements(self, plugin_id: str, packages: list[str]) -> None:
-        """Install plugin OS requirements via the native package manager using pyinfra."""
-        pkg_op, op_kwargs = self._detect_os_pkg_op(plugin_id, packages)
-
+        """Install OS packages via pyinfra_run_batch (one subprocess, one apt-get call)."""
+        op_module, op_name, op_kwargs = self._detect_os_pkg_op(plugin_id, packages)
         self.logger.info(
-            "Installing os_requirements for plugin %r: %s",
+            "Installing OS packages (%s): %s",
             plugin_id,
             ", ".join(packages),
         )
+        results = pyinfra_run_batch([(op_module, op_name, op_kwargs)])
+        success, err = results[0]
+        if not success:
+            self.logger.error("OS package install failed for %r: %s", plugin_id, err)
+            raise PluginError(
+                f"Failed to install OS packages for plugin {plugin_id!r}; check server logs"
+            )
 
-        state = self._pyinfra_state()
-        with ctx_state.use(state):
-            for host in state.activated_hosts:
-                with ctx_host.use(host):
-                    pkg_op(**op_kwargs)  # type: ignore[call-arg]
-        run_ops(state)
-
-    def _detect_os_pkg_op(self, plugin_id: str, packages: list[str]):
-        """Return (pyinfra_op, kwargs) for the detected local OS package manager."""
-        system = platform.system()
-
-        if system == "Darwin":
-            return brew_ops.packages, {"packages": packages}
-
-        if system == "Linux":
-            if shutil.which("apt-get"):
-                return apt_ops.packages, {"packages": packages, "update": True, "_sudo": True}
-            if shutil.which("dnf"):
-                return dnf_ops.packages, {"packages": packages, "_sudo": True}
-            if shutil.which("yum"):
-                return yum_ops.packages, {"packages": packages, "_sudo": True}
-            if shutil.which("pacman"):
-                return pacman_ops.packages, {"packages": packages, "_sudo": True}
-            if shutil.which("apk"):
-                return apk_ops.packages, {"packages": packages, "_sudo": True}
-
+    def _detect_os_pkg_op(self, plugin_id: str, packages: list[str]) -> tuple[str, str, dict[str, Any]]:
+        """Return (op_module, op_name, kwargs) for pyinfra_run_batch based on the local package manager."""
+        mgr = self._detect_pkg_manager()
+        if mgr == "brew":
+            return "pyinfra.operations.brew", "packages", {"packages": packages}
+        if mgr == "apt":
+            return "pyinfra.operations.apt", "packages", {"packages": packages, "update": True, "_sudo": True}
+        if mgr == "dnf":
+            return "pyinfra.operations.dnf", "packages", {"packages": packages, "_sudo": True}
+        if mgr == "yum":
+            return "pyinfra.operations.yum", "packages", {"packages": packages, "_sudo": True}
+        if mgr == "pacman":
+            return "pyinfra.operations.pacman", "packages", {"packages": packages, "_sudo": True}
+        if mgr == "apk":
+            return "pyinfra.operations.apk", "packages", {"packages": packages, "_sudo": True}
         raise PluginError(
-            f"No supported OS package manager found for plugin {plugin_id!r} "
-            f"(system={system!r}). Packages required: {packages}"
+            f"No supported OS package manager found for plugin {plugin_id!r}. "
+            f"Packages required: {packages}"
         )
 
     def _register_macro_provider(self, instance: PluginBase, plugin_id: str) -> None:

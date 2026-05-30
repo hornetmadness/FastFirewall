@@ -80,7 +80,7 @@ class PkgManagementPlugin(PluginBase, ApiRouterPlugin):
     def setup(self) -> None:
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "state_file", "pkg_management_state.json", self.logger,
-            mutation_model="immediate",
+            mutation_model="immediate", data_dir=self.data_dir,
         )
         self._bg_tasks: dict[str, dict[str, Any]] = {}
         self._pkg_mgr = PackageManager(

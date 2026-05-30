@@ -34,7 +34,7 @@ Built on FastAPI and driven entirely by plugins. Every feature is a plugin; the 
 ## Requirements
 
 - Python 3.12+
-- [uv](https://docs.astral.sh/uv/) (package manager — replaces pip/virtualenv)
+- `pipx` and `uv` (see install steps below)
 - Root or sudo access (plugins call `nftables`, `systemctl`, `ifstatecli`, etc.)
 - Linux (Debian/Ubuntu tested; most plugins work on any systemd-based distro)
 
@@ -52,24 +52,48 @@ uv sync
 
 ### From the package registry (production)
 
-FastFirewall is published as a uv/pip workspace to a Gitea PyPI registry. Install the full stack with pipx so the `fastfirewall-api` command lands in your PATH:
+**As root — create the service user and grant passwordless sudo:**
 
 ```bash
-pipx install fastfirewall \
-  --pip-args "--index-strategy unsafe-best-match \
-              --extra-index-url https://pypi.org/simple/ \
-              --index-url http://<token>@<gitea-host>/api/packages/<owner>/pypi/simple/"
+# Create a dedicated service user
+useradd -m -s /bin/bash fastfirewall
+
+# Create a no-password sudo group and add the user to it
+groupadd sudo-np
+usermod -a -G sudo-np fastfirewall
+echo '%sudo-np ALL=(ALL:ALL) NOPASSWD:ALL' > /etc/sudoers.d/sudo-np
+```
+# System packages to install
+```bash
+apt install pipx
 ```
 
-Or into an explicit venv:
+Passwordless sudo is required because plugins call privileged tools (`nft`, `systemctl`, `ifstatecli`, etc.) at runtime.
+
+**As the `fastfirewall` user — install and configure:**
 
 ```bash
-uv venv ~/fastfirewall-venv
+# 1. Install pipx
+pipx install uv
+pipx ensurepath
+
+# 2. Create a virtualenv and activate it
+uv venv
+source ~/.venv/bin/activate
+
+# 3. Install FastFirewall from the package registry
 uv pip install fastfirewall \
-  --python ~/fastfirewall-venv/bin/python \
   --index-strategy unsafe-best-match \
   --extra-index-url "http://<token>@<gitea-host>/api/packages/<owner>/pypi/simple/"
+
+# 4. Add the venv bin to your PATH (add to ~/.bashrc to persist)
+export PATH="$PATH:$HOME/.venv/bin"
+
+# 5. Scaffold the config directory
+fastfirewall-api --makecfg ~/.config/fastfirewall
 ```
+
+`--makecfg` creates `~/.config/fastfirewall/plugins/` and writes a starter `app_config.yaml` that stores all plugin state outside the venv. Edit the generated file to set a strong `secret_key` and update `auth.users` before starting the server.
 
 See [BUILD.md](BUILD.md) for how to build and publish packages.
 
@@ -81,7 +105,7 @@ See [BUILD.md](BUILD.md) for how to build and publish packages.
 # From source
 uv run python fastfirewall_app.py
 
-# When installed via pip/pipx
+# When installed
 fastfirewall-api
 
 # Interactive API docs
@@ -90,7 +114,11 @@ open http://localhost:8000/docs
 
 The server loads all enabled plugins at startup. Each plugin mounts its API routes at `/v1/<plugin_id>/`. Plugins that need system packages (nftables, dnsmasq, fluent-bit, etc.) install them automatically via pyinfra when they load.
 
-To change the listen address, port, or other server settings, edit `app_config.yaml`.
+Use `--showcfg` to confirm which config file and paths are active before starting:
+
+```bash
+fastfirewall-api --showcfg
+```
 
 ---
 
@@ -99,25 +127,31 @@ To change the listen address, port, or other server settings, edit `app_config.y
 `fastfirewall_app.py` doubles as a management tool. These flags handle configuration tasks and exit without starting the server:
 
 ```bash
+# Show the active config file and all resolved plugin paths
+fastfirewall-api --showcfg
+
+# Scaffold a production config directory (creates dirs + starter app_config.yaml)
+fastfirewall-api --makecfg ~/.config/fastfirewall
+
 # List all discovered plugins with their state, version, and port claims
-uv run python fastfirewall_app.py --list-plugins
+fastfirewall-api --list-plugins
 
 # Enable or disable a plugin (edits plugin.yaml, then exits)
-uv run python fastfirewall_app.py --enable-plugin syslog
-uv run python fastfirewall_app.py --disable-plugin smtp
+fastfirewall-api --enable-plugin syslog
+fastfirewall-api --disable-plugin smtp
 
 # Show all macro namespaces and their current resolved values, then exit
-uv run python fastfirewall_app.py --show-macros
+fastfirewall-api --show-macros
 
 # Load only specific plugins (useful for testing or minimal deployments)
-uv run python fastfirewall_app.py --plugin firewall --plugin networking
+fastfirewall-api --plugin firewall --plugin networking
 
 # Skip re-applying saved state to the system on boot (state files are still read,
 # but nothing is pushed to the kernel/daemons until you explicitly call /apply)
-uv run python fastfirewall_app.py --ignore-plugins-states
+fastfirewall-api --ignore-plugins-states
 
 # Full help
-uv run python fastfirewall_app.py --help
+fastfirewall-api --help
 ```
 
 `--list-plugins` output looks like:
@@ -176,7 +210,7 @@ FastFirewall is entirely plugin-driven. Every plugin lives in `plugins/<name>/` 
 - **`plugin.yaml`** — metadata, config, dependencies, and port declarations
 - **`plugin.py`** — the Python implementation (a class that inherits `PluginBase`)
 
-On startup, the loader discovers all enabled plugins, installs any declared `py_requirements` and `os_requirements` via pyinfra, then loads them in dependency order and mounts their API routes.
+On startup, the loader discovers all enabled plugins, registers any third-party apt repos declared in `plugin.yaml`, batch-installs all `os_requirements` in a single `apt-get install`, runs `uv sync` once to install Python dependencies (declared in each plugin's `pyproject.toml`), then loads plugins in dependency order and mounts their API routes.
 
 ### Service exclusivity
 
@@ -194,10 +228,10 @@ Plugins declare `plugin_requirements` (a list of other plugin IDs they depend on
 
 ```bash
 # Disable the SMTP plugin
-uv run python fastfirewall_app.py --disable-plugin smtp
+fastfirewall-api --disable-plugin smtp
 
 # Re-enable it
-uv run python fastfirewall_app.py --enable-plugin smtp
+fastfirewall-api --enable-plugin smtp
 ```
 
 This edits the `enabled` field in the plugin's `plugin.yaml` and exits. The change takes effect on the next server start.
@@ -685,7 +719,7 @@ The bootstrap wizard (`tools/bootstrap.py`) drives the API to configure common s
 
 **Interactive wizard:**
 ```bash
-uv run tools/bootstrap.py --save init.json
+fastfirewall-bootstrap --save init.json
 ```
 
 The wizard will ask you to choose a scenario:
@@ -702,7 +736,7 @@ It queries `GET /v1/networking/identify` to show you the available network inter
 cp tools/examples/gateway.yaml my-setup.yaml
 # edit my-setup.yaml with your interface names, addresses, domain, etc.
 
-uv run tools/bootstrap.py --config my-setup.yaml
+fastfirewall-bootstrap --config my-setup.yaml
 ```
 
 Example configs live in `tools/examples/`:
@@ -719,13 +753,13 @@ The wizard can record every API call it makes to a JSON file. You can replay thi
 
 ```bash
 # Interactive wizard + save the session
-uv run tools/bootstrap.py --save my-setup.json
+fastfirewall-bootstrap --save my-setup.json
 
 # Replay against the same server later
-uv run tools/bootstrap.py --apply my-setup.json
+fastfirewall-bootstrap --apply my-setup.json
 
 # Replay against a different server
-uv run tools/bootstrap.py --apply my-setup.json --host http://10.0.0.2:8000
+fastfirewall-bootstrap --apply my-setup.json --host http://10.0.0.2:8000
 ```
 
 **Full wizard options:**

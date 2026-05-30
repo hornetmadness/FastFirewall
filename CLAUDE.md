@@ -76,22 +76,20 @@ os_requirements:
 bus.emit(Event("pkg_management.add.package", payload={"name": "fluent-bit"}))
 ```
 
-**Third-party repos** are a different matter. If a plugin's `os_requirements` package lives in a repo that is not in the default apt/yum/dnf sources, the plugin must register that repo *before* the loader installs `os_requirements`. Do this by emitting `pkg_management.add.repo` from `__init__` (not `setup()`), so the repo is added before the loader proceeds to package installation:
+**Third-party repos** are a different matter. If a plugin's `os_requirements` package lives in a repo that is not in the default apt/yum/dnf sources, declare a `repos:` list in `plugin.yaml`. The loader reads this at parse time — before any module is imported — registers the GPG key and apt source, then runs the batch OS install:
 
-```python
-def __init__(self) -> None:
-    super().__init__()
-    # repo must exist before the loader installs os_requirements
-    bus.emit(Event("pkg_management.add.repo", payload={
-        "name": "vendor-repo",
-        "key_url": "https://vendor.example.com/gpg.key",
-        "key_dest": "/usr/share/keyrings/vendor.gpg",
-        "src": "deb [signed-by=/usr/share/keyrings/vendor.gpg] https://vendor.example.com/apt stable main",
-        "filename": "vendor",
-    }))
+```yaml
+# Correct — loader registers this repo before apt-get install runs
+repos:
+  - name: vendor-repo
+    key_url: https://vendor.example.com/gpg.key
+    key_dest: /usr/share/keyrings/vendor.gpg
+    repo_url: https://vendor.example.com/apt   # loader appends /<codename> <codename> main
+    filename: vendor                            # /etc/apt/sources.list.d/vendor.list
+    # src: "deb [signed-by=...] ..."           # optional: override the constructed src line
 ```
 
-Do **not** also emit the repo event from `setup()` — `__init__` already covered it and a second emission causes `apt update` to run again unnecessarily.
+Do **not** emit `pkg_management.add.repo` from `__init__` for this purpose — the loader handles repo registration before any plugin is instantiated, so `__init__` runs after the repo is already registered.
 
 ## Working style
 
@@ -168,7 +166,7 @@ This is a **FastAPI application driven entirely by plugins**. The app itself (`f
 1. `AppConfig.load()` reads `app_config.yaml` into typed dataclasses. `configure_state()` is called immediately after to apply backup settings before any plugin runs.
 2. `manager_cli.run(loader, plugins_dir)` parses CLI args; exits early for management commands, otherwise returns an optional plugin allow-list.
 3. `PluginLoader.load_directory()` scans the configured `plugins/` directory and derives load order via topological sort of `plugin_requirements` (dependencies before dependents; alphabetical tiebreaker). Pass `only=[...]` to restrict which plugins are loaded; transitive dependencies are included automatically. If a plugin fails to load, all plugins that depend on it (directly or transitively) are skipped rather than erroring out.
-4. For each plugin directory with a `plugin.yaml` + `plugin.py`: the loader imports the module, instantiates any `PluginBase` subclass, wires up event handlers, calls `setup()`, then mounts FastAPI routes if the plugin is an `ApiRouterPlugin` and registers macro namespaces if the plugin is a `MacroProviderPlugin`. **Instantiation (calling `__init__`) happens before `os_requirements` are installed** — plugins that need a third-party apt/yum/dnf repo for their `os_requirements` package must emit `pkg_management.add.repo` from `__init__` so the repo exists when the loader proceeds to install packages.
+4. Before loading any plugin, `load_directory` runs a batch pre-install phase: (a) registers any `repos:` declared in `plugin.yaml` files (apt key + source list entry via `pyinfra_run_batch`), (b) installs all `os_requirements` across all active plugins in one `apt-get install` call, (c) runs `uv sync --no-dev --frozen` once to install all Python dependencies. Only then does the per-plugin loop begin. For each plugin directory with a `plugin.yaml` + `plugin.py`: the loader imports the module, instantiates any `PluginBase` subclass, wires up event handlers, calls `setup()`, then mounts FastAPI routes if the plugin is an `ApiRouterPlugin` and registers macro namespaces if the plugin is a `MacroProviderPlugin`.
 5. After all plugins are loaded, the loader populates `macro_registry` with the aggregated `service_port` data (ports with `-1`-only entries are omitted). `load_directory()` then returns — it does **not** emit `plugins.all_loaded` itself.
 6. `fastfirewall_app.py` performs any post-load setup (e.g. `macro_registry.register_service_port("fastfirewall-api", ...)`) and then calls `loader.finished()`, which emits `plugins.all_loaded` on the bus. This ordering guarantees that all macro namespaces are fully populated when handlers fire.
 7. A `plugin.loaded` event is emitted on the bus after each individual plugin loads.
@@ -181,7 +179,9 @@ Every plugin is a directory under `plugins/` with two required files:
 - `id`, `name`, `version`, `author`, `description`
 - `enabled` (default `true`)
 - `plugin_requirements` — list of other plugin ids this depends on; determines load order
-- `py_requirements` / `os_requirements` — installed at load time via pyinfra
+- `os_requirements` — OS packages batch-installed before plugins load via the native package manager
+- `repos` — third-party apt repos registered before `os_requirements` are installed (see Plugin dependency installation)
+- Python dependencies belong in each plugin's `pyproject.toml`; the loader runs `uv sync` once at boot
 - `service_ports` **(required)** — declares which ports the plugin listens on. Must be `-1` (no ports) or a dict keyed by service name matching the plugin's declared `services`:
   ```yaml
   service_ports:
@@ -388,11 +388,11 @@ Beyond `load_plugin` / `unload_plugin`, `PluginLoader` exposes these loading and
 
 `load_directory(directory, only=None, skip_requirements=False)` scans a filesystem directory for plugin subdirectories and loads each one in topological order. Delegates filtering, sorting, and loading to `_load_discovered()`.
 
-`load_installed(only=None, skip_requirements=False)` discovers plugins registered under the `fastfirewall.plugins` entry-point group (installed packages) and loads any not already loaded from the filesystem. Always skips `py_requirements` installation because those are declared as pip dependencies in the plugin's `pyproject.toml` and were installed by pip. OS requirements (`os_requirements`) are still installed via pyinfra. `fastfirewall_app.py` calls this immediately after `load_directory()` on every boot.
+`load_installed(only=None, skip_requirements=False)` discovers plugins registered under the `fastfirewall.plugins` entry-point group (installed packages) and loads any not already loaded from the filesystem. Always passes `skip_py_requirements=True` so `uv sync` is skipped — Python deps are already satisfied by pip. OS requirements (`os_requirements`) are still batch-installed via pyinfra. `fastfirewall_app.py` calls this immediately after `load_directory()` on every boot.
 
 `_load_discovered(discovered, only, skip_requirements, skip_py_requirements, source)` is the shared implementation for both `load_directory()` and `load_installed()`. It applies the `only` filter (with transitive dependency expansion), propagates disabled state, topologically sorts, and loads each plugin via `load_plugin()`.
 
-`load_directory` and `load_installed` both accept a `skip_requirements` flag. When `True`, the loader skips all pyinfra requirement installation. Use this for CLI-only loads (e.g. `--show-macros`). `load_plugin()` additionally accepts `skip_py_requirements=True` to skip only the Python packages step while still running OS package installation.
+`load_directory` and `load_installed` both accept a `skip_requirements` flag. When `True`, the loader skips all requirement installation (repos, OS packages, uv sync). Use this for CLI-only loads (e.g. `--show-macros`). `skip_py_requirements=True` skips only the `uv sync` step while still running OS package installation — used by `load_installed()` since pip already satisfied Python deps.
 
 `load_plugin(path)` auto-loads any missing `plugin_requirements` it finds as sibling directories before loading the requested plugin. Circular dependencies are detected via `_loading: set[str]` (plugin ids currently mid-load) and raise `PluginError` immediately.
 
@@ -438,7 +438,7 @@ See [BUILD.md](BUILD.md) for build and publish commands.
 
 ### Dependency installation
 
-Plugins can declare `py_requirements` (pip packages) and `os_requirements` (system packages) in `plugin.yaml`. The loader installs them at load time using **pyinfra** running against `@local`.
+Plugins declare `os_requirements` (system packages) in `plugin.yaml`. The loader batch-installs them before any plugin loads using **pyinfra** running against `@local`. Python dependencies belong in the plugin's `pyproject.toml` and are installed by `uv sync --no-dev --frozen` once at boot.
 
 **Pyinfra worker subprocess**
 

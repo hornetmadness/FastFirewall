@@ -10,9 +10,6 @@ author: hornetmadness@gmail.com
 enabled: true
 
 plugin_requirements: ["host"]
-py_requirements:
-  - ifstate
-  - pyyaml
 os_requirements:
   - mtr
 
