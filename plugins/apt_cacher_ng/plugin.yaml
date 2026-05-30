@@ -10,7 +10,6 @@ author: hornetmadness@gmail.com
 enabled: true
 
 plugin_requirements: []
-py_requirements: []
 os_requirements:
   - apt-cacher-ng
 

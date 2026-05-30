@@ -39,6 +39,17 @@ class PluginBase:
     plugin_id: str
     plugin_dir: Path
     logger: logging.Logger
+    _data_dir: Path | None = None  # overridden by loader when plugins.data_dir is configured
+
+    @property
+    def data_dir(self) -> Path:
+        """Directory where this plugin's state files are stored.
+
+        Defaults to plugin_dir/data.  The loader overrides this when
+        plugins.data_dir is set in app_config.yaml, placing state at
+        <data_dir>/<plugin_id>/ so it lives outside the installed package.
+        """
+        return self._data_dir if self._data_dir is not None else self.plugin_dir / "data"
 
     def __init__(self) -> None:
         super().__init__()

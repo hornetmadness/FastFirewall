@@ -126,7 +126,7 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
     def setup(self) -> None:
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "state_file", "smtp_state.json", self.logger,
-            mutation_model="immediate",
+            mutation_model="immediate", data_dir=self.data_dir,
         )
         self._smtp_host: str = self.config.get("smtp_host", "127.0.0.1")
         self._smtp_port: int = int(self.config.get("smtp_port", 25))

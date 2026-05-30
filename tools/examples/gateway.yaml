@@ -9,7 +9,7 @@
 #   - A new admin user
 #
 # Run with:
-#   uv run tools/bootstrap.py --config tools/examples/gateway.yaml
+#   fastfirewall-bootstrap --config examples/gateway.yaml
 
 server:
   host: "http://localhost:8000"

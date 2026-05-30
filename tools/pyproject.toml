@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fastfirewall-bootstrap"
+version = "1.0.0"
+description = "FastFirewall bootstrap wizard — configure common appliance scenarios via the API"
+requires-python = ">=3.12"
+authors = [{email = "hornetmadness@gmail.com"}]
+dependencies = [
+    "requests>=2.28",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+fastfirewall-bootstrap = "fastfirewall_bootstrap.bootstrap:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+sources = {"." = "fastfirewall_bootstrap"}
+exclude = ["CLAUDE.md"]

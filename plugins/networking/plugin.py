@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
 
 import yaml
@@ -193,7 +194,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
     def setup(self) -> None:
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "state_file", "networking_state.json", self.logger,
-            mutation_model="deferred",
+            mutation_model="deferred", data_dir=self.data_dir,
         )
         self._interfaces: dict[str, dict[str, Any]] = {}
         self._routes: dict[str, dict[str, Any]] = {}   # {uuid: route_dict}
@@ -378,8 +379,19 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
 
     # ── ifstate CLI wrapper ────────────────────────────────────────────
 
+    @staticmethod
+    def _find_uv() -> str:
+        """Return the uv binary path, falling back to ~/.local/bin/uv when not on PATH."""
+        uv = shutil.which("uv")
+        if uv:
+            return uv
+        home_uv = Path.home() / ".local/bin/uv"
+        if home_uv.is_file():
+            return str(home_uv)
+        return "uv"
+
     def _run_ifstate(self, *args: str) -> subprocess.CompletedProcess[str]:
-        uv = shutil.which("uv") or "uv"
+        uv = self._find_uv()
         return subprocess.run(
             ["sudo", uv, "run", "ifstatecli", *args],
             capture_output=True, text=True, timeout=30,
@@ -676,7 +688,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
                     fh.write(config_yaml)
                     tmp = fh.name
-                uv = shutil.which("uv") or "uv"
+                uv = self._find_uv()
                 if debug:
                     self.logger.info("[debug] apply config: %s", tmp)
                     self.logger.info("[debug] cmd: sudo %s run ifstatecli -c %s apply", uv, tmp)

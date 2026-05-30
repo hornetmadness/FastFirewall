@@ -827,41 +827,41 @@ def test_bad_yaml_plugin_is_skipped_gracefully(tmp_path, bus):
 def test_detect_os_pkg_apt_includes_sudo(loader):
     with patch("plugin_system.core.loader.platform.system", return_value="Linux"), \
          patch("plugin_system.core.loader.shutil.which", side_effect=lambda b: "/usr/bin/apt-get" if b == "apt-get" else None):
-        _, kwargs = loader._detect_os_pkg_op("p", ["curl"])
+        _, _, kwargs = loader._detect_os_pkg_op("p", ["curl"])
     assert kwargs["_sudo"] is True
 
 
 def test_detect_os_pkg_dnf_includes_sudo(loader):
     with patch("plugin_system.core.loader.platform.system", return_value="Linux"), \
          patch("plugin_system.core.loader.shutil.which", side_effect=lambda b: "/usr/bin/dnf" if b == "dnf" else None):
-        _, kwargs = loader._detect_os_pkg_op("p", ["curl"])
+        _, _, kwargs = loader._detect_os_pkg_op("p", ["curl"])
     assert kwargs["_sudo"] is True
 
 
 def test_detect_os_pkg_yum_includes_sudo(loader):
     with patch("plugin_system.core.loader.platform.system", return_value="Linux"), \
          patch("plugin_system.core.loader.shutil.which", side_effect=lambda b: "/usr/bin/yum" if b == "yum" else None):
-        _, kwargs = loader._detect_os_pkg_op("p", ["curl"])
+        _, _, kwargs = loader._detect_os_pkg_op("p", ["curl"])
     assert kwargs["_sudo"] is True
 
 
 def test_detect_os_pkg_pacman_includes_sudo(loader):
     with patch("plugin_system.core.loader.platform.system", return_value="Linux"), \
          patch("plugin_system.core.loader.shutil.which", side_effect=lambda b: "/usr/bin/pacman" if b == "pacman" else None):
-        _, kwargs = loader._detect_os_pkg_op("p", ["curl"])
+        _, _, kwargs = loader._detect_os_pkg_op("p", ["curl"])
     assert kwargs["_sudo"] is True
 
 
 def test_detect_os_pkg_apk_includes_sudo(loader):
     with patch("plugin_system.core.loader.platform.system", return_value="Linux"), \
          patch("plugin_system.core.loader.shutil.which", side_effect=lambda b: "/sbin/apk" if b == "apk" else None):
-        _, kwargs = loader._detect_os_pkg_op("p", ["curl"])
+        _, _, kwargs = loader._detect_os_pkg_op("p", ["curl"])
     assert kwargs["_sudo"] is True
 
 
 def test_detect_os_pkg_brew_no_sudo(loader):
     with patch("plugin_system.core.loader.platform.system", return_value="Darwin"):
-        _, kwargs = loader._detect_os_pkg_op("p", ["curl"])
+        _, _, kwargs = loader._detect_os_pkg_op("p", ["curl"])
     assert "_sudo" not in kwargs
 
 
@@ -869,7 +869,7 @@ def test_detect_os_pkg_all_packages_in_one_call(loader):
     pkgs = ["curl", "wget", "jq"]
     with patch("plugin_system.core.loader.platform.system", return_value="Linux"), \
          patch("plugin_system.core.loader.shutil.which", side_effect=lambda b: "/usr/bin/apt-get" if b == "apt-get" else None):
-        _, kwargs = loader._detect_os_pkg_op("p", pkgs)
+        _, _, kwargs = loader._detect_os_pkg_op("p", pkgs)
     assert kwargs["packages"] == pkgs
 
 

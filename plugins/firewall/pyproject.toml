@@ -25,4 +25,4 @@ fastfirewall-plugin-networking = { workspace = true }
 [tool.hatch.build.targets.wheel]
 packages = ["."]
 sources = {"." = "fastfirewall_plugin_firewall"}
-exclude = ["data", "test_*.py", "CLAUDE.md", "nft_cmd"]
+exclude = ["data", "test_*.py", "CLAUDE.md"]

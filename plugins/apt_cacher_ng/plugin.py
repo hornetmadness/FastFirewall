@@ -77,7 +77,7 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
         self._log_dir   = Path(self.config.get("log_dir",   "/var/log/apt-cacher-ng"))
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "state_file", "apt_cacher_ng_state.json", self.logger,
-            mutation_model="immediate",
+            mutation_model="immediate", data_dir=self.data_dir,
         )
 
         _default: dict[str, Any] = {"acng_settings": {}, "proxy_host": None}

@@ -51,6 +51,8 @@ class LoggingConfig(BaseModel):
 
 class PluginsConfig(BaseModel):
     directory: str = "plugins"
+    scan_dirs: list[str] = Field(default_factory=list)
+    data_dir: str | None = None
 
 
 class RateLimitConfig(BaseModel):
@@ -112,6 +114,12 @@ class AppConfig(BaseModel):
         repr=False,
     )
     _uvicorn_kwargs: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _config_path: Path = PrivateAttr(default_factory=lambda: Path())
+
+    @property
+    def config_path(self) -> Path:
+        """Absolute path to the app_config.yaml file that was loaded."""
+        return self._config_path
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "AppConfig":
@@ -125,6 +133,8 @@ class AppConfig(BaseModel):
         except ValidationError as exc:
             print(f"Invalid app_config.yaml:\n{exc}", file=sys.stderr)
             raise SystemExit(1) from exc
+
+        cfg._config_path = Path(path).resolve()
 
         server_raw = raw.get("server", {})
         extra = {
@@ -164,3 +174,24 @@ class AppConfig(BaseModel):
         if cwd_candidate.is_dir():
             return cwd_candidate
         return (Path(__file__).parent / self.plugins.directory).resolve()
+
+    def plugins_scan_dirs(self) -> list[Path]:
+        """Return resolved paths for all configured plugin scan directories.
+
+        Expands ~ and resolves each entry in plugins.scan_dirs.  The caller
+        is responsible for checking whether each path exists before scanning.
+        Scan dirs are checked after the main plugins_dir so that the dev
+        workflow (cwd/plugins) always takes highest priority.
+        """
+        return [Path(d).expanduser().resolve() for d in self.plugins.scan_dirs]
+
+    def plugins_data_dir(self) -> Path | None:
+        """Return the resolved data root for plugin state files, or None.
+
+        When set, plugin state files are stored at <data_dir>/<plugin_id>/
+        instead of inside the plugin's own directory.  Useful for keeping
+        mutable state out of installed package directories.
+        """
+        if self.plugins.data_dir is None:
+            return None
+        return Path(self.plugins.data_dir).expanduser().resolve()

@@ -4,7 +4,7 @@
 # existing router where DNS/DHCP are already configured.
 #
 # Run with:
-#   uv run tools/bootstrap.py --config tools/examples/firewall.yaml
+#   fastfirewall-bootstrap --config examples/firewall.yaml
 
 server:
   host: "http://localhost:8000"

@@ -93,7 +93,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
     def setup(self) -> None:
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "state_file", "firewall_state.json", self.logger,
-            mutation_model="deferred",
+            mutation_model="deferred", data_dir=self.data_dir,
         )
         self._default_filter = self.config.get("default_filter_name", "fastfirewall")
         self._nft_wrapper = self.config.get("nft_wrapper") or str(self.plugin_dir / "nft_cmd")
