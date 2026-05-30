@@ -16,8 +16,27 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError,
 
 from request_context import install_filter
 
-_DEFAULT_PATH = Path(__file__).parent / "app_config.yaml"
+_BUNDLED_PATH = Path(__file__).parent / "app_config.yaml"
 _SERVER_KNOWN_KEYS = {"host", "port", "reload", "max_payload_bytes", "cors"}
+
+
+def _find_config() -> Path:
+    """Return the first app_config.yaml found in the discovery chain."""
+    import os
+    candidates = [
+        os.environ.get("FASTFIREWALL_CONFIG"),           # 1. explicit env var
+        Path.cwd() / "app_config.yaml",                  # 2. working directory
+        Path("/etc/fastfirewall/app_config.yaml"),        # 3. system-wide
+        Path.home() / ".config/fastfirewall/app_config.yaml",  # 4. per-user
+        _BUNDLED_PATH,                                    # 5. bundled package default
+    ]
+    for c in candidates:
+        if c is None:
+            continue
+        p = Path(c)
+        if p.exists():
+            return p
+    return _BUNDLED_PATH  # let open() raise a clear FileNotFoundError
 
 
 class LoggingConfig(BaseModel):
@@ -95,7 +114,9 @@ class AppConfig(BaseModel):
     _uvicorn_kwargs: dict[str, Any] = PrivateAttr(default_factory=dict)
 
     @classmethod
-    def load(cls, path: str | Path = _DEFAULT_PATH) -> "AppConfig":
+    def load(cls, path: str | Path | None = None) -> "AppConfig":
+        if path is None:
+            path = _find_config()
         with open(path) as fh:
             raw = yaml.safe_load(fh) or {}
 
@@ -130,6 +151,16 @@ class AppConfig(BaseModel):
         return {"host": self.server.host, "port": self.server.port, "reload": self.server.reload}
 
     def plugins_dir(self, base: Path | None = None) -> Path:
-        """Return the resolved plugins directory path."""
-        root = base or Path(__file__).parent
-        return (root / self.plugins.directory).resolve()
+        """Return the resolved plugins directory path.
+
+        Checks the current working directory first so that running from the
+        repo root works without any configuration.  Falls back to a path
+        relative to this file (useful when the package is installed and a
+        plugins/ directory lives alongside app_config.py).
+        """
+        if base is not None:
+            return (base / self.plugins.directory).resolve()
+        cwd_candidate = (Path.cwd() / self.plugins.directory).resolve()
+        if cwd_candidate.is_dir():
+            return cwd_candidate
+        return (Path(__file__).parent / self.plugins.directory).resolve()

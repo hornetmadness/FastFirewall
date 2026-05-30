@@ -16,7 +16,8 @@
       "Bash(git add *)",
       "Bash(git stash *)",
       "WebFetch(domain:wiki.nftables.org)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(uv build *)"
     ]
   },
   "hooks": {

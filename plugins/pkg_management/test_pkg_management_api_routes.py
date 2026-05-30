@@ -37,15 +37,28 @@ def _load_pkg_manager_module():
     return mod
 
 
+_PKG_NAME = "plugins.pkg_management"
+_PLUGIN_DIR = Path(__file__).parent
+
+
 def _load_plugin_module():
+    import types
     if _REPO_ROOT not in sys.path:
         sys.path.insert(0, _REPO_ROOT)
-    plugin_py = Path(__file__).parent / "plugin.py"
-    sys.modules.pop("_pkgmgmt_test", None)
-    spec = importlib.util.spec_from_file_location("_pkgmgmt_test", plugin_py)
+    # Register a package stub so relative imports (from ._pkg_manager) resolve.
+    if _PKG_NAME not in sys.modules:
+        pkg = types.ModuleType(_PKG_NAME)
+        pkg.__path__ = [str(_PLUGIN_DIR)]  # type: ignore[attr-defined]
+        pkg.__package__ = _PKG_NAME
+        sys.modules[_PKG_NAME] = pkg
+    mod_name = f"{_PKG_NAME}.plugin"
+    sys.modules.pop(mod_name, None)
+    plugin_py = _PLUGIN_DIR / "plugin.py"
+    spec = importlib.util.spec_from_file_location(mod_name, plugin_py)
     assert spec is not None
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["_pkgmgmt_test"] = mod
+    mod.__package__ = _PKG_NAME
+    sys.modules[mod_name] = mod
     assert spec.loader is not None
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
     return mod

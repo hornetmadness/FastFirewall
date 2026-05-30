@@ -14,7 +14,7 @@ _backup_directory: str = "/var/tmp/ff-backups/states"
 
 
 def configure(*, backup_enabled: bool = False, backup_directory: str = "/var/tmp/ff-backups/states") -> None:
-    """Apply app-level state backup settings (call once at startup from app.py)."""
+    """Apply app-level state backup settings (call once at startup from fastfirewall_app.py)."""
     global _backup_enabled, _backup_directory
     _backup_enabled = backup_enabled
     _backup_directory = backup_directory

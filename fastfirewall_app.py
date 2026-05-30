@@ -1,5 +1,5 @@
 """
-app.py — FastAPI entry point with plugin-supplied routes.
+fastfirewall_app.py — FastAPI entry point with plugin-supplied routes.
 
 Routes are auto-discovered from plugins that subclass ApiRouterPlugin and mounted
 at /v1/<plugin_id>/.  Visit /docs for the interactive OpenAPI UI.
@@ -146,7 +146,10 @@ async def validation_exception_handler(
 loader = PluginLoader(bus=bus, app=app, logger=cfg.logger)
 only_plugins, ignore_plugins_states, show_macros = manager_cli.run(loader, cfg.plugins_dir())
 loader.ignore_state_on_boot = ignore_plugins_states
-loader.load_directory(cfg.plugins_dir(), only=only_plugins, skip_requirements=show_macros)
+plugins_dir = cfg.plugins_dir()
+if plugins_dir.is_dir():
+    loader.load_directory(plugins_dir, only=only_plugins, skip_requirements=show_macros)
+loader.load_installed(only=only_plugins, skip_requirements=show_macros)
 macro_registry.register_service_port("fastfirewall-api", "tcp", [cfg.server.port])
 loader.finished()
 
@@ -180,8 +183,12 @@ def _custom_openapi():
 
 app.openapi = _custom_openapi
 
-if __name__ == "__main__":
+def main() -> None:
     manager_cli.print_plugin_table(loader.list_plugins(cfg.plugins_dir()))
     print()
     cfg.logger.debug("Starting server with uvicorn kwargs: %s", cfg.uvicorn_kwargs())
     uvicorn.run(app, **cfg.uvicorn_kwargs())
+
+
+if __name__ == "__main__":
+    main()

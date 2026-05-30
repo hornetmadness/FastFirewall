@@ -109,7 +109,7 @@ def print_macros(loader) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="app.py",
+        prog="fastfirewall-api",
         description="FastFirewall — plugin-driven FastAPI firewall server.",
         add_help=False,
     )

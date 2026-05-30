@@ -41,7 +41,7 @@ from pyinfra.operations import server as server_ops
 from infra import pyinfra_run_batch
 from plugin_system.core import ApiRouterPlugin, PluginBase, PluginStateFile, Service
 from plugin_system.core.events import Event, bus
-from plugins.pkg_management._pkg_manager import (
+from ._pkg_manager import (
     PackageBody,
     PackageManager,
     RepoBody,

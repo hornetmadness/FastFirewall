@@ -11,7 +11,7 @@ Built on FastAPI and driven entirely by plugins. Every feature is a plugin; the 
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Running the server](#running-the-server)
-- [app.py CLI reference](#apppy-cli-reference)
+- [fastfirewall-api CLI reference](#fastfirewall-api-cli-reference)
 - [Authentication](#authentication)
 - [Plugin system](#plugin-system)
 - [State files](#state-files)
@@ -40,21 +40,49 @@ Built on FastAPI and driven entirely by plugins. Every feature is a plugin; the 
 
 ## Installation
 
+### From source (development)
+
 ```bash
 git clone <repo>
 cd FastFirewall
 uv sync
 ```
 
-That's it. `uv sync` creates a virtualenv and installs all Python dependencies from `uv.lock`.
+`uv sync` creates a virtualenv and installs all Python dependencies from `uv.lock`.
+
+### From the package registry (production)
+
+FastFirewall is published as a uv/pip workspace to a private Gitea PyPI registry. Install the full stack with pipx so the `fastfirewall-api` command lands in your PATH:
+
+```bash
+pipx install fastfirewall \
+  --pip-args "--index-strategy unsafe-best-match \
+              --extra-index-url https://pypi.org/simple/ \
+              --index-url http://<token>@git.themathis.house:3010/api/packages/<owner>/pypi/simple/"
+```
+
+Or into an explicit venv:
+
+```bash
+uv venv ~/fastfirewall-venv
+uv pip install fastfirewall \
+  --python ~/fastfirewall-venv/bin/python \
+  --index-strategy unsafe-best-match \
+  --extra-index-url "http://<token>@git.themathis.house:3010/api/packages/<owner>/pypi/simple/"
+```
+
+See [BUILD.md](BUILD.md) for how to build and publish packages.
 
 ---
 
 ## Running the server
 
 ```bash
-# Start the server (listens on 0.0.0.0:8000 by default)
-uv run python app.py
+# From source
+uv run python fastfirewall_app.py
+
+# When installed via pip/pipx
+fastfirewall-api
 
 # Interactive API docs
 open http://localhost:8000/docs
@@ -66,30 +94,30 @@ To change the listen address, port, or other server settings, edit `app_config.y
 
 ---
 
-## app.py CLI reference
+## fastfirewall-api CLI reference
 
-`app.py` doubles as a management tool. These flags handle configuration tasks and exit without starting the server:
+`fastfirewall_app.py` doubles as a management tool. These flags handle configuration tasks and exit without starting the server:
 
 ```bash
 # List all discovered plugins with their state, version, and port claims
-uv run python app.py --list-plugins
+uv run python fastfirewall_app.py --list-plugins
 
 # Enable or disable a plugin (edits plugin.yaml, then exits)
-uv run python app.py --enable-plugin syslog
-uv run python app.py --disable-plugin smtp
+uv run python fastfirewall_app.py --enable-plugin syslog
+uv run python fastfirewall_app.py --disable-plugin smtp
 
 # Show all macro namespaces and their current resolved values, then exit
-uv run python app.py --show-macros
+uv run python fastfirewall_app.py --show-macros
 
 # Load only specific plugins (useful for testing or minimal deployments)
-uv run python app.py --plugin firewall --plugin networking
+uv run python fastfirewall_app.py --plugin firewall --plugin networking
 
 # Skip re-applying saved state to the system on boot (state files are still read,
 # but nothing is pushed to the kernel/daemons until you explicitly call /apply)
-uv run python app.py --ignore-plugins-states
+uv run python fastfirewall_app.py --ignore-plugins-states
 
 # Full help
-uv run python app.py --help
+uv run python fastfirewall_app.py --help
 ```
 
 `--list-plugins` output looks like:
@@ -166,10 +194,10 @@ Plugins declare `plugin_requirements` (a list of other plugin IDs they depend on
 
 ```bash
 # Disable the SMTP plugin
-uv run python app.py --disable-plugin smtp
+uv run python fastfirewall_app.py --disable-plugin smtp
 
 # Re-enable it
-uv run python app.py --enable-plugin smtp
+uv run python fastfirewall_app.py --enable-plugin smtp
 ```
 
 This edits the `enabled` field in the plugin's `plugin.yaml` and exits. The change takes effect on the next server start.
@@ -288,7 +316,7 @@ On startup, each plugin reads its state file and re-applies `desired_state` to t
 
 To skip the boot-time re-apply for all plugins (state files are still loaded, but nothing is pushed to the system until you explicitly call `/apply`):
 ```bash
-uv run python app.py --ignore-plugins-states
+uv run python fastfirewall_app.py --ignore-plugins-states
 ```
 
 ---
@@ -871,7 +899,7 @@ The host plugin exposes the `$host` namespace:
 
 ```bash
 # See all registered macros and their current values
-uv run python app.py --show-macros
+uv run python fastfirewall_app.py --show-macros
 
 # Or via API while the server is running
 curl -su admin:admin http://localhost:8000/v1/macros

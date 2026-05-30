@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fastfirewall-plugin-networking"
+version = "1.0.0"
+description = "FastFirewall plugin — manages network interfaces and routes declaratively via ifstate"
+requires-python = ">=3.12"
+authors = [{email = "hornetmadness@gmail.com"}]
+dependencies = [
+    "fastfirewall-core",
+    "fastfirewall-plugin-host",
+    "ifstate",
+    "pyyaml>=6.0",
+]
+
+[project.entry-points."fastfirewall.plugins"]
+networking = "fastfirewall_plugin_networking"
+
+[tool.uv.sources]
+fastfirewall-core = { workspace = true }
+fastfirewall-plugin-host = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+sources = {"." = "fastfirewall_plugin_networking"}
+exclude = ["data", "test_*.py", "CLAUDE.md"]

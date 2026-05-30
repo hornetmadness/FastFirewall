@@ -1,5 +1,9 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "FastFirewall"
+name = "fastfirewall-core"
 version = "0.1.0"
 description = "Plugin-driven network appliance API built on FastAPI — plugins own routes, services, and events; the core provides lifecycle management, an event bus, and a service exclusivity registry"
 requires-python = ">=3.12"
@@ -27,8 +31,20 @@ testpaths = ["tests", "plugins"]
 asyncio_mode = "auto"
 pythonpath = ["."]
 
+[project.scripts]
+fastfirewall-api = "fastfirewall_app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["plugin_system", "ff_auth", "infra"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"fastfirewall_app.py" = "fastfirewall_app.py"
+"app_config.py" = "app_config.py"
+"request_context.py" = "request_context.py"
+"app_config.yaml" = "app_config.yaml"
+
 [tool.uv]
-package = false
+package = true
 # CVE fix: paramiko 5.x drops the ecdsa dependency entirely, eliminating both
 # the Minerva timing-attack CVE (ecdsa, alert #1) and the SHA-1 CVE (paramiko, alert #2).
 # pyinfra 3.x caps paramiko at <5 but this project only uses the @local connector
@@ -36,3 +52,6 @@ package = false
 override-dependencies = [
     "paramiko>=5.0.0",
 ]
+
+[tool.uv.workspace]
+members = ["plugins/*", "meta"]

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fastfirewall"
+version = "0.1.0"
+description = "FastFirewall full appliance stack — core + all plugins"
+requires-python = ">=3.12"
+authors = [{email = "hornetmadness@gmail.com"}]
+dependencies = [
+    "fastfirewall-core",
+    "fastfirewall-plugin-apt-cacher-ng",
+    "fastfirewall-plugin-audit",
+    "fastfirewall-plugin-dns",
+    "fastfirewall-plugin-firewall",
+    "fastfirewall-plugin-host",
+    "fastfirewall-plugin-networking",
+    "fastfirewall-plugin-pkg-management",
+    "fastfirewall-plugin-smtp",
+    "fastfirewall-plugin-syslog",
+]
+
+[tool.uv.sources]
+fastfirewall-core = { workspace = true }
+fastfirewall-plugin-apt-cacher-ng = { workspace = true }
+fastfirewall-plugin-audit = { workspace = true }
+fastfirewall-plugin-dns = { workspace = true }
+fastfirewall-plugin-firewall = { workspace = true }
+fastfirewall-plugin-host = { workspace = true }
+fastfirewall-plugin-networking = { workspace = true }
+fastfirewall-plugin-pkg-management = { workspace = true }
+fastfirewall-plugin-smtp = { workspace = true }
+fastfirewall-plugin-syslog = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["fastfirewall"]
