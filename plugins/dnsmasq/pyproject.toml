@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fastfirewall-plugin-dns"
+version = "1.0.0"
+description = "FastFirewall plugin — DNS forwarding/caching, DHCP, TFTP, PXE boot, and mDNS via dnsmasq"
+requires-python = ">=3.12"
+authors = [{email = "hornetmadness@gmail.com"}]
+dependencies = [
+    "fastfirewall-core",
+    "fastfirewall-plugin-networking",
+    "pyyaml>=6.0",
+]
+
+[project.entry-points."fastfirewall.plugins"]
+dnsmasq = "fastfirewall_plugin_dns"
+
+[tool.uv.sources]
+fastfirewall-core = { workspace = true }
+fastfirewall-plugin-networking = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+sources = {"." = "fastfirewall_plugin_dns"}
+exclude = ["data", "test_*.py", "CLAUDE.md"]

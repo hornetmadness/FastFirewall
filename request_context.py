@@ -4,7 +4,7 @@ request_context.py — per-request tracing via contextvars.
 Provides a ContextVar that holds the current X-Request-ID, a logging filter
 that injects it into every log record, and the ASGI middleware that sets it.
 
-Usage in app.py:
+Usage in fastfirewall_app.py:
     from request_context import request_tracing_middleware
 
     @app.middleware("http")

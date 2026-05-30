@@ -160,6 +160,8 @@ class PluginLoader:
         self._service_registry: dict[Service, str] = {}  # service → plugin_id
         self._port_registry: dict[tuple[str, int], str] = {}  # (proto, port) → plugin_id
         self._loading: set[str] = set()  # plugin ids currently mid-load (cycle detection)
+        self._loaded: set[str] = set()  # all successfully loaded plugin ids (accumulates)
+        self._all_service_ports: dict[str, dict[str, list[int]]] = {}
         self.ignore_state_on_boot: bool = False
 
     # ------------------------------------------------------------------
@@ -191,7 +193,7 @@ class PluginLoader:
         """
         root = Path(directory)
         if not root.is_dir():
-            raise PluginError(f"Not a directory: {root}")
+            return []
         rows: dict[str, dict[str, Any]] = {}
         for child in sorted(root.iterdir()):
             yaml_path = child / YAML_FILENAME
@@ -500,11 +502,82 @@ class PluginLoader:
                 "requirements": list(raw.get("plugin_requirements") or []),
             }
 
+        return self._load_discovered(discovered, only=only, skip_requirements=skip_requirements, source=str(root))
+
+    def load_installed(self, only: list[str] | None = None, skip_requirements: bool = False) -> list[str]:
+        """
+        Discover plugins declared under the ``fastfirewall.plugins`` entry-point
+        group and load any that have not already been loaded (e.g. from the
+        filesystem via :meth:`load_directory`).
+
+        Each entry point maps a plugin id to the importable Python package that
+        ships the plugin files::
+
+            [project.entry-points."fastfirewall.plugins"]
+            firewall = "fastfirewall_plugin_firewall"
+
+        Returns a list of newly loaded plugin ids.
+        """
+        import importlib.util
+        from importlib.metadata import entry_points
+
+        eps = {ep.name: ep.value for ep in entry_points(group="fastfirewall.plugins")}
+        if not eps:
+            return []
+
+        discovered: dict[str, dict[str, Any]] = {}
+        for pid, pkg_name in eps.items():
+            if pid in self._loaded:
+                continue
+            spec = importlib.util.find_spec(pkg_name)
+            if not spec or not spec.submodule_search_locations:
+                self.logger.warning("Entry point %r: package %r not importable", pid, pkg_name)
+                continue
+            plugin_dir = Path(list(spec.submodule_search_locations)[0])
+            yaml_path = plugin_dir / YAML_FILENAME
+            if not yaml_path.exists():
+                self.logger.warning("Entry point %r: no plugin.yaml in %s", pid, plugin_dir)
+                continue
+            try:
+                raw: dict[str, Any] = yaml.safe_load(yaml_path.read_text()) or {}
+            except Exception:
+                self.logger.warning("Could not read plugin.yaml for entry point %r, skipping", pid)
+                continue
+            discovered[pid] = {
+                "path": plugin_dir,
+                "enabled": bool(raw.get("enabled", True)),
+                "requirements": list(raw.get("plugin_requirements") or []),
+            }
+
+        if not discovered:
+            return []
+
+        return self._load_discovered(
+            discovered,
+            only=only,
+            skip_requirements=skip_requirements,
+            skip_py_requirements=True,  # py_requirements already installed by pip
+            source="installed packages",
+        )
+
+    def _load_discovered(
+        self,
+        discovered: dict[str, dict[str, Any]],
+        only: list[str] | None = None,
+        skip_requirements: bool = False,
+        skip_py_requirements: bool = False,
+        source: str = "<unknown>",
+    ) -> list[str]:
+        """
+        Common steps for load_directory() and load_installed(): filter,
+        topologically sort, load, and update accumulated service_ports state.
+        *discovered* maps plugin_id → {path, enabled, requirements}.
+        """
         # ── 2. Apply `only` filter, expanding to transitive dependencies ───
         if only is not None:
             for pid in only:
-                if pid not in discovered:
-                    self.logger.warning("Requested plugin %r not found in %s", pid, root)
+                if pid not in discovered and pid not in self._loaded:
+                    self.logger.warning("Requested plugin %r not found in %s", pid, source)
             include: set[str] = set(only)
             queue = [p for p in only if p in discovered]
             while queue:
@@ -524,9 +597,9 @@ class PluginLoader:
             if not info["enabled"]:
                 continue
             for dep in info["requirements"]:
-                if dep not in discovered:
+                if dep not in discovered and dep not in self._loaded:
                     raise PluginError(
-                        f"Plugin {pid!r} requires {dep!r} which was not found in {root}"
+                        f"Plugin {pid!r} requires {dep!r} which was not found (source: {source})"
                     )
 
         # ── 4. Propagate disabled state to dependents (cascading) ──────────
@@ -573,7 +646,7 @@ class PluginLoader:
                 failed.add(pid)
                 continue
             try:
-                loaded_id = self.load_plugin(active[pid]["path"], skip_requirements=skip_requirements)
+                loaded_id = self.load_plugin(active[pid]["path"], skip_requirements=skip_requirements, skip_py_requirements=skip_py_requirements)
                 loaded.append(loaded_id)
             except Exception as exc:
                 self.logger.exception("Failed to load plugin from %s", active[pid]["path"])
@@ -597,14 +670,12 @@ class PluginLoader:
         if disabled:
             self.logger.info("  Disabled: %s", ", ".join(sorted(disabled)))
 
-        # Build a full service_ports map across all successfully loaded plugins
-        # so subscribers (e.g. the firewall macro resolver) get a consistent
-        # snapshot of what actually loaded rather than having to reassemble it
-        # from per-plugin events that may have fired in an inconvenient order.
+        # Accumulate loaded ids and rebuild the full service_ports snapshot
+        # across every plugin loaded so far (both filesystem and installed).
+        self._loaded.update(loaded)
         all_service_ports: dict[str, dict[str, list[int]]] = {}
-        for pid in loaded:
-            lp = self._plugins.get(pid)
-            if lp is not None and isinstance(lp.service_ports, dict):
+        for lp in self._plugins.values():
+            if isinstance(lp.service_ports, dict):
                 for svc_name, proto_map in lp.service_ports.items():
                     filtered = {
                         proto: real
@@ -614,7 +685,6 @@ class PluginLoader:
                     if filtered:
                         all_service_ports[svc_name] = filtered
         macro_registry.set_service_ports(all_service_ports)
-        self._loaded = loaded
         self._all_service_ports = all_service_ports
         self._log_pending_changes()
 
@@ -623,8 +693,8 @@ class PluginLoader:
     def finished(self) -> None:
         """Emit ``plugins.all_loaded`` after any post-load setup (e.g. registering
         additional macro namespaces or service ports) has been applied."""
-        loaded = getattr(self, "_loaded", [])
-        all_service_ports = getattr(self, "_all_service_ports", {})
+        loaded = sorted(self._loaded)
+        all_service_ports = self._all_service_ports
         self._bus.emit(Event(
             "plugins.all_loaded",
             payload={"service_ports": all_service_ports, "loaded": loaded},
@@ -643,7 +713,7 @@ class PluginLoader:
                 ", ".join(pending),
             )
 
-    def load_plugin(self, path: str | Path, skip_requirements: bool = False) -> str:
+    def load_plugin(self, path: str | Path, skip_requirements: bool = False, skip_py_requirements: bool = False) -> str:
         """
         Load a single plugin from *path* (the plugin directory).
         Returns the plugin id on success.
@@ -762,7 +832,7 @@ class PluginLoader:
                             "Auto-loading required dependency %r for plugin %r",
                             dep, plugin_id,
                         )
-                        self.load_plugin(dep_path, skip_requirements=skip_requirements)
+                        self.load_plugin(dep_path, skip_requirements=skip_requirements, skip_py_requirements=skip_py_requirements)
                     else:
                         raise PluginError(
                             f"Plugin {plugin_id!r} requires {dep!r} which is not loaded"
@@ -771,7 +841,7 @@ class PluginLoader:
             self._loading.discard(plugin_id)
 
         # --- install python requirements via pyinfra + pipx -----------
-        if py_requirements and not skip_requirements:
+        if py_requirements and not skip_requirements and not skip_py_requirements:
             self.logger.info(
                 "Plugin %r needs Python packages: %s",
                 plugin_id,

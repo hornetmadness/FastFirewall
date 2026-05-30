@@ -102,23 +102,23 @@ Do **not** also emit the repo event from `setup()` — `__init__` already covere
 
 ```bash
 # Run the dev server (reload enabled by default in app_config.yaml)
-uv run python app.py
+uv run python fastfirewall_app.py
 
 # Run with only specific plugins loaded
-uv run python app.py --plugin firewall --plugin dns
+uv run python fastfirewall_app.py --plugin firewall --plugin dns
 
 # List all plugins and their enabled state
-uv run python app.py --list-plugins
+uv run python fastfirewall_app.py --list-plugins
 
 # Show all macro namespaces and their current resolved values, then exit
-uv run python app.py --show-macros
+uv run python fastfirewall_app.py --show-macros
 
 # Enable or disable a plugin (edits plugin.yaml, then exits)
-uv run python app.py --enable-plugin syslog
-uv run python app.py --disable-plugin syslog
+uv run python fastfirewall_app.py --enable-plugin syslog
+uv run python fastfirewall_app.py --disable-plugin syslog
 
 # Show all CLI options
-uv run python app.py --help
+uv run python fastfirewall_app.py --help
 
 # Run all tests
 uv run pytest
@@ -140,15 +140,28 @@ uv sync
 
 # Install with dev extras
 uv sync --extra dev
+
+# Build all workspace packages (wheels + sdists land in dist/)
+uv build --all-packages
+
+# Build a single package
+uv build --package fastfirewall-core
+
+# Publish all packages to the Gitea PyPI registry
+uv publish \
+  --publish-url http://<gitea-host>/api/packages/$GITEA_OWNER/pypi/ \
+  --token $GITEA_API_TOKEN
 ```
 
 The OpenAPI docs are available at `http://localhost:8000/docs` when the server is running.
 
-CLI argument parsing and all management commands (`--list-plugins`, `--show-macros`, `--enable-plugin`, `--disable-plugin`, `--help`) are handled by `plugin_system/manager_cli.py`. `app.py` calls `manager_cli.run(loader, plugins_dir)` which either exits after handling a pre-load command or returns `(only, ignore_states, show_macros)` for normal startup. `--show-macros` is a post-load command: `run()` signals it via the third return value, `app.py` calls `load_directory(skip_requirements=True)` to populate the macro registry without installing packages, then calls `manager_cli.print_macros(loader)` and exits. `manager_cli.get_macros(loader)` returns the same data as a plain dict and is used by `GET /v1/macros`.
+When installed via pip/pipx, the entry point is `fastfirewall-api` instead of `uv run python fastfirewall_app.py`. Both accept the same CLI flags.
+
+CLI argument parsing and all management commands (`--list-plugins`, `--show-macros`, `--enable-plugin`, `--disable-plugin`, `--help`) are handled by `plugin_system/manager_cli.py`. `fastfirewall_app.py` calls `manager_cli.run(loader, plugins_dir)` which either exits after handling a pre-load command or returns `(only, ignore_states, show_macros)` for normal startup. `--show-macros` is a post-load command: `run()` signals it via the third return value, `fastfirewall_app.py` calls `load_directory(skip_requirements=True)` to populate the macro registry without installing packages, then calls `manager_cli.print_macros(loader)` and exits. `manager_cli.get_macros(loader)` returns the same data as a plain dict and is used by `GET /v1/macros`.
 
 ## Architecture
 
-This is a **FastAPI application driven entirely by plugins**. The app itself (`app.py`) has no routes of its own — all API surface comes from plugins loaded at startup.
+This is a **FastAPI application driven entirely by plugins**. The app itself (`fastfirewall_app.py`) has no routes of its own — all API surface comes from plugins loaded at startup.
 
 ### Boot sequence
 
@@ -157,7 +170,7 @@ This is a **FastAPI application driven entirely by plugins**. The app itself (`a
 3. `PluginLoader.load_directory()` scans the configured `plugins/` directory and derives load order via topological sort of `plugin_requirements` (dependencies before dependents; alphabetical tiebreaker). Pass `only=[...]` to restrict which plugins are loaded; transitive dependencies are included automatically. If a plugin fails to load, all plugins that depend on it (directly or transitively) are skipped rather than erroring out.
 4. For each plugin directory with a `plugin.yaml` + `plugin.py`: the loader imports the module, instantiates any `PluginBase` subclass, wires up event handlers, calls `setup()`, then mounts FastAPI routes if the plugin is an `ApiRouterPlugin` and registers macro namespaces if the plugin is a `MacroProviderPlugin`. **Instantiation (calling `__init__`) happens before `os_requirements` are installed** — plugins that need a third-party apt/yum/dnf repo for their `os_requirements` package must emit `pkg_management.add.repo` from `__init__` so the repo exists when the loader proceeds to install packages.
 5. After all plugins are loaded, the loader populates `macro_registry` with the aggregated `service_port` data (ports with `-1`-only entries are omitted). `load_directory()` then returns — it does **not** emit `plugins.all_loaded` itself.
-6. `app.py` performs any post-load setup (e.g. `macro_registry.register_service_port("fastfirewall-api", ...)`) and then calls `loader.finished()`, which emits `plugins.all_loaded` on the bus. This ordering guarantees that all macro namespaces are fully populated when handlers fire.
+6. `fastfirewall_app.py` performs any post-load setup (e.g. `macro_registry.register_service_port("fastfirewall-api", ...)`) and then calls `loader.finished()`, which emits `plugins.all_loaded` on the bus. This ordering guarantees that all macro namespaces are fully populated when handlers fire.
 7. A `plugin.loaded` event is emitted on the bus after each individual plugin loads.
 
 ### Plugin anatomy
@@ -368,20 +381,60 @@ finally:
 
 ### PluginLoader management API
 
-Beyond `load_plugin` / `unload_plugin`, `PluginLoader` exposes two read/write helpers that do not load or execute any plugin code:
+Beyond `load_plugin` / `unload_plugin`, `PluginLoader` exposes these loading and management methods:
 
-- `list_plugins(directory)` — scans `directory` and returns a list of dicts with `id`, `name`, `version`, `description`, `author`, `enabled`, `plugin_requirements`, `service_ports` for every discovered plugin, sorted in topological load order.
+- `list_plugins(directory)` — scans `directory` and returns a list of dicts with `id`, `name`, `version`, `description`, `author`, `enabled`, `plugin_requirements`, `service_ports` for every discovered plugin, sorted in topological load order. Returns `[]` if the directory does not exist.
 - `set_plugin_enabled(directory, plugin_id, enabled)` — finds the plugin by id, sets the `enabled` field in its `plugin.yaml`, and writes it back. Raises `PluginError` if the plugin is not found.
 
-`load_directory(directory, only=None, skip_requirements=False)` and `load_plugin(path, skip_requirements=False)` accept a `skip_requirements` flag. When `True`, the loader skips pyinfra `py_requirements` / `os_requirements` installation. Use this for CLI-only loads (e.g. `--show-macros`) where populating runtime state is needed but installing packages is a side-effect you want to avoid.
+`load_directory(directory, only=None, skip_requirements=False)` scans a filesystem directory for plugin subdirectories and loads each one in topological order. Delegates filtering, sorting, and loading to `_load_discovered()`.
+
+`load_installed(only=None, skip_requirements=False)` discovers plugins registered under the `fastfirewall.plugins` entry-point group (installed packages) and loads any not already loaded from the filesystem. Always skips `py_requirements` installation because those are declared as pip dependencies in the plugin's `pyproject.toml` and were installed by pip. OS requirements (`os_requirements`) are still installed via pyinfra. `fastfirewall_app.py` calls this immediately after `load_directory()` on every boot.
+
+`_load_discovered(discovered, only, skip_requirements, skip_py_requirements, source)` is the shared implementation for both `load_directory()` and `load_installed()`. It applies the `only` filter (with transitive dependency expansion), propagates disabled state, topologically sorts, and loads each plugin via `load_plugin()`.
+
+`load_directory` and `load_installed` both accept a `skip_requirements` flag. When `True`, the loader skips all pyinfra requirement installation. Use this for CLI-only loads (e.g. `--show-macros`). `load_plugin()` additionally accepts `skip_py_requirements=True` to skip only the Python packages step while still running OS package installation.
 
 `load_plugin(path)` auto-loads any missing `plugin_requirements` it finds as sibling directories before loading the requested plugin. Circular dependencies are detected via `_loading: set[str]` (plugin ids currently mid-load) and raise `PluginError` immediately.
 
-`load_directory` tracks which plugins failed to load in a `failed` set and silently skips any plugin whose dependency is in that set, logging a warning rather than propagating the error.
+`_load_discovered` tracks which plugins failed to load and silently skips any plugin whose dependency failed, logging a warning rather than propagating the error.
 
-`PluginLoader` maintains two runtime registries updated on every load/unload:
+`PluginLoader` maintains these runtime registries updated on every load/unload:
 - `service_registry` — `{Service → plugin_id}`: which plugin owns each service
 - `_port_registry` — `{(proto, port) → plugin_id}`: which plugin has claimed each port; port `-1` is never registered
+- `_loaded` — `set[str]`: all successfully loaded plugin IDs, accumulated across all `load_directory()` and `load_installed()` calls; used by `load_installed()` to skip already-loaded plugins
+
+### Packaging
+
+FastFirewall is structured as a **uv workspace** with one package per plugin plus a core package and a meta-package:
+
+| Package | PyPI name | Contents |
+|---|---|---|
+| Core | `fastfirewall-core` | `plugin_system/`, `ff_auth/`, `infra/`, `fastfirewall_app.py`, `app_config.py`, `request_context.py`, bundled `app_config.yaml` |
+| Plugins | `fastfirewall-plugin-<name>` | `plugins/<name>/` files remapped to `fastfirewall_plugin_<name>/` |
+| Meta | `fastfirewall` | No code — declares all plugin packages as dependencies |
+
+Each plugin package declares a `fastfirewall.plugins` entry point so `PluginLoader.load_installed()` can discover it:
+
+```toml
+# plugins/firewall/pyproject.toml
+[project.entry-points."fastfirewall.plugins"]
+firewall = "fastfirewall_plugin_firewall"
+```
+
+**Console script**: `fastfirewall-core` installs `fastfirewall-api` → `fastfirewall_app:main`. Running `fastfirewall-api` from any directory is equivalent to `uv run python fastfirewall_app.py` from the repo root.
+
+**Config discovery** — `AppConfig.load()` searches in order:
+1. `$FASTFIREWALL_CONFIG` env var
+2. `./app_config.yaml` (cwd — preserves dev workflow when running from the repo)
+3. `/etc/fastfirewall/app_config.yaml`
+4. `~/.config/fastfirewall/app_config.yaml`
+5. Bundled `app_config.yaml` inside the installed package (last resort)
+
+**Plugin discovery** — `fastfirewall_app.py` loads plugins from two sources on every boot:
+1. `cfg.plugins_dir()` if the directory exists (cwd-first; falls back to package-relative path)
+2. `loader.load_installed()` — entry points from installed `fastfirewall-plugin-*` packages; skips IDs already loaded from the filesystem
+
+See [BUILD.md](BUILD.md) for build and publish commands.
 
 ### Dependency installation
 
@@ -563,7 +616,7 @@ state:
     directory: /var/tmp/ff-backups/states
 ```
 
-`configure_state()` is called once at startup in `app.py` to apply the `app_config.yaml` settings before any plugin `setup()` runs.
+`configure_state()` is called once at startup in `fastfirewall_app.py` to apply the `app_config.yaml` settings before any plugin `setup()` runs.
 
 **Testing** — in plugin tests, `state_manager._backup_enabled` is `False` by default (module default), so no backup directory is created. If a test exercises the backup path, patch `plugin_system.core.state_manager._backup_enabled` and `_backup_directory` directly.
 
@@ -636,9 +689,9 @@ When adding `current_state` to an existing state file, set it to a copy of `desi
 
 Authentication is handled in `ff_auth/auth.py` and configured via the `auth:` section of `app_config.yaml`. Both **HTTP Basic** and **OAuth2 Bearer JWT** are accepted on every protected route — clients may use either.
 
-Enforcement is a middleware in `app.py` (`enforce_auth`). Routes listed in `auth.exempt_paths` bypass it; defaults are `/token`, `/docs`, `/openapi.json`, `/redoc`.
+Enforcement is a middleware in `fastfirewall_app.py` (`enforce_auth`). Routes listed in `auth.exempt_paths` bypass it; defaults are `/token`, `/docs`, `/openapi.json`, `/redoc`.
 
-**Endpoints added by `app.py`:**
+**Endpoints added by `fastfirewall_app.py`:**
 - `POST /token` — OAuth2 password flow; accepts `username` + `password` form fields, returns `{"access_token": "...", "token_type": "bearer"}`. Rate-limited per client IP (see below).
 - `GET /auth/me` — returns `{"username": "...", "roles": [...]}` for the authenticated caller; also registers both security schemes in the OpenAPI `/docs` "Authorize" dialog
 - `GET /v1/macros` — returns all macro namespaces and their current resolved values as a structured dict; delegates to `manager_cli.get_macros(loader)` (same data as `--show-macros`)
@@ -685,7 +738,7 @@ uv run python -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gen
 ```
 Paste the `$2b$…` output as the `password` value — the loader detects the prefix and skips re-hashing.
 
-**Key module:** `ff_auth/auth.py` — `setup(cfg)`, `enforce_auth` (middleware), `get_current_user` (FastAPI dependency), `create_token`, `authenticate_for_token`, `is_rate_limited`, `record_login_failure`, `record_login_success`. The package `ff_auth/__init__.py` re-exports all public symbols so `app.py` imports from `ff_auth` directly.
+**Key module:** `ff_auth/auth.py` — `setup(cfg)`, `enforce_auth` (middleware), `get_current_user` (FastAPI dependency), `create_token`, `authenticate_for_token`, `is_rate_limited`, `record_login_failure`, `record_login_success`. The package `ff_auth/__init__.py` re-exports all public symbols so `fastfirewall_app.py` imports from `ff_auth` directly.
 
 > Note: the directory on disk is `ff_auth` (underscore) — Python package names cannot contain hyphens.
 

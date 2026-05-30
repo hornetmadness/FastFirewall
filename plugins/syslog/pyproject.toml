@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fastfirewall-plugin-syslog"
+version = "1.0.0"
+description = "FastFirewall plugin — installs and configures fluent-bit and rsyslog to collect system logs and provide a log reading API"
+requires-python = ">=3.12"
+authors = [{email = "hornetmadness@gmail.com"}]
+dependencies = [
+    "fastfirewall-core",
+    "fastfirewall-plugin-pkg-management",
+]
+
+[project.entry-points."fastfirewall.plugins"]
+syslog = "fastfirewall_plugin_syslog"
+
+[tool.uv.sources]
+fastfirewall-core = { workspace = true }
+fastfirewall-plugin-pkg-management = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+sources = {"." = "fastfirewall_plugin_syslog"}
+exclude = ["data", "test_*.py", "CLAUDE.md"]
