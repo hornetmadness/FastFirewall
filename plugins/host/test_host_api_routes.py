@@ -82,7 +82,7 @@ def test_status_returns_plugin_metadata(client):
 def test_status_managed_counts_start_at_zero(client):
     r = client.get("/v1/host/status")
     managed = r.json()["managed"]
-    assert managed == {"sysctl": 0, "users": 0, "groups": 0, "cron": 0}
+    assert managed == {"sysctl": 0, "users": 0, "groups": 0, "cron": 0, "kernmod": 0}
 
 
 def test_status_counts_update_after_additions(client):

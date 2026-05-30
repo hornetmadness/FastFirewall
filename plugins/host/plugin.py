@@ -14,6 +14,8 @@ Events emitted:
   host.group.deleted     – payload: {group}
   host.cron.changed      – payload: {name, command, minute, hour, ...}
   host.cron.deleted      – payload: {name}
+  host.kernmod.changed   – payload: {module, persist}
+  host.kernmod.deleted   – payload: {module}
 
 Events consumed:
   host.sysctl.set        – payload: {key, value, persist=True}
@@ -99,6 +101,10 @@ class DomainnameBody(BaseModel):
     domainname: str = Field(max_length=253)
 
 
+class KernmodBody(BaseModel):
+    persist: bool = True
+
+
 # ── Plugin ─────────────────────────────────────────────────────────────────────
 
 class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
@@ -109,6 +115,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         "users": {},
         "groups": {},
         "cron": {},
+        "kernmod": {},
     }
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
@@ -209,6 +216,15 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 "month": v["month"],
                 "day_of_week": v["day_of_week"],
                 "user": v["user"],
+                "_sudo": True,
+            }))
+
+        for mod_name, v in self._state.get("kernmod", {}).items():
+            tracked.append(("kernmod", mod_name, v))
+            batch_ops.append((server_ops.modprobe, {
+                "name": f"Restore kernel module {mod_name}",
+                "module": mod_name,
+                "present": True,
                 "_sudo": True,
             }))
 
@@ -464,6 +480,11 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         add("/cron/{name}",                self._delete_cron,      methods=["DELETE"], summary="Remove a cron entry")
         add("/cron/{name}/import",         self._import_cron,      methods=["POST"],   summary="Import an existing system cron entry into FF management", status_code=201)
 
+        add("/kernmod",                    self._list_kernmod,     methods=["GET"],    summary="List all kernel modules with ff_managed flag")
+        add("/kernmod/{name}",             self._set_kernmod,      methods=["PUT"],    summary="Load and manage a kernel module")
+        add("/kernmod/{name}",             self._delete_kernmod,   methods=["DELETE"], summary="Stop managing a kernel module")
+        add("/kernmod/{name}/import",      self._import_kernmod,   methods=["POST"],   summary="Import an already-loaded kernel module into FF management", status_code=201)
+
     # ── status ─────────────────────────────────────────────────────────────────
 
     def _status(self) -> dict:
@@ -478,6 +499,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 "users":    len(self._state["users"]),
                 "groups":   len(self._state["groups"]),
                 "cron":     len(self._state["cron"]),
+                "kernmod":  len(self._state["kernmod"]),
             },
             "pending_changes": self._state_file.pending_changes,
         }
@@ -1002,3 +1024,134 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         self._save_state()
         self._emit("host.cron.changed", {"name": name, **state})
         return {"name": name, **state, "ff_managed": True}
+
+    # ── kernmod ────────────────────────────────────────────────────────────────
+
+    def _list_kernmod(self) -> dict:
+        managed = self._state["kernmod"]
+        result: dict[str, Any] = {}
+        try:
+            with open("/proc/modules") as f:
+                for line in f:
+                    parts = line.split()
+                    if parts:
+                        result[parts[0]] = {"loaded": True, "ff_managed": False}
+        except OSError:
+            pass
+        for name, attrs in managed.items():
+            if name in result:
+                result[name] = {**result[name], **attrs, "ff_managed": True}
+            else:
+                result[name] = {**attrs, "ff_managed": True}
+        return {"kernmod": result}
+
+    def _set_kernmod(self, name: str, body: KernmodBody) -> dict:
+        try:
+            self._pyinfra_run(
+                server_ops.modprobe,
+                name=f"Load kernel module {name}",
+                module=name,
+                present=True,
+                _sudo=True,
+            )
+        except RuntimeError:
+            self.logger.error("Failed to load kernel module %s", name, exc_info=True)
+            raise HTTPException(500, "Failed to load kernel module; check server logs")
+        if body.persist:
+            try:
+                self._pyinfra_run(
+                    files_ops.put,
+                    name=f"Persist kernel module {name}",
+                    src=io.StringIO(f"{name}\n"),
+                    dest=f"/etc/modules-load.d/ff-{name}.conf",
+                    mode="644",
+                    _sudo=True,
+                )
+            except RuntimeError:
+                self.logger.warning(
+                    "Kernel module %s loaded but persist file write failed", name, exc_info=True
+                )
+        self._state["kernmod"][name] = body.model_dump()
+        self._save_state()
+        self._emit("host.kernmod.changed", {"module": name, **body.model_dump()})
+        return {"module": name, **body.model_dump()}
+
+    def _delete_kernmod(self, name: str) -> dict:
+        if name not in self._state["kernmod"]:
+            raise HTTPException(404, f"Kernel module {name!r} not managed")
+        del self._state["kernmod"][name]
+        self._save_state()
+        self._emit("host.kernmod.deleted", {"module": name})
+        return {"deleted": name}
+
+    def _find_module_config_files(self, name: str) -> list[str]:
+        """Return paths of config files (outside our ff file) that contain the module as a standalone line."""
+        ff_path = Path(f"/etc/modules-load.d/ff-{name}.conf").resolve()
+        candidates: list[Path] = []
+        if Path("/etc/modules").is_file():
+            candidates.append(Path("/etc/modules"))
+        modules_load_d = Path("/etc/modules-load.d")
+        if modules_load_d.is_dir():
+            try:
+                candidates.extend(
+                    f for f in modules_load_d.iterdir()
+                    if f.suffix == ".conf" and f.is_file()
+                )
+            except OSError:
+                pass
+        found: list[str] = []
+        for candidate in candidates:
+            try:
+                if candidate.resolve() == ff_path:
+                    continue
+                if any(line.strip() == name for line in candidate.read_text().splitlines()):
+                    found.append(str(candidate))
+            except OSError:
+                pass
+        return found
+
+    def _import_kernmod(self, name: str) -> dict:
+        try:
+            with open("/proc/modules") as f:
+                loaded = {line.split()[0] for line in f if line.split()}
+        except OSError:
+            raise HTTPException(503, "Unable to read /proc/modules")
+        if name not in loaded:
+            raise HTTPException(404, f"Kernel module {name!r} is not currently loaded")
+
+        old_files = self._find_module_config_files(name)
+
+        # write the ff persist file before touching anything else
+        try:
+            self._pyinfra_run(
+                files_ops.put,
+                name=f"Persist kernel module {name}",
+                src=io.StringIO(f"{name}\n"),
+                dest=f"/etc/modules-load.d/ff-{name}.conf",
+                mode="644",
+                _sudo=True,
+            )
+        except RuntimeError:
+            self.logger.error("Failed to write persist file for kernel module %s", name, exc_info=True)
+            raise HTTPException(503, "Failed to write module persist file; check server logs")
+
+        # now remove the module from any pre-existing non-ff locations
+        for filepath in old_files:
+            try:
+                self._pyinfra_run(
+                    server_ops.shell,
+                    name=f"Remove {name} from {filepath}",
+                    commands=[f"sed -i '/^{shlex.quote(name)}$/d' {shlex.quote(filepath)}"],
+                    _sudo=True,
+                )
+            except RuntimeError:
+                self.logger.error(
+                    "Failed to remove old config for %s from %s", name, filepath, exc_info=True
+                )
+                raise HTTPException(503, "Failed to remove old module config; check server logs")
+
+        state: dict[str, Any] = {"persist": True}
+        self._state["kernmod"][name] = state
+        self._save_state()
+        self._emit("host.kernmod.changed", {"module": name, **state})
+        return {"module": name, **state, "ff_managed": True}
