@@ -158,6 +158,7 @@ def print_cfg(cfg) -> None:
 
 def make_cfg(dest: Path, cfg) -> None:
     """Scaffold a production config directory tree at *dest*."""
+    import secrets as _secrets
     import yaml as _yaml
 
     created = []
@@ -194,8 +195,8 @@ def make_cfg(dest: Path, cfg) -> None:
                 "enabled": cfg.auth.enabled,
                 "secret_key": (
                     cfg.auth.secret_key
-                    if cfg.auth.secret_key != "CHANGE-ME"
-                    else "CHANGE-ME-generate-with-openssl-rand-hex-32"
+                    if not cfg.auth.secret_key.startswith("CHANGE-ME")
+                    else _secrets.token_hex(32)
                 ),
                 "algorithm": cfg.auth.algorithm,
                 "token_expire_minutes": cfg.auth.token_expire_minutes,

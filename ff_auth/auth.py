@@ -83,7 +83,9 @@ def setup(cfg: "AuthConfig") -> None:
         if _st.secret_key.startswith("CHANGE-ME"):
             raise RuntimeError(
                 "auth.secret_key is the default placeholder — "
-                "generate a real key with: openssl rand -hex 32"
+                "run: fastfirewall-api --makecfg ~/.config/fastfirewall  "
+                "then edit the generated app_config.yaml to set users/passwords, "
+                "and restart with: FASTFIREWALL_CONFIG=~/.config/fastfirewall/app_config.yaml fastfirewall-api"
             )
         log.info(
             "Auth enabled — %d user(s) loaded, rate limit %d attempts / %ds",
