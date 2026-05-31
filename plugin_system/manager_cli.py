@@ -153,7 +153,7 @@ def print_cfg(cfg) -> None:
 def make_cfg(dest: Path, cfg) -> None:
     """Scaffold a production config directory tree at *dest*."""
     import secrets as _secrets
-    import yaml as _yaml
+    from app_config import _BUNDLED_PATH
 
     created = []
     for d in [dest, dest / "plugins", dest / "backups"]:
@@ -163,40 +163,11 @@ def make_cfg(dest: Path, cfg) -> None:
 
     cfg_file = dest / "app_config.yaml"
     if not cfg_file.exists():
-        starter = {
-            "logging": {
-                "level": cfg.logging.level,
-                "format": cfg.logging.format,
-            },
-            "plugins": {
-                "src_code_dir": "plugins",
-                "scan_dirs": [str(dest / "plugins")],
-                "data_dir": str(dest / "plugins"),
-            },
-            "server": {
-                "host": cfg.server.host,
-                "port": cfg.server.port,
-                "reload": False,
-            },
-            "state": {
-                "backup": {
-                    "enabled": True,
-                    "directory": str(dest / "backups"),
-                }
-            },
-            "auth": {
-                "enabled": cfg.auth.enabled,
-                "secret_key": (
-                    cfg.auth.secret_key
-                    if not cfg.auth.secret_key.startswith("CHANGE-ME")
-                    else _secrets.token_hex(32)
-                ),
-                "algorithm": cfg.auth.algorithm,
-                "token_expire_minutes": cfg.auth.token_expire_minutes,
-                "users": cfg.auth.users,
-            },
-        }
-        cfg_file.write_text(_yaml.dump(starter, default_flow_style=False, sort_keys=False))
+        # Copy the bundled default verbatim (preserves all comments and formatting),
+        # then replace the placeholder secret with a real generated key.
+        text = _BUNDLED_PATH.read_text()
+        text = text.replace('"CHANGE-ME"', f'"{_secrets.token_hex(32)}"', 1)
+        cfg_file.write_text(text)
         created.append(cfg_file)
 
     if created:
