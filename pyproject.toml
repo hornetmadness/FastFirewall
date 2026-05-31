@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fastfirewall-core"
-version = "0.1.0"
+version = "0.1.1"
 description = "Plugin-driven network appliance API built on FastAPI — plugins own routes, services, and events; the core provides lifecycle management, an event bus, and a service exclusivity registry"
 requires-python = ">=3.12"
 dependencies = [

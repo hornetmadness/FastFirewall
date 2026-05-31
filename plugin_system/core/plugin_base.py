@@ -40,6 +40,7 @@ class PluginBase:
     plugin_dir: Path
     logger: logging.Logger
     _data_dir: Path | None = None  # overridden by loader when plugins.data_dir is configured
+    _cfg_dir: Path | None = None   # overridden by loader when plugins.cfg_dir is configured
 
     @property
     def data_dir(self) -> Path:
@@ -50,6 +51,16 @@ class PluginBase:
         <data_dir>/<plugin_id>/ so it lives outside the installed package.
         """
         return self._data_dir if self._data_dir is not None else self.plugin_dir / "data"
+
+    @property
+    def cfg_dir(self) -> Path:
+        """Directory where this plugin's config files are stored.
+
+        Defaults to plugin_dir.  The loader overrides this when
+        plugins.cfg_dir is set in app_config.yaml, placing config at
+        <cfg_dir>/<plugin_id>/ so it lives outside the installed package.
+        """
+        return self._cfg_dir if self._cfg_dir is not None else self.plugin_dir
 
     def __init__(self) -> None:
         super().__init__()

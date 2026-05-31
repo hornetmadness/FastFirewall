@@ -945,3 +945,56 @@ def test_plugins_without_state_file_ignored_in_pending_check(tmp_path, loader, c
     with caplog.at_level(logging.WARNING, logger="plugin_system.core.loader"):
         loader.load_directory(tmp_path)
     assert "pending" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# cfg_dir seeding
+# ---------------------------------------------------------------------------
+
+def test_cfg_dir_seeds_plugin_yaml_on_first_boot(tmp_path, loader):
+    """plugin.yaml is copied to cfg_dir/<plugin_id>/ when not already present."""
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    cfg_dir = tmp_path / "cfg"
+    make_plugin(plugins_dir, "alpha", "name: Alpha\nid: alpha\nconfig:\n  key: original\n", """
+        from plugin_system.core import PluginBase
+        class AlphaPlugin(PluginBase):
+            def setup(self): pass
+    """)
+    loader.load_directory(plugins_dir, cfg_dir=cfg_dir)
+    seeded = cfg_dir / "alpha" / "plugin.yaml"
+    assert seeded.exists(), "plugin.yaml should be copied into cfg_dir on first boot"
+
+
+def test_cfg_dir_config_read_from_cfg_yaml_on_subsequent_boot(tmp_path, loader):
+    """If cfg_dir/<plugin_id>/plugin.yaml already exists, its config: section is used."""
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    cfg_dir = tmp_path / "cfg"
+    make_plugin(plugins_dir, "alpha", "name: Alpha\nid: alpha\nconfig:\n  key: original\n", """
+        from plugin_system.core import PluginBase
+        class AlphaPlugin(PluginBase):
+            def setup(self): pass
+    """)
+    # Pre-seed a cfg_dir copy with an operator override
+    (cfg_dir / "alpha").mkdir(parents=True)
+    (cfg_dir / "alpha" / "plugin.yaml").write_text(
+        "name: Alpha\nid: alpha\nservice_ports: -1\nconfig:\n  key: operator_value\n"
+    )
+    loader.load_directory(plugins_dir, cfg_dir=cfg_dir)
+    inst = loader.plugins["alpha"]
+    assert inst.config["key"] == "operator_value"
+
+
+def test_cfg_dir_not_set_leaves_plugin_dir_unchanged(tmp_path, loader):
+    """When cfg_dir is None, no seeding happens and config comes from plugin.yaml."""
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    make_plugin(plugins_dir, "alpha", "name: Alpha\nid: alpha\nconfig:\n  key: original\n", """
+        from plugin_system.core import PluginBase
+        class AlphaPlugin(PluginBase):
+            def setup(self): pass
+    """)
+    loader.load_directory(plugins_dir)
+    inst = loader.plugins["alpha"]
+    assert inst.config["key"] == "original"

@@ -5,7 +5,7 @@ logging:
 
 # ── Plugins ───────────────────────────────────────────────────────────────────
 plugins:
-  directory: plugins        # relative to the repo root; resolved at startup
+  src_code_dir: plugins     # relative to the repo root; resolved at startup
 
   # Extra directories scanned for plugins after the main directory.
   # Checked in order; a plugin found here is skipped if already loaded from
@@ -19,6 +19,13 @@ plugins:
   # production installs so state persists across package upgrades.
   # Null = keep state inside each plugin's own directory (dev default).
   data_dir:   # e.g. ~/.config/fastfirewall/plugins
+
+  # When set, plugin config files are stored at <cfg_dir>/<plugin_id>/
+  # instead of inside the plugin package directory.  Useful for keeping
+  # operator-managed config (e.g. copied from plugin defaults) out of
+  # installed package directories so it survives upgrades.
+  # Null = keep config inside each plugin's own directory (dev default).
+  cfg_dir:    # e.g. /etc/fastfirewall/plugins
 
 # ── Server (uvicorn / FastAPI) ────────────────────────────────────────────────
 server:

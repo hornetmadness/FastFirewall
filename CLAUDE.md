@@ -431,7 +431,7 @@ firewall = "fastfirewall_plugin_firewall"
 5. Bundled `app_config.yaml` inside the installed package (last resort)
 
 **Plugin discovery** — `fastfirewall_app.py` loads plugins from two sources on every boot:
-1. `cfg.plugins_dir()` if the directory exists (cwd-first; falls back to package-relative path)
+1. `cfg.plugins_src_dir()` if the directory exists (cwd-first; falls back to package-relative path)
 2. `loader.load_installed()` — entry points from installed `fastfirewall-plugin-*` packages; skips IDs already loaded from the filesystem
 
 See [BUILD.md](BUILD.md) for build and publish commands.

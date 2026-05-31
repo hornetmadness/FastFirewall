@@ -465,7 +465,7 @@ class PluginLoader:
                 return
         raise PluginError(f"Plugin {plugin_id!r} not found in {root}")
 
-    def load_directory(self, directory: str | Path, only: list[str] | None = None, skip_requirements: bool = False, data_dir: Path | None = None) -> list[str]:
+    def load_directory(self, directory: str | Path, only: list[str] | None = None, skip_requirements: bool = False, data_dir: Path | None = None, cfg_dir: Path | None = None) -> list[str]:
         """
         Scan *directory* for plugin sub-directories and load each one.
         Returns a list of successfully loaded plugin ids.
@@ -505,9 +505,9 @@ class PluginLoader:
                 "repos": list(raw.get("repos") or []),
             }
 
-        return self._load_discovered(discovered, only=only, skip_requirements=skip_requirements, source=str(root), data_dir=data_dir)
+        return self._load_discovered(discovered, only=only, skip_requirements=skip_requirements, source=str(root), data_dir=data_dir, cfg_dir=cfg_dir)
 
-    def load_installed(self, only: list[str] | None = None, skip_requirements: bool = False, data_dir: Path | None = None) -> list[str]:
+    def load_installed(self, only: list[str] | None = None, skip_requirements: bool = False, data_dir: Path | None = None, cfg_dir: Path | None = None) -> list[str]:
         """
         Discover plugins declared under the ``fastfirewall.plugins`` entry-point
         group and load any that have not already been loaded (e.g. from the
@@ -564,6 +564,7 @@ class PluginLoader:
             skip_py_requirements=True,  # Python deps already satisfied by pip; skip uv sync
             source="installed packages",
             data_dir=data_dir,
+            cfg_dir=cfg_dir,
         )
 
     def _load_discovered(
@@ -574,6 +575,7 @@ class PluginLoader:
         skip_py_requirements: bool = False,
         source: str = "<unknown>",
         data_dir: Path | None = None,
+        cfg_dir: Path | None = None,
     ) -> list[str]:
         """
         Common steps for load_directory() and load_installed(): filter,
@@ -670,6 +672,7 @@ class PluginLoader:
                     skip_py_requirements=skip_py_requirements,
                     _batch_installed=not skip_requirements,
                     data_dir=data_dir,
+                    cfg_dir=cfg_dir,
                 )
                 loaded.append(loaded_id)
             except Exception as exc:
@@ -737,7 +740,7 @@ class PluginLoader:
                 ", ".join(pending),
             )
 
-    def load_plugin(self, path: str | Path, skip_requirements: bool = False, skip_py_requirements: bool = False, _batch_installed: bool = False, data_dir: Path | None = None) -> str:
+    def load_plugin(self, path: str | Path, skip_requirements: bool = False, skip_py_requirements: bool = False, _batch_installed: bool = False, data_dir: Path | None = None, cfg_dir: Path | None = None) -> str:
         """
         Load a single plugin from *path* (the plugin directory).
         Returns the plugin id on success.
@@ -762,10 +765,27 @@ class PluginLoader:
             "author": raw.get("author", ""),
             "plugin_requirements": raw.get("plugin_requirements", []),
         }
+        plugin_id: str = raw.get("id", path.name)
+
+        # ── seed cfg_dir on first boot; read config: back from there ──────
+        if cfg_dir is not None:
+            plugin_cfg_dir = cfg_dir / plugin_id
+            cfg_yaml_path = plugin_cfg_dir / YAML_FILENAME
+            if not cfg_yaml_path.exists():
+                plugin_cfg_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(yaml_path, cfg_yaml_path)
+                self.logger.info(
+                    "Plugin %r: seeded %s from package default", plugin_id, cfg_yaml_path
+                )
+            else:
+                with cfg_yaml_path.open() as fh:
+                    cfg_raw: dict[str, Any] = yaml.safe_load(fh) or {}
+                raw["config"] = cfg_raw.get("config") or {}
+
         config: dict[str, Any] = dict(raw.get("config", {}) or {})
         if self.ignore_state_on_boot:
             config["ignore_state_on_boot"] = True
-        plugin_id: str = raw.get("id", path.name)
+
         enabled: bool = raw.get("enabled", True)
         os_requirements: list[str] = raw.get("os_requirements", []) or []
         skip_host_os_port_check: bool = bool(raw.get("skip_host_os_port_check", False))
@@ -798,6 +818,8 @@ class PluginLoader:
                 instance.logger = self.logger.getChild(plugin_id)
                 if data_dir is not None:
                     instance._data_dir = data_dir / plugin_id
+                if cfg_dir is not None:
+                    instance._cfg_dir = cfg_dir / plugin_id
                 break
 
         # --- resolve and check service claims from the class ----------
@@ -857,7 +879,7 @@ class PluginLoader:
                             "Auto-loading required dependency %r for plugin %r",
                             dep, plugin_id,
                         )
-                        self.load_plugin(dep_path, skip_requirements=skip_requirements, skip_py_requirements=skip_py_requirements, _batch_installed=_batch_installed, data_dir=data_dir)
+                        self.load_plugin(dep_path, skip_requirements=skip_requirements, skip_py_requirements=skip_py_requirements, _batch_installed=_batch_installed, data_dir=data_dir, cfg_dir=cfg_dir)
                     else:
                         raise PluginError(
                             f"Plugin {plugin_id!r} requires {dep!r} which is not loaded"

@@ -132,8 +132,8 @@ def print_cfg(cfg) -> None:
         print(f"State backup: disabled")
     print()
 
-    plugins_dir = cfg.plugins_dir()
-    print(f"plugins.directory:  {plugins_dir}  [{_status(plugins_dir)}]")
+    plugins_dir = cfg.plugins_src_dir()
+    print(f"plugins.src_code_dir:  {plugins_dir}  [{_status(plugins_dir)}]")
 
     scan_dirs = cfg.plugins_scan_dirs()
     if scan_dirs:
@@ -148,6 +148,12 @@ def print_cfg(cfg) -> None:
         print(f"plugins.data_dir:   {data_dir}  [{_status(data_dir)}]")
     else:
         print(f"plugins.data_dir:   (not set — state stored inside each plugin directory)")
+
+    cfg_dir = cfg.plugins_cfg_dir()
+    if cfg_dir:
+        print(f"plugins.cfg_dir:    {cfg_dir}  [{_status(cfg_dir)}]")
+    else:
+        print(f"plugins.cfg_dir:    (not set — config stored inside each plugin directory)")
 
 
 def make_cfg(dest: Path, cfg) -> None:
@@ -168,9 +174,10 @@ def make_cfg(dest: Path, cfg) -> None:
                 "format": cfg.logging.format,
             },
             "plugins": {
-                "directory": "plugins",
+                "src_code_dir": "plugins",
                 "scan_dirs": [str(dest / "plugins")],
                 "data_dir": str(dest / "plugins"),
+                "cfg_dir": str(dest / "plugins"),
             },
             "server": {
                 "host": cfg.server.host,
