@@ -152,7 +152,9 @@ def print_cfg(cfg) -> None:
 
 def make_cfg(dest: Path, cfg) -> None:
     """Scaffold a production config directory tree at *dest*."""
+    import importlib.util
     import secrets as _secrets
+    from importlib.metadata import entry_points
     from app_config import _BUNDLED_PATH
 
     created = []
@@ -169,6 +171,23 @@ def make_cfg(dest: Path, cfg) -> None:
         text = text.replace('"CHANGE-ME"', f'"{_secrets.token_hex(32)}"', 1)
         cfg_file.write_text(text)
         created.append(cfg_file)
+
+    # Seed each installed plugin's plugin.yaml into <dest>/plugins/<id>/plugin.yaml
+    # so operators have a local copy to customise (edit config: section to override).
+    for ep in entry_points(group="fastfirewall.plugins"):
+        spec = importlib.util.find_spec(ep.value)
+        if not spec or not spec.submodule_search_locations:
+            continue
+        plugin_dir = Path(list(spec.submodule_search_locations)[0])
+        src_yaml = plugin_dir / "plugin.yaml"
+        if not src_yaml.exists():
+            continue
+        dest_yaml = dest / "plugins" / ep.name / "plugin.yaml"
+        if not dest_yaml.exists():
+            dest_yaml.parent.mkdir(parents=True, exist_ok=True)
+            import shutil as _shutil
+            _shutil.copy2(src_yaml, dest_yaml)
+            created.append(dest_yaml)
 
     if created:
         print("Created:")

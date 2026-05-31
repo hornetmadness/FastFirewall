@@ -945,3 +945,96 @@ def test_plugins_without_state_file_ignored_in_pending_check(tmp_path, loader, c
     with caplog.at_level(logging.WARNING, logger="plugin_system.core.loader"):
         loader.load_directory(tmp_path)
     assert "pending" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# scan_dir yaml-only fallback to installed module
+# ---------------------------------------------------------------------------
+
+def test_scan_dir_yaml_only_falls_back_to_installed_module(tmp_path, loader):
+    """A scan_dir with only plugin.yaml (no plugin.py) uses the installed package's plugin.py."""
+    # Build a "real" plugin directory that has both files (the installed package)
+    installed_dir = tmp_path / "installed" / "alpha"
+    installed_dir.mkdir(parents=True)
+    (installed_dir / "plugin.yaml").write_text(
+        textwrap.dedent("name: Alpha\nid: alpha\nservice_ports: -1\nconfig:\n  key: from_package\n")
+    )
+    (installed_dir / "plugin.py").write_text(textwrap.dedent("""
+        from plugin_system.core import PluginBase
+        class AlphaPlugin(PluginBase):
+            def setup(self): pass
+    """))
+
+    # Scan dir has only plugin.yaml with a config override — no plugin.py
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir()
+    (scan_dir / "alpha").mkdir()
+    (scan_dir / "alpha" / "plugin.yaml").write_text(
+        textwrap.dedent("name: Alpha\nid: alpha\nservice_ports: -1\nconfig:\n  key: from_scan_dir\n")
+    )
+
+    # Patch _find_installed_module to return the installed plugin.py
+    installed_module = installed_dir / "plugin.py"
+    with patch.object(loader, "_find_installed_module", return_value=installed_module):
+        loader.load_directory(scan_dir)
+
+    assert "alpha" in loader.plugins
+
+
+def test_scan_dir_yaml_only_plugin_dir_points_to_installed_package(tmp_path, loader):
+    """plugin_dir follows module_path.parent so resources in the package are found."""
+    installed_dir = tmp_path / "installed" / "alpha"
+    installed_dir.mkdir(parents=True)
+    (installed_dir / "plugin.yaml").write_text(
+        textwrap.dedent("name: Alpha\nid: alpha\nservice_ports: -1\n")
+    )
+    (installed_dir / "plugin.py").write_text(textwrap.dedent("""
+        from plugin_system.core import PluginBase
+        class AlphaPlugin(PluginBase):
+            def setup(self): pass
+    """))
+
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir()
+    (scan_dir / "alpha").mkdir()
+    (scan_dir / "alpha" / "plugin.yaml").write_text(
+        textwrap.dedent("name: Alpha\nid: alpha\nservice_ports: -1\n")
+    )
+
+    installed_module = installed_dir / "plugin.py"
+    with patch.object(loader, "_find_installed_module", return_value=installed_module):
+        loader.load_directory(scan_dir)
+
+    assert loader.plugins["alpha"].instance.plugin_dir == installed_dir.resolve()
+
+
+def test_plugin_dir_equals_module_parent_for_normal_load(tmp_path, loader):
+    """For normal loads plugin_dir still resolves to the plugin's own directory."""
+    make_plugin(tmp_path, "alpha", "name: Alpha\nid: alpha\n", """
+        from plugin_system.core import PluginBase
+        class AlphaPlugin(PluginBase):
+            def setup(self): pass
+    """)
+    loader.load_directory(tmp_path)
+    assert loader.plugins["alpha"].instance.plugin_dir == (tmp_path / "alpha").resolve()
+
+
+def test_uv_sync_skipped_when_no_pyproject_in_cwd(tmp_path, loader):
+    """_install_py_requirements_uv_sync is a no-op when cwd has no pyproject.toml ancestry."""
+    with patch("shutil.which", return_value="/usr/bin/uv"), \
+         patch("subprocess.run") as mock_run, \
+         patch("pathlib.Path.cwd", return_value=tmp_path):
+        loader._install_py_requirements_uv_sync()
+        mock_run.assert_not_called()
+
+
+def test_uv_sync_runs_when_pyproject_found_in_cwd(tmp_path, loader):
+    """_install_py_requirements_uv_sync calls uv sync when pyproject.toml exists in cwd."""
+    (tmp_path / "pyproject.toml").write_text("")
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    with patch("shutil.which", return_value="/usr/bin/uv"), \
+         patch("subprocess.run", return_value=mock_result) as mock_run, \
+         patch("pathlib.Path.cwd", return_value=tmp_path):
+        loader._install_py_requirements_uv_sync()
+        mock_run.assert_called_once()
