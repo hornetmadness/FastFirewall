@@ -26,7 +26,7 @@ def test_load_empty_yaml_gives_all_defaults(tmp_path):
     cfg = AppConfig.load(p)
     assert cfg.logging.level == "INFO"
     assert cfg.logging.format == LoggingConfig().format
-    assert cfg.plugins.directory == "plugins"
+    assert cfg.plugins.src_code_dir == "plugins"
     assert cfg.server.host == "0.0.0.0"
     assert cfg.server.port == 8000
     assert cfg.server.reload is False
@@ -67,24 +67,24 @@ def test_load_logging_format(tmp_path):
 # Plugins section
 # ---------------------------------------------------------------------------
 
-def test_load_plugins_directory(tmp_path):
-    p = write_config(tmp_path, "plugins:\n  directory: my_plugins\n")
+def test_load_plugins_src_code_dir(tmp_path):
+    p = write_config(tmp_path, "plugins:\n  src_code_dir: my_plugins\n")
     cfg = AppConfig.load(p)
-    assert cfg.plugins.directory == "my_plugins"
+    assert cfg.plugins.src_code_dir == "my_plugins"
 
 
-def test_plugins_dir_resolves_relative_to_base(tmp_path):
-    p = write_config(tmp_path, "plugins:\n  directory: my_plugins\n")
+def test_plugins_src_dir_resolves_relative_to_base(tmp_path):
+    p = write_config(tmp_path, "plugins:\n  src_code_dir: my_plugins\n")
     cfg = AppConfig.load(p)
-    resolved = cfg.plugins_dir(base=tmp_path)
+    resolved = cfg.plugins_src_dir(base=tmp_path)
     assert resolved == (tmp_path / "my_plugins").resolve()
     assert resolved.is_absolute()
 
 
-def test_plugins_dir_default_base_is_repo_root(tmp_path):
+def test_plugins_src_dir_default_base_is_repo_root(tmp_path):
     p = write_config(tmp_path, "")
     cfg = AppConfig.load(p)
-    resolved = cfg.plugins_dir()
+    resolved = cfg.plugins_src_dir()
     assert resolved.is_absolute()
     assert resolved.name == "plugins"
 
@@ -129,7 +129,7 @@ logging:
   format: "%(name)s %(message)s"
 
 plugins:
-  directory: ext_plugins
+  src_code_dir: ext_plugins
 
 server:
   host: "127.0.0.1"
@@ -139,7 +139,7 @@ server:
     cfg = AppConfig.load(p)
     assert cfg.logging.level == "ERROR"
     assert cfg.logging.format == "%(name)s %(message)s"
-    assert cfg.plugins.directory == "ext_plugins"
+    assert cfg.plugins.src_code_dir == "ext_plugins"
     assert cfg.server.host == "127.0.0.1"
     assert cfg.server.port == 4000
     assert cfg.server.reload is True
@@ -197,7 +197,7 @@ def test_uvicorn_kwargs_top_level_unknown_key(tmp_path):
 def test_default_load_reads_repo_config():
     cfg = AppConfig.load()
     assert cfg.server.port == 8000
-    assert cfg.plugins.directory == "plugins"
+    assert cfg.plugins.src_code_dir == "plugins"
     assert cfg.logging.level == "DEBUG"
 
 

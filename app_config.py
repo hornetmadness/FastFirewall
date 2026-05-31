@@ -50,7 +50,7 @@ class LoggingConfig(BaseModel):
 
 
 class PluginsConfig(BaseModel):
-    directory: str = "plugins"
+    src_code_dir: str = "plugins"
     scan_dirs: list[str] = Field(default_factory=list)
     data_dir: str | None = None
 
@@ -160,8 +160,8 @@ class AppConfig(BaseModel):
             return dict(self._uvicorn_kwargs)
         return {"host": self.server.host, "port": self.server.port, "reload": self.server.reload}
 
-    def plugins_dir(self, base: Path | None = None) -> Path:
-        """Return the resolved plugins directory path.
+    def plugins_src_dir(self, base: Path | None = None) -> Path:
+        """Return the resolved plugins source-code directory path.
 
         Checks the current working directory first so that running from the
         repo root works without any configuration.  Falls back to a path
@@ -169,11 +169,11 @@ class AppConfig(BaseModel):
         plugins/ directory lives alongside app_config.py).
         """
         if base is not None:
-            return (base / self.plugins.directory).resolve()
-        cwd_candidate = (Path.cwd() / self.plugins.directory).resolve()
+            return (base / self.plugins.src_code_dir).resolve()
+        cwd_candidate = (Path.cwd() / self.plugins.src_code_dir).resolve()
         if cwd_candidate.is_dir():
             return cwd_candidate
-        return (Path(__file__).parent / self.plugins.directory).resolve()
+        return (Path(__file__).parent / self.plugins.src_code_dir).resolve()
 
     def plugins_scan_dirs(self) -> list[Path]:
         """Return resolved paths for all configured plugin scan directories.

@@ -132,8 +132,8 @@ def print_cfg(cfg) -> None:
         print(f"State backup: disabled")
     print()
 
-    plugins_dir = cfg.plugins_dir()
-    print(f"plugins.directory:  {plugins_dir}  [{_status(plugins_dir)}]")
+    plugins_dir = cfg.plugins_src_dir()
+    print(f"plugins.src_code_dir:  {plugins_dir}  [{_status(plugins_dir)}]")
 
     scan_dirs = cfg.plugins_scan_dirs()
     if scan_dirs:
@@ -152,7 +152,10 @@ def print_cfg(cfg) -> None:
 
 def make_cfg(dest: Path, cfg) -> None:
     """Scaffold a production config directory tree at *dest*."""
-    import yaml as _yaml
+    import importlib.util
+    import secrets as _secrets
+    from importlib.metadata import entry_points
+    from app_config import _BUNDLED_PATH
 
     created = []
     for d in [dest, dest / "plugins", dest / "backups"]:
@@ -162,41 +165,29 @@ def make_cfg(dest: Path, cfg) -> None:
 
     cfg_file = dest / "app_config.yaml"
     if not cfg_file.exists():
-        starter = {
-            "logging": {
-                "level": cfg.logging.level,
-                "format": cfg.logging.format,
-            },
-            "plugins": {
-                "directory": "plugins",
-                "scan_dirs": [str(dest / "plugins")],
-                "data_dir": str(dest / "plugins"),
-            },
-            "server": {
-                "host": cfg.server.host,
-                "port": cfg.server.port,
-                "reload": False,
-            },
-            "state": {
-                "backup": {
-                    "enabled": True,
-                    "directory": str(dest / "backups"),
-                }
-            },
-            "auth": {
-                "enabled": cfg.auth.enabled,
-                "secret_key": (
-                    cfg.auth.secret_key
-                    if cfg.auth.secret_key != "CHANGE-ME"
-                    else "CHANGE-ME-generate-with-openssl-rand-hex-32"
-                ),
-                "algorithm": cfg.auth.algorithm,
-                "token_expire_minutes": cfg.auth.token_expire_minutes,
-                "users": cfg.auth.users,
-            },
-        }
-        cfg_file.write_text(_yaml.dump(starter, default_flow_style=False, sort_keys=False))
+        # Copy the bundled default verbatim (preserves all comments and formatting),
+        # then replace the placeholder secret with a real generated key.
+        text = _BUNDLED_PATH.read_text()
+        text = text.replace('"CHANGE-ME"', f'"{_secrets.token_hex(32)}"', 1)
+        cfg_file.write_text(text)
         created.append(cfg_file)
+
+    # Seed each installed plugin's plugin.yaml into <dest>/plugins/<id>/plugin.yaml
+    # so operators have a local copy to customise (edit config: section to override).
+    for ep in entry_points(group="fastfirewall.plugins"):
+        spec = importlib.util.find_spec(ep.value)
+        if not spec or not spec.submodule_search_locations:
+            continue
+        plugin_dir = Path(list(spec.submodule_search_locations)[0])
+        src_yaml = plugin_dir / "plugin.yaml"
+        if not src_yaml.exists():
+            continue
+        dest_yaml = dest / "plugins" / ep.name / "plugin.yaml"
+        if not dest_yaml.exists():
+            dest_yaml.parent.mkdir(parents=True, exist_ok=True)
+            import shutil as _shutil
+            _shutil.copy2(src_yaml, dest_yaml)
+            created.append(dest_yaml)
 
     if created:
         print("Created:")

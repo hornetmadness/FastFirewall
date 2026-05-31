@@ -737,6 +737,20 @@ class PluginLoader:
                 ", ".join(pending),
             )
 
+    def _find_installed_module(self, plugin_id: str) -> Path | None:
+        """Return the plugin.py path from the installed package for *plugin_id*, or None."""
+        import importlib.util as _ilu
+        from importlib.metadata import entry_points as _eps
+        ep_map = {ep.name: ep.value for ep in _eps(group="fastfirewall.plugins")}
+        pkg = ep_map.get(plugin_id)
+        if not pkg:
+            return None
+        spec = _ilu.find_spec(pkg)
+        if not spec or not spec.submodule_search_locations:
+            return None
+        candidate = Path(list(spec.submodule_search_locations)[0]) / MODULE_FILENAME
+        return candidate if candidate.exists() else None
+
     def load_plugin(self, path: str | Path, skip_requirements: bool = False, skip_py_requirements: bool = False, _batch_installed: bool = False, data_dir: Path | None = None) -> str:
         """
         Load a single plugin from *path* (the plugin directory).
@@ -748,8 +762,6 @@ class PluginLoader:
 
         if not yaml_path.exists():
             raise PluginError(f"Missing {YAML_FILENAME} in {path}")
-        if not module_path.exists():
-            raise PluginError(f"Missing {MODULE_FILENAME} in {path}")
 
         # --- parse YAML ------------------------------------------------
         with yaml_path.open() as fh:
@@ -762,10 +774,21 @@ class PluginLoader:
             "author": raw.get("author", ""),
             "plugin_requirements": raw.get("plugin_requirements", []),
         }
+        plugin_id: str = raw.get("id", path.name)
+
+        # If plugin.py isn't in this directory, fall back to the installed package.
+        if not module_path.exists():
+            module_path = self._find_installed_module(plugin_id)
+            if module_path is None:
+                raise PluginError(f"Missing {MODULE_FILENAME} in {path}")
+            self.logger.debug("Plugin %r: using installed module from %s", plugin_id, module_path.parent)
+
+        self.logger.debug("Plugin %r found in %s", plugin_id, path)
+
         config: dict[str, Any] = dict(raw.get("config", {}) or {})
         if self.ignore_state_on_boot:
             config["ignore_state_on_boot"] = True
-        plugin_id: str = raw.get("id", path.name)
+
         enabled: bool = raw.get("enabled", True)
         os_requirements: list[str] = raw.get("os_requirements", []) or []
         skip_host_os_port_check: bool = bool(raw.get("skip_host_os_port_check", False))
@@ -794,7 +817,7 @@ class PluginLoader:
                 instance.plugin_id = plugin_id
                 instance.meta = meta
                 instance.config = config
-                instance.plugin_dir = path.resolve()
+                instance.plugin_dir = module_path.parent.resolve()
                 instance.logger = self.logger.getChild(plugin_id)
                 if data_dir is not None:
                     instance._data_dir = data_dir / plugin_id
@@ -1008,8 +1031,13 @@ class PluginLoader:
                 "uv not found on PATH; skipping uv sync (Python deps must be pre-installed)"
             )
             return
-        # loader.py → core/ → plugin_system/ → <workspace root>
-        workspace_root = Path(__file__).parents[2]
+        # Walk up from cwd to find a pyproject.toml — only present in dev/repo mode.
+        workspace_root = next(
+            (p for p in [Path.cwd(), *Path.cwd().parents] if (p / "pyproject.toml").exists()),
+            None,
+        )
+        if workspace_root is None:
+            return
         self.logger.info("Running uv sync --no-dev --frozen in %s", workspace_root)
         proc = subprocess.run(
             [uv, "sync", "--no-dev", "--frozen"],
