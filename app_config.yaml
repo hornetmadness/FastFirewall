@@ -8,37 +8,29 @@ plugins:
   src_code_dir: plugins     # relative to the repo root; resolved at startup
 
   # Extra directories scanned for plugins after the main directory.
-  # Checked in order; a plugin found here is skipped if already loaded from
-  # a higher-priority directory.  ~ is expanded.
+  # Checked in order; a plugin found here shadows any installed package with
+  # the same id.  Drop a plugin.yaml and/or plugin.py here to override.
+  # ~ is expanded.  Preferred order: per-user first, then system-wide.
   scan_dirs:
-    - /etc/fastfirewall/plugins
     - ~/.config/fastfirewall/plugins
+    - /etc/fastfirewall/plugins
 
-  # When set, plugin state files are stored at <data_dir>/<plugin_id>/
+  # When set, plugin state files are stored at <data_dir>/<plugin_id>/data/
   # instead of inside the plugin package directory.  Recommended for
   # production installs so state persists across package upgrades.
   # Null = keep state inside each plugin's own directory (dev default).
-  data_dir:   # e.g. ~/.config/fastfirewall/plugins
-
-  # When set, plugin config files are stored at <cfg_dir>/<plugin_id>/
-  # instead of inside the plugin package directory.  Useful for keeping
-  # operator-managed config (e.g. copied from plugin defaults) out of
-  # installed package directories so it survives upgrades.
-  # Null = keep config inside each plugin's own directory (dev default).
-  cfg_dir:    # e.g. /etc/fastfirewall/plugins
+  data_dir:   # e.g. ~/.config/fastfirewall/plugin-data
 
 # ── Server (uvicorn / FastAPI) ────────────────────────────────────────────────
 server:
   host: "0.0.0.0"
   port: 8000
   reload: false
-  reload-excludes: ["*/plugins/*/data/*"]   # watch for code changes but ignore the data directory
+  # reload-excludes: ["*/plugins/*/data/*"]   # watch for code changes but ignore the data directory
   max_payload_bytes: 5242880  # 5 MB — requests larger than this return 413
   cors:
     allowed_origins: []  # e.g. ["https://myfirewall.local"] — empty = no CORS headers sent
 
-bootstrap:
-  enabled: fasle
 
 # ── State ─────────────────────────────────────────────────────────────────────
 state:
@@ -50,7 +42,7 @@ state:
 auth:
   enabled: true
   # Generate a strong key: openssl rand -hex 32
-  secret_key: "CHANGE-ME"
+  secret_key: "111"
   algorithm: HS256
   token_expire_minutes: 60
   # Paths that do not require a valid credential

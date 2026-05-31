@@ -166,20 +166,19 @@ loader = PluginLoader(bus=bus, app=app, logger=cfg.logger)
 only_plugins, ignore_plugins_states, show_macros = manager_cli.run(loader, cfg.plugins_src_dir(), cfg)
 loader.ignore_state_on_boot = ignore_plugins_states
 data_dir = cfg.plugins_data_dir()
-cfg_dir = cfg.plugins_cfg_dir()
 
 # 1. Dev / cwd plugins directory (highest priority)
 plugins_dir = cfg.plugins_src_dir()
 if plugins_dir.is_dir():
-    loader.load_directory(plugins_dir, only=only_plugins, skip_requirements=show_macros, data_dir=data_dir, cfg_dir=cfg_dir)
+    loader.load_directory(plugins_dir, only=only_plugins, skip_requirements=show_macros, data_dir=data_dir)
 
-# 2. Configured scan dirs: /etc/fastfirewall/plugins, ~/.config/fastfirewall/plugins, …
+# 2. Configured scan dirs: ~/.config/fastfirewall/plugins, /etc/fastfirewall/plugins, …
 for scan_dir in cfg.plugins_scan_dirs():
     if scan_dir.is_dir():
-        loader.load_directory(scan_dir, only=only_plugins, skip_requirements=show_macros, data_dir=data_dir, cfg_dir=cfg_dir)
+        loader.load_directory(scan_dir, only=only_plugins, skip_requirements=show_macros, data_dir=data_dir)
 
 # 3. Installed package entry points (fills in anything not found on the filesystem)
-loader.load_installed(only=only_plugins, skip_requirements=show_macros, data_dir=data_dir, cfg_dir=cfg_dir)
+loader.load_installed(only=only_plugins, skip_requirements=show_macros, data_dir=data_dir)
 macro_registry.register_service_port("fastfirewall-api", "tcp", [cfg.server.port])
 loader.finished()
 

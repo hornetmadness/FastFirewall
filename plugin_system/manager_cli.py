@@ -149,12 +149,6 @@ def print_cfg(cfg) -> None:
     else:
         print(f"plugins.data_dir:   (not set — state stored inside each plugin directory)")
 
-    cfg_dir = cfg.plugins_cfg_dir()
-    if cfg_dir:
-        print(f"plugins.cfg_dir:    {cfg_dir}  [{_status(cfg_dir)}]")
-    else:
-        print(f"plugins.cfg_dir:    (not set — config stored inside each plugin directory)")
-
 
 def make_cfg(dest: Path, cfg) -> None:
     """Scaffold a production config directory tree at *dest*."""
@@ -178,7 +172,6 @@ def make_cfg(dest: Path, cfg) -> None:
                 "src_code_dir": "plugins",
                 "scan_dirs": [str(dest / "plugins")],
                 "data_dir": str(dest / "plugins"),
-                "cfg_dir": str(dest / "plugins"),
             },
             "server": {
                 "host": cfg.server.host,

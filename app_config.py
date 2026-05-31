@@ -53,7 +53,6 @@ class PluginsConfig(BaseModel):
     src_code_dir: str = "plugins"
     scan_dirs: list[str] = Field(default_factory=list)
     data_dir: str | None = None
-    cfg_dir: str | None = None
 
 
 class RateLimitConfig(BaseModel):
@@ -196,14 +195,3 @@ class AppConfig(BaseModel):
         if self.plugins.data_dir is None:
             return None
         return Path(self.plugins.data_dir).expanduser().resolve()
-
-    def plugins_cfg_dir(self) -> Path | None:
-        """Return the resolved config root for plugin config files, or None.
-
-        When set, plugin config files are stored at <cfg_dir>/<plugin_id>/
-        instead of inside the plugin's own directory.  Useful for keeping
-        operator-managed config out of installed package directories.
-        """
-        if self.plugins.cfg_dir is None:
-            return None
-        return Path(self.plugins.cfg_dir).expanduser().resolve()
