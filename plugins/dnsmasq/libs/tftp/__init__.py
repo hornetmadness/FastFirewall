@@ -6,6 +6,9 @@ from ..models import TftpUpdate
 
 
 class TftpMixin:
+    _tftp: dict[str, Any]
+    _save_state: Any
+
     def _get_tftp(self) -> dict[str, Any]:
         return dict(self._tftp)
 

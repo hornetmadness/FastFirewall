@@ -2733,6 +2733,7 @@ def test_vmap_suppresses_normal_dst_port_match():
         protocol="tcp", dst_port=80, dst_port_vmap="dispatch",
     )
     expr = _rule_to_nft_expr(rule, logging.getLogger("test"))
+    assert expr is not None
     assert "80" not in expr
     assert "vmap @dispatch" in expr
 
@@ -2774,6 +2775,7 @@ def test_mark_compiles_to_meta_mark():
     from _nft.compiler import _rule_to_nft_expr
     rule = mod.FirewallRule(name="r", action="accept", mark=42)
     expr = _rule_to_nft_expr(rule, logging.getLogger("test"))
+    assert expr is not None
     assert "meta mark 42" in expr
     assert "accept" in expr
 
@@ -2783,6 +2785,7 @@ def test_dscp_compiles_to_ip_dscp():
     from _nft.compiler import _rule_to_nft_expr
     rule = mod.FirewallRule(name="r", action="deny", dscp=16)
     expr = _rule_to_nft_expr(rule, logging.getLogger("test"))
+    assert expr is not None
     assert "ip dscp 16" in expr
 
 
@@ -2791,6 +2794,7 @@ def test_dscp_named_value():
     from _nft.compiler import _rule_to_nft_expr
     rule = mod.FirewallRule(name="r", action="accept", dscp="ef")
     expr = _rule_to_nft_expr(rule, logging.getLogger("test"))
+    assert expr is not None
     assert "ip dscp ef" in expr
 
 
@@ -2799,6 +2803,7 @@ def test_pkttype_compiles_to_meta_pkttype():
     from _nft.compiler import _rule_to_nft_expr
     rule = mod.FirewallRule(name="r", action="deny", pkttype="broadcast")
     expr = _rule_to_nft_expr(rule, logging.getLogger("test"))
+    assert expr is not None
     assert "meta pkttype broadcast" in expr
 
 
@@ -2818,6 +2823,7 @@ def test_meta_fields_ordering_before_rate_limit():
         rate_limit=RateLimit(rate=10, unit="second"),
     )
     expr = _rule_to_nft_expr(rule, logging.getLogger("test"))
+    assert expr is not None
     assert expr.index("meta mark") < expr.index("limit rate")
 
 
@@ -2940,6 +2946,7 @@ def test_quota_name_compiles_to_quota_name_expr():
     from _nft.compiler import _rule_to_nft_expr
     rule = mod.FirewallRule(name="r", action="accept", quota_name="daily_cap")
     expr = _rule_to_nft_expr(rule, logging.getLogger("test"))
+    assert expr is not None
     assert "quota name daily_cap" in expr
     assert "accept" in expr
 

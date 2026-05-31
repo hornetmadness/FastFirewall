@@ -1008,17 +1008,6 @@ class PluginLoader:
     # Internal
     # ------------------------------------------------------------------
 
-    def _pyinfra_state(self):
-        """Return a connected pyinfra local State (lazy-imports pyinfra)."""
-        from pyinfra.api.config import Config
-        from pyinfra.api.inventory import Inventory
-        from pyinfra.api.state import State
-        from pyinfra.api.connect import connect_all
-        inventory = Inventory(([("@local", {})], {}))
-        state = State(inventory, Config())
-        connect_all(state)
-        return state
-
     def _install_py_requirements_uv_sync(self) -> None:
         """Install all workspace Python dependencies via a single uv sync call.
 

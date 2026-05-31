@@ -41,6 +41,7 @@ def _load_module():
     mod_name = f"{_PKG_NAME}.plugin"
     sys.modules.pop(mod_name, None)
     spec = importlib.util.spec_from_file_location(mod_name, PLUGIN_PY)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     mod.__package__ = _PKG_NAME
     sys.modules[mod_name] = mod

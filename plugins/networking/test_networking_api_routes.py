@@ -1232,7 +1232,7 @@ def test_diff_shows_modified_interface(plugin, client):
     assert modified["to"]["addresses"] == ["10.0.0.2/24"]
 
 
-def test_diff_shows_added_interface(plugin, client):
+def test_diff_shows_added_link_only_interface(plugin, client):
     plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
     client.post("/v1/networking/apply")
     client.put("/v1/networking/config/interfaces/eth1", json={"link": {"state": "up"}})

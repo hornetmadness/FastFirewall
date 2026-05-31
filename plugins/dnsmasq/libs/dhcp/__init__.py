@@ -11,6 +11,12 @@ from ..models import (
 
 
 class DhcpMixin:
+    _dhcp: dict[str, Any]
+    _dhcp_ranges: dict[str, Any]
+    _static_leases: dict[str, Any]
+    config: dict[str, Any]
+    _save_state: Any
+
     def _get_dhcp(self) -> dict[str, Any]:
         return dict(self._dhcp)
 

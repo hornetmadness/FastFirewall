@@ -56,19 +56,19 @@ class PluginsConfig(BaseModel):
 
 
 class RateLimitConfig(BaseModel):
-    max_attempts: int = Field(5, ge=1)
-    window_seconds: int = Field(300, ge=1)
+    max_attempts: int = Field(default=5, ge=1)
+    window_seconds: int = Field(default=300, ge=1)
 
 
 class AuthConfig(BaseModel):
     enabled: bool = True
     secret_key: str = "CHANGE-ME"
     algorithm: str = "HS256"
-    token_expire_minutes: int = Field(60, ge=1)
+    token_expire_minutes: int = Field(default=60, ge=1)
     exempt_paths: list[str] = Field(
         default_factory=lambda: ["/token", "/docs", "/openapi.json", "/redoc"]
     )
-    rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
+    rate_limit: RateLimitConfig = Field(default_factory=lambda: RateLimitConfig())
     users: list[dict[str, Any]] = Field(default_factory=list)
     trusted_proxies: list[str] = Field(default_factory=list)
 
@@ -81,10 +81,10 @@ class ServerConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     host: str = "0.0.0.0"
-    port: int = Field(8000, ge=1, le=65535)
+    port: int = Field(default=8000, ge=1, le=65535)
     reload: bool = False
-    max_payload_bytes: int = Field(5 * 1024 * 1024, ge=1)
-    cors: CorsConfig = Field(default_factory=CorsConfig)
+    max_payload_bytes: int = Field(default=5 * 1024 * 1024, ge=1)
+    cors: CorsConfig = Field(default_factory=lambda: CorsConfig())
 
 
 class StateBackupConfig(BaseModel):
@@ -101,8 +101,8 @@ class AppConfig(BaseModel):
 
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
-    server: ServerConfig = Field(default_factory=ServerConfig)
-    auth: AuthConfig = Field(default_factory=AuthConfig)
+    server: ServerConfig = Field(default_factory=lambda: ServerConfig())
+    auth: AuthConfig = Field(default_factory=lambda: AuthConfig())
     state: StateConfig = Field(default_factory=StateConfig)
 
     # Not from YAML — set in load() after validation.
