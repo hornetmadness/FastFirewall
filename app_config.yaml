@@ -50,7 +50,7 @@ state:
 auth:
   enabled: true
   # Generate a strong key: openssl rand -hex 32
-  secret_key: "5ecc29c348ead105cd98b3392cba0bd5b3542582fe1a92fbc2253b93984bb66a"
+  secret_key: "CHANGE-ME"
   algorithm: HS256
   token_expire_minutes: 60
   # Paths that do not require a valid credential
