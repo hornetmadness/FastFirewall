@@ -3,7 +3,6 @@ Tests for request_context — ContextVar, RequestIdFilter, and the tracing middl
 """
 import logging
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 

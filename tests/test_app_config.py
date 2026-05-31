@@ -1,10 +1,8 @@
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
 from pydantic import ValidationError
 
-from app_config import AppConfig, AuthConfig, LoggingConfig, PluginsConfig, ServerConfig
+from app_config import AppConfig, LoggingConfig
 
 
 # ---------------------------------------------------------------------------

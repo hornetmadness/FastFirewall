@@ -95,6 +95,8 @@ Do **not** emit `pkg_management.add.repo` from `__init__` for this purpose — t
 
 - Never ask the user to edit `test_*` files — make all test changes directly.
 - When committing, never silently exclude modified files. If there are changed files beyond what was directly touched, ask the user whether to include them in the same commit, a separate one, or leave them unstaged.
+- Every code change must include tests. Writing a change without updating or adding tests is shipping broken code.
+- Run both `uv run --extra dev pytest` and `uv run --with pyright pyright` after every non-trivial change — not just once at the end of a session. Fix any failures before moving on.
 
 ## Commands
 

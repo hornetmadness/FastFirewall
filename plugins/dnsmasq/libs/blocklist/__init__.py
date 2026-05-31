@@ -37,6 +37,10 @@ async def _validate_blocklist_url(url: str) -> None:
 
 
 class BlocklistMixin:
+    _blocklists: dict[str, Any]
+    logger: Any
+    _save_state: Any
+
     async def _fetch_blocklist_domains(self, url: str, fmt: str) -> list[str]:
         await _validate_blocklist_url(url)
         try:

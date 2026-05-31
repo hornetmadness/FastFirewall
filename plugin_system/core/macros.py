@@ -15,8 +15,7 @@ Plugin-defined namespaces:
   Any plugin can claim a namespace by inheriting ``MacroProviderPlugin``
   and declaring ``macro_namespace = "myns"``.  The loader registers the
   plugin in the shared ``macro_registry`` singleton after ``setup()``
-  completes — consumers call ``macro_registry.resolve_ports()`` or
-  ``macro_registry.resolve_string()`` directly.
+  completes — consumers call ``macro_registry.resolve()`` directly.
 
   Example (networking plugin owns the ``interface`` namespace):
     $interface.LAN1.name     →  OS device name mapped to alias "LAN1"

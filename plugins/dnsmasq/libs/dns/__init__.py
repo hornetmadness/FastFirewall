@@ -9,6 +9,10 @@ from ..models import DnsRecordCreate, DnsUpdate
 
 
 class DnsMixin:
+    _dns: dict[str, Any]
+    _records: dict[str, Any]
+    _save_state: Any
+
     def _get_dns(self) -> dict[str, Any]:
         return dict(self._dns)
 

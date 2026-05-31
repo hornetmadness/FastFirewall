@@ -6,6 +6,9 @@ from ..models import MdnsUpdate
 
 
 class MdnsMixin:
+    _mdns: dict[str, Any]
+    _save_state: Any
+
     def _get_mdns(self) -> dict[str, Any]:
         return dict(self._mdns)
 

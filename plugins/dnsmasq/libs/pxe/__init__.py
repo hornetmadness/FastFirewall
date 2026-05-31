@@ -9,6 +9,12 @@ from ..models import PxeImageRename, PxeServiceCreate, PxeUpdate
 
 
 class PxeMixin:
+    _pxe: dict[str, Any]
+    _pxe_services: list[Any]
+    config: dict[str, Any]
+    logger: Any
+    _save_state: Any
+
     def _get_pxe(self) -> dict[str, Any]:
         return dict(self._pxe)
 
