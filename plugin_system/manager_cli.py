@@ -1,6 +1,16 @@
 import argparse
+import configparser
+import io
+import shutil
 import sys
 from pathlib import Path
+
+from infra import pyinfra_run_batch
+from pyinfra.operations import files as files_ops
+from pyinfra.operations import systemd as systemd_ops
+
+SERVICE_NAME = "fastfirewall"
+_SERVICE_UNIT_PATH = f"/etc/systemd/system/{SERVICE_NAME}.service"
 
 
 def run(loader, plugins_dir: str | Path, cfg) -> tuple[list[str] | None, bool, bool]:
@@ -40,6 +50,14 @@ def run(loader, plugins_dir: str | Path, cfg) -> tuple[list[str] | None, bool, b
 
     if args.list_plugins:
         print_plugin_table(loader.list_plugins(plugins_dir))
+        sys.exit(0)
+
+    if args.install_service:
+        install_service(cfg)
+        sys.exit(0)
+
+    if args.uninstall_service:
+        uninstall_service()
         sys.exit(0)
 
     return args.plugins or None, bool(args.ignore_plugins_states), bool(args.show_macros)
@@ -201,6 +219,149 @@ def make_cfg(dest: Path, cfg) -> None:
     print(f"  FASTFIREWALL_CONFIG={cfg_file} fastfirewall-api")
 
 
+def _detect_exec() -> str:
+    """Return the absolute path to the fastfirewall-api entrypoint.
+
+    Prefers the installed console script; falls back to invoking fastfirewall_app.py
+    directly via the current Python interpreter (dev/source mode).
+    """
+    installed = shutil.which("fastfirewall-api")
+    if installed:
+        return installed
+    app_py = Path(__file__).parent.parent / "fastfirewall_app.py"
+    return f"{sys.executable} {app_py}"
+
+
+def _build_service_unit(exec_start: str, config_path: Path, working_dir: Path) -> str:
+    """Render a systemd unit file for fastfirewall as a string."""
+    parser = configparser.RawConfigParser()
+    parser.optionxform = lambda optionstr: optionstr  # preserve CamelCase — systemd keys are case-sensitive
+    parser["Unit"] = {"Description": "FastFirewall API", "After": "network.target"}
+    parser["Service"] = {
+        "WorkingDirectory": str(working_dir),
+        "Environment": f"FASTFIREWALL_CONFIG={config_path}",
+        "ExecStart": exec_start,
+        "Restart": "on-failure",
+        "RestartSec": "5",
+    }
+    parser["Install"] = {"WantedBy": "multi-user.target"}
+    buf = io.StringIO()
+    parser.write(buf, space_around_delimiters=False)
+    return buf.getvalue()
+
+
+def install_service(cfg) -> None:
+    """Write the systemd unit file, reload the daemon, and enable the service."""
+    exec_start = _detect_exec()
+    config_path = cfg.config_path
+    working_dir = config_path.parent
+    unit_content = _build_service_unit(exec_start, config_path, working_dir)
+
+    print(f"Installing systemd service at {_SERVICE_UNIT_PATH}")
+    print(f"  ExecStart:           {exec_start}")
+    print(f"  WorkingDirectory:    {working_dir}")
+    print(f"  FASTFIREWALL_CONFIG: {config_path}")
+    print()
+
+    ops = [
+        (
+            "pyinfra.operations.files",
+            "put",
+            {"src": ("__stringio__", unit_content), "dest": _SERVICE_UNIT_PATH, "mode": "644", "_sudo": True},
+        ),
+        (
+            "pyinfra.operations.systemd",
+            "daemon_reload",
+            {"name": "Reload systemd daemon", "_sudo": True},
+        ),
+        (
+            "pyinfra.operations.systemd",
+            "service",
+            {
+                "name": f"Enable {SERVICE_NAME}.service",
+                "service": f"{SERVICE_NAME}.service",
+                "running": False,
+                "enabled": True,
+                "_sudo": True,
+            },
+        ),
+    ]
+    labels = [
+        f"Write {_SERVICE_UNIT_PATH}",
+        "Reload systemd daemon",
+        f"Enable {SERVICE_NAME}.service",
+    ]
+
+    results = pyinfra_run_batch(ops)
+
+    failed = False
+    for label, (success, err) in zip(labels, results):
+        if success:
+            print(f"  [OK]  {label}")
+        else:
+            print(f"  [ERR] {label}: {err}", file=sys.stderr)
+            failed = True
+
+    if failed:
+        sys.exit(1)
+
+    print()
+    print(f"Service installed. Start it with:")
+    print(f"  systemctl start {SERVICE_NAME}")
+    print(f"  systemctl status {SERVICE_NAME}")
+
+
+def uninstall_service() -> None:
+    """Stop, disable, remove the unit file, and reload systemd."""
+    print(f"Uninstalling systemd service {SERVICE_NAME}")
+    print()
+
+    ops = [
+        (
+            "pyinfra.operations.systemd",
+            "service",
+            {
+                "name": f"Stop and disable {SERVICE_NAME}.service",
+                "service": f"{SERVICE_NAME}.service",
+                "running": False,
+                "enabled": False,
+                "_sudo": True,
+            },
+        ),
+        (
+            "pyinfra.operations.files",
+            "file",
+            {"path": _SERVICE_UNIT_PATH, "present": False, "_sudo": True},
+        ),
+        (
+            "pyinfra.operations.systemd",
+            "daemon_reload",
+            {"name": "Reload systemd daemon", "_sudo": True},
+        ),
+    ]
+    labels = [
+        f"Stop and disable {SERVICE_NAME}.service",
+        f"Remove {_SERVICE_UNIT_PATH}",
+        "Reload systemd daemon",
+    ]
+
+    results = pyinfra_run_batch(ops)
+
+    failed = False
+    for label, (success, err) in zip(labels, results):
+        if success:
+            print(f"  [OK]  {label}")
+        else:
+            print(f"  [ERR] {label}: {err}", file=sys.stderr)
+            failed = True
+
+    if failed:
+        sys.exit(1)
+
+    print()
+    print(f"Service uninstalled.")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fastfirewall-api",
@@ -254,6 +415,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--makecfg",
         metavar="PATH",
         help="Scaffold a config directory tree at PATH with a starter app_config.yaml, then exit.",
+    )
+    parser.add_argument(
+        "--install-service",
+        action="store_true",
+        dest="install_service",
+        help=(
+            "Write a systemd unit file for fastfirewall, reload systemd, and enable the service "
+            "to start on boot — does not start it. Requires root. Then exits."
+        ),
+    )
+    parser.add_argument(
+        "--uninstall-service",
+        action="store_true",
+        dest="uninstall_service",
+        help=(
+            "Stop and disable the fastfirewall systemd service, remove its unit file, "
+            "and reload systemd. Requires root. Then exits."
+        ),
     )
     return parser
 
