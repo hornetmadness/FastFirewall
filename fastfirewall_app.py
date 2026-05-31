@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-
+from contextlib import asynccontextmanager
 from plugin_system import manager_cli
 from app_config import AppConfig
 from plugin_system.core import PluginLoader, bus, macro_registry
@@ -66,6 +66,15 @@ configure_state(
     backup_directory=cfg.state.backup.directory,
 )
 
+@asynccontextmanager
+async def start_stop(app: FastAPI):
+    # 1. Startup logic runs here (before yield)
+    log.info("Application starting up...")
+    yield
+    # 2. Shutdown logic runs here (after yield)
+    # This block executes when SIGTERM or SIGINT is received
+    log.info("SIGTERM/SIGINT received. Shutting down gracefully...")
+
 app = FastAPI(
     title="Fastfirewall",
     description=(
@@ -73,6 +82,7 @@ app = FastAPI(
         "**Authentication:** use HTTP Basic *or* an OAuth2 Bearer token. "
         "Obtain a token via `POST /token`, then click **Authorize** above."
     ),
+    lifespan=start_stop,
 )
 
 if cfg.server.cors.allowed_origins:
