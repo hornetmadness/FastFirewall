@@ -285,16 +285,9 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         try:
             self.logger.info("Applying networking config on boot: %d interface(s), %d route(s)",
                              len(self._interfaces), len(self._routes))
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
-                fh.write(self._build_ifstate_yaml())
-                tmp = fh.name
-            try:
-                result = self._run_ifstate("-c", tmp, "apply")
-            finally:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
+            config_path = self.plugin_dir / "data" / "ifstate.yaml"
+            config_path.write_text(self._build_ifstate_yaml())
+            result = self._run_ifstate("-c", str(config_path), "apply")
             if result.returncode == 0:
                 self.logger.info("Re-applied networking config on boot")
             else:

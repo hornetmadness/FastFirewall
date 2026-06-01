@@ -221,3 +221,4 @@ __marimo__/
 # Local configuration file for FastFirewall
 plugins/*/data/*
 tools/*json
+build-tools/iso/*.iso
