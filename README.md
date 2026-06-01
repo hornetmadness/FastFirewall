@@ -68,7 +68,7 @@ echo '%sudo-np ALL=(ALL:ALL) NOPASSWD:ALL' > /etc/sudoers.d/sudo-np
 apt install pipx
 ```
 
-Passwordless sudo is required because plugins call privileged tools (`nft`, `systemctl`, `ifstatecli`, etc.) at runtime.
+Passwordless sudo is required because FastFirewall actively manages the system — plugins configure network interfaces, firewall rules, DNS, DHCP, users, packages, and more, all of which require elevated privileges.
 
 **As the `fastfirewall` user — install and configure:**
 
@@ -93,7 +93,7 @@ export PATH="$PATH:$HOME/.venv/bin"
 fastfirewall-api --makecfg ~/.config/fastfirewall
 ```
 
-`--makecfg` creates `~/.config/fastfirewall/plugins/` and writes a starter `app_config.yaml` that stores all plugin state outside the venv. Edit the generated file to set a strong `secret_key` and update `auth.users` before starting the server.
+`--makecfg` takes a **directory path** and creates it if needed, writing a starter `app_config.yaml` and a `plugins/` subdirectory into it. Edit the generated file to set a strong `secret_key` and update `auth.users` before starting the server.
 
 See [BUILD.md](BUILD.md) for how to build and publish packages.
 
@@ -124,7 +124,7 @@ fastfirewall-api --showcfg
 
 ## fastfirewall-api CLI reference
 
-`fastfirewall_app.py` doubles as a management tool. These flags handle configuration tasks and exit without starting the server:
+`fastfirewall-api` is the main command-line interface for FastFirewall. It starts the API server, manages configuration, controls the systemd service, and handles plugin state — all through the same entry point. Many flags handle configuration tasks and exit without starting the server:
 
 ```bash
 # Show the active config file and all resolved plugin paths
@@ -149,6 +149,12 @@ fastfirewall-api --plugin firewall --plugin networking
 # Skip re-applying saved state to the system on boot (state files are still read,
 # but nothing is pushed to the kernel/daemons until you explicitly call /apply)
 fastfirewall-api --ignore-plugins-states
+
+# Install the systemd service (enables for boot, does not start immediately)
+fastfirewall-api --install-service
+
+# Remove the systemd service
+fastfirewall-api --uninstall-service
 
 # Full help
 fastfirewall-api --help

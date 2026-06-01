@@ -20,7 +20,7 @@ Artifacts land in `dist/`. Expect one wheel and one sdist per package:
 After installing, start the server with:
 
 ```bash
-fastfirewall
+fastfirewall-api
 ```
 
 Config is discovered in this order:
