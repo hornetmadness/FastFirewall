@@ -19,13 +19,13 @@ jobs:
           STATUS=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json mergeable --jq '.mergeable')
           
           echo "Mergeable status is: $STATUS"
-          
+          echo "### Merge Summary"
           if [ "$STATUS" = "CONFLICTING" ]; then
-            echo "❌ Error: This PR has merge conflicts and cannot be cleanly merged!"
+            echo "* **Error: This PR has merge conflicts and cannot be cleanly merged!" >> $GITHUB_STEP_SUMMARY
             exit 1
           elif [ "$STATUS" = "UNKNOWN" ]; then
-            echo "⚠️ Warning: GitHub is still calculating the merge state. Please re-run this check."
+            echo "* **Warning: GitHub is still calculating the merge state. Please re-run this check." >> $GITHUB_STEP_SUMMARY
             exit 1
           else
-            echo "✅ Success: The PR can be cleanly merged."
+            echo "* **Success: The PR can be cleanly merged." >> $GITHUB_STEP_SUMMARY
           fi
