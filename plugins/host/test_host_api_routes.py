@@ -16,6 +16,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from plugin_system.core.events import Event, bus as global_bus
+
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -875,6 +877,124 @@ def test_init_script_logs_warning_on_failure(tmp_path):
         assert "missing-svc" in mock_warn.call_args[0][1]
 
 
+# ── initsys.service.add event ─────────────────────────────────────────────────
+
+def test_systemd_unit_oneshot_type():
+    mod = _load_plugin_module()
+    unit = mod.HostPlugin._systemd_unit("ff-nft", "/usr/sbin/nft -f /data/fastfirewall.nft", service_type="oneshot")
+    assert "Type=oneshot" in unit
+    assert "RemainAfterExit=yes" in unit
+    assert "Restart" not in unit
+
+
+def test_systemd_unit_custom_description():
+    mod = _load_plugin_module()
+    unit = mod.HostPlugin._systemd_unit("ff-nft", "/usr/sbin/nft -f /data/fastfirewall.nft", description="FastFirewall nftables rules")
+    assert "Description=FastFirewall nftables rules" in unit
+
+
+def test_systemd_unit_default_description_is_service_name():
+    mod = _load_plugin_module()
+    unit = mod.HostPlugin._systemd_unit("ff-nft", "/usr/sbin/nft -f /data/fastfirewall.nft")
+    assert "Description=ff-nft" in unit
+
+
+def test_service_add_event_places_and_enables(tmp_path):
+    from pyinfra.operations import files as files_ops, systemd as systemd_ops
+    plugin, mod = _init_plugin(tmp_path, {})
+    with patch.object(mod.HostPlugin, "_detect_init_system", return_value="systemd"):
+        plugin.setup()
+    plugin._pyinfra_run.reset_mock()
+
+    with patch.object(mod.HostPlugin, "_detect_init_system", return_value="systemd"), \
+         patch.object(mod.HostPlugin, "_get_service_status", _mock_status(False, None, exists=False)):
+        event = Event("initsys.service.add", payload={
+            "service_name": "ff-nft",
+            "command": "/usr/sbin/nft -f /data/fastfirewall.nft",
+        })
+        plugin._handle_service_add(event)
+
+    ops = [c[0][0] for c in plugin._pyinfra_run.call_args_list]
+    assert files_ops.put in ops
+    assert systemd_ops.daemon_reload in ops
+    assert systemd_ops.service in ops
+
+
+def test_service_add_event_already_installed_skips(tmp_path):
+    plugin, mod = _init_plugin(tmp_path, {})
+    with patch.object(mod.HostPlugin, "_detect_init_system", return_value="systemd"):
+        plugin.setup()
+    plugin._pyinfra_run.reset_mock()
+
+    with patch.object(mod.HostPlugin, "_detect_init_system", return_value="systemd"), \
+         patch.object(mod.HostPlugin, "_get_service_status", _mock_status(True, True, exists=True)):
+        event = Event("initsys.service.add", payload={
+            "service_name": "ff-nft",
+            "command": "/usr/sbin/nft -f /data/fastfirewall.nft",
+        })
+        result = plugin._handle_service_add(event)
+
+    plugin._pyinfra_run.assert_not_called()
+    assert result == {"success": True}
+
+
+def test_service_add_event_oneshot_unit_content(tmp_path):
+    from pyinfra.operations import files as files_ops
+    plugin, mod = _init_plugin(tmp_path, {})
+    with patch.object(mod.HostPlugin, "_detect_init_system", return_value="systemd"):
+        plugin.setup()
+    plugin._pyinfra_run.reset_mock()
+
+    with patch.object(mod.HostPlugin, "_detect_init_system", return_value="systemd"), \
+         patch.object(mod.HostPlugin, "_get_service_status", _mock_status(False, None, exists=False)):
+        event = Event("initsys.service.add", payload={
+            "service_name": "ff-nft",
+            "command": "/usr/sbin/nft -f /data/fastfirewall.nft",
+            "service_type": "oneshot",
+            "description": "FastFirewall nftables rules",
+        })
+        plugin._handle_service_add(event)
+
+    put_call = next(c for c in plugin._pyinfra_run.call_args_list if c[0][0] is files_ops.put)
+    unit = put_call[1]["src"].getvalue()
+    assert "Type=oneshot" in unit
+    assert "RemainAfterExit=yes" in unit
+    assert "Description=FastFirewall nftables rules" in unit
+    assert "Restart" not in unit
+
+
+def test_service_add_event_no_command_enables_without_placing_unit(tmp_path):
+    from pyinfra.operations import files as files_ops, systemd as systemd_ops
+    plugin, mod = _init_plugin(tmp_path, {})
+    with patch.object(mod.HostPlugin, "_detect_init_system", return_value="systemd"):
+        plugin.setup()
+    plugin._pyinfra_run.reset_mock()
+
+    with patch.object(mod.HostPlugin, "_detect_init_system", return_value="systemd"), \
+         patch.object(mod.HostPlugin, "_get_service_status", _mock_status(False, None, exists=False)):
+        event = Event("initsys.service.add", payload={"service_name": "dnsmasq"})
+        plugin._handle_service_add(event)
+    ops = [c[0][0] for c in plugin._pyinfra_run.call_args_list]
+    assert files_ops.put not in ops
+    assert systemd_ops.daemon_reload in ops
+    assert systemd_ops.service in ops
+
+
+def test_service_add_event_unknown_init_system_is_ignored(tmp_path):
+    plugin, mod = _init_plugin(tmp_path, {})
+    with patch.object(mod.HostPlugin, "_detect_init_system", return_value="systemd"):
+        plugin.setup()
+    plugin._pyinfra_run.reset_mock()
+
+    with patch.object(mod.HostPlugin, "_detect_init_system", return_value="unknown"):
+        event = Event("initsys.service.add", payload={
+            "service_name": "ff-nft",
+            "command": "/usr/sbin/nft -f /data/fastfirewall.nft",
+        })
+        plugin._handle_service_add(event)
+    plugin._pyinfra_run.assert_not_called()
+
+
 # ── boot-time state apply ──────────────────────────────────────────────────────
 
 _BOOT_STATE = {
@@ -940,3 +1060,157 @@ def test_empty_state_skips_apply_calls(tmp_path):
     plugin, _ = _make_inst(tmp_path)
     plugin.setup()  # no state file — all categories empty
     plugin._pyinfra_run_many.assert_not_called()
+
+
+# ── systemd service lifecycle events ──────────────────────────────────────────
+
+def _make_svc_plugin(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    plugin._pyinfra_run.reset_mock()
+    return plugin
+
+
+def _mock_status(running: bool, enabled: bool | None = True, exists: bool = True):
+    return MagicMock(return_value={"running": running, "enabled": enabled, "exists": exists})
+
+
+# status
+
+def test_service_status_returns_result(tmp_path):
+    plugin = _make_svc_plugin(tmp_path)
+    with patch.object(type(plugin), "_detect_init_system", return_value="systemd"), \
+         patch.object(type(plugin), "_get_service_status", _mock_status(True, True)):
+        result = plugin._handle_service_status(Event("initsys.service.status", payload={"service_name": "ff-nft"}))
+    assert result is not None
+    assert result["service_name"] == "ff-nft"
+    assert result["running"] is True
+    assert result["enabled"] is True
+    assert result["init_system"] == "systemd"
+
+
+def test_service_status_missing_name_is_ignored(tmp_path):
+    plugin = _make_svc_plugin(tmp_path)
+    plugin._handle_service_status(Event("initsys.service.status", payload={}))
+    plugin._pyinfra_run.assert_not_called()
+
+
+# start
+
+def test_service_start_calls_pyinfra_when_stopped(tmp_path):
+    from pyinfra.operations import systemd as systemd_ops
+    plugin = _make_svc_plugin(tmp_path)
+    with patch.object(type(plugin), "_detect_init_system", return_value="systemd"), \
+         patch.object(type(plugin), "_get_service_status", _mock_status(False)):
+        plugin._handle_service_start(Event("initsys.service.start", payload={"service_name": "ff-nft"}))
+    ops = [c[0][0] for c in plugin._pyinfra_run.call_args_list]
+    assert systemd_ops.service in ops
+
+
+def test_service_start_skips_when_already_running(tmp_path):
+    plugin = _make_svc_plugin(tmp_path)
+    with patch.object(type(plugin), "_detect_init_system", return_value="systemd"), \
+         patch.object(type(plugin), "_get_service_status", _mock_status(True)):
+        plugin._handle_service_start(Event("initsys.service.start", payload={"service_name": "ff-nft"}))
+    plugin._pyinfra_run.assert_not_called()
+
+
+def test_service_start_missing_name_is_ignored(tmp_path):
+    plugin = _make_svc_plugin(tmp_path)
+    plugin._handle_service_start(Event("initsys.service.start", payload={}))
+    plugin._pyinfra_run.assert_not_called()
+
+
+# stop
+
+def test_service_stop_calls_pyinfra_when_running(tmp_path):
+    from pyinfra.operations import systemd as systemd_ops
+    plugin = _make_svc_plugin(tmp_path)
+    with patch.object(type(plugin), "_detect_init_system", return_value="systemd"), \
+         patch.object(type(plugin), "_get_service_status", _mock_status(True)):
+        plugin._handle_service_stop(Event("initsys.service.stop", payload={"service_name": "ff-nft"}))
+    ops = [c[0][0] for c in plugin._pyinfra_run.call_args_list]
+    assert systemd_ops.service in ops
+
+
+def test_service_stop_skips_when_already_stopped(tmp_path):
+    plugin = _make_svc_plugin(tmp_path)
+    with patch.object(type(plugin), "_detect_init_system", return_value="systemd"), \
+         patch.object(type(plugin), "_get_service_status", _mock_status(False)):
+        plugin._handle_service_stop(Event("initsys.service.stop", payload={"service_name": "ff-nft"}))
+    plugin._pyinfra_run.assert_not_called()
+
+
+def test_service_stop_missing_name_is_ignored(tmp_path):
+    plugin = _make_svc_plugin(tmp_path)
+    plugin._handle_service_stop(Event("initsys.service.stop", payload={}))
+    plugin._pyinfra_run.assert_not_called()
+
+
+# restart
+
+def test_service_restart_always_calls_pyinfra(tmp_path):
+    from pyinfra.operations import systemd as systemd_ops
+    plugin = _make_svc_plugin(tmp_path)
+    with patch.object(type(plugin), "_detect_init_system", return_value="systemd"):
+        plugin._handle_service_restart(Event("initsys.service.restart", payload={"service_name": "ff-nft"}))
+    ops = [c[0][0] for c in plugin._pyinfra_run.call_args_list]
+    assert systemd_ops.service in ops
+    svc_call = next(c for c in plugin._pyinfra_run.call_args_list if c[0][0] is systemd_ops.service)
+    assert svc_call[1]["restarted"] is True
+
+
+def test_service_restart_missing_name_is_ignored(tmp_path):
+    plugin = _make_svc_plugin(tmp_path)
+    plugin._handle_service_restart(Event("initsys.service.restart", payload={}))
+    plugin._pyinfra_run.assert_not_called()
+
+
+# disable
+
+def test_service_disable_calls_pyinfra_when_active(tmp_path):
+    from pyinfra.operations import systemd as systemd_ops
+    plugin = _make_svc_plugin(tmp_path)
+    with patch.object(type(plugin), "_detect_init_system", return_value="systemd"), \
+         patch.object(type(plugin), "_get_service_status", _mock_status(True, True)):
+        plugin._handle_service_disable(Event("initsys.service.disable", payload={"service_name": "ff-nft"}))
+    ops = [c[0][0] for c in plugin._pyinfra_run.call_args_list]
+    assert systemd_ops.service in ops
+    svc_call = next(c for c in plugin._pyinfra_run.call_args_list if c[0][0] is systemd_ops.service)
+    assert svc_call[1]["running"] is False
+    assert svc_call[1]["enabled"] is False
+
+
+def test_service_disable_skips_when_already_disabled(tmp_path):
+    plugin = _make_svc_plugin(tmp_path)
+    with patch.object(type(plugin), "_detect_init_system", return_value="systemd"), \
+         patch.object(type(plugin), "_get_service_status", _mock_status(False, False)):
+        plugin._handle_service_disable(Event("initsys.service.disable", payload={"service_name": "ff-nft"}))
+    plugin._pyinfra_run.assert_not_called()
+
+
+def test_service_disable_missing_name_is_ignored(tmp_path):
+    plugin = _make_svc_plugin(tmp_path)
+    plugin._handle_service_disable(Event("initsys.service.disable", payload={}))
+    plugin._pyinfra_run.assert_not_called()
+
+
+# remove
+
+def test_service_remove_stops_disables_and_removes_unit_file(tmp_path):
+    from pyinfra.operations import files as files_ops, systemd as systemd_ops
+    plugin = _make_svc_plugin(tmp_path)
+    with patch.object(type(plugin), "_detect_init_system", return_value="systemd"):
+        plugin._handle_service_remove(Event("initsys.service.remove", payload={"service_name": "ff-nft"}))
+    ops = [c[0][0] for c in plugin._pyinfra_run.call_args_list]
+    assert systemd_ops.service in ops
+    assert files_ops.file in ops
+    assert systemd_ops.daemon_reload in ops
+    file_call = next(c for c in plugin._pyinfra_run.call_args_list if c[0][0] is files_ops.file)
+    assert file_call[1]["path"] == "/etc/systemd/system/ff-nft.service"
+    assert file_call[1]["present"] is False
+
+
+def test_service_remove_missing_name_is_ignored(tmp_path):
+    plugin = _make_svc_plugin(tmp_path)
+    plugin._handle_service_remove(Event("initsys.service.remove", payload={}))
+    plugin._pyinfra_run.assert_not_called()

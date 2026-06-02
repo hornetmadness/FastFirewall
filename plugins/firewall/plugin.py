@@ -114,6 +114,21 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             self._apply_state()
         self.logger.info("Loaded %d rules from %r", len(self._rules), self._state_file.path)
         self._register_routes()
+        self._sync_os_boot_service()
+
+    def _sync_os_boot_service(self) -> None:
+        service_name = "fastfirewall-nft"
+        if self.config.get("enable_os_boot", False):
+            bus.emit(Event("initsys.service.add", payload={
+                "service_name": service_name,
+                "command": f"/usr/sbin/nft -f {self._compiled_output_path}",
+                "description": "FastFirewall nftables rules",
+                "service_type": "oneshot",
+            }))
+        else:
+            bus.emit(Event("initsys.service.remove", payload={
+                "service_name": service_name,
+            }))
 
     def teardown(self) -> None:
         self._save_state()
@@ -747,7 +762,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     @property
     def _compiled_output_path(self) -> str:
-        return os.path.join(str(self.plugin_dir), "data", f"{self._default_filter}.nft")
+        return os.path.join(str(self.data_dir), f"{self._default_filter}.nft")
 
     def _applied_chains(self) -> dict:
         snapshot = self._state_file.current_snapshot
@@ -853,7 +868,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             verdict_maps=self._verdict_maps,
             quotas=self._quotas,
         )
-        output_path = os.path.join(str(self.plugin_dir), "data", f"{body.filter_name}.nft")
+        output_path = os.path.join(str(self.data_dir), f"{body.filter_name}.nft")
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w") as fh:
             fh.write(script)

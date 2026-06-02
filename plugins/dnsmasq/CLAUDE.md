@@ -83,7 +83,7 @@ Ten dicts/lists are kept in memory, populated from the state file by `_load_stat
 
 **`_load_state()`** — calls `self._state_file.load_desired(default={})`, merges with per-subsystem defaults (`_default_dns()`, etc.), then calls `_save_state()` if no prior state exists on disk so that `_desired` is immediately accurate.
 
-**`_apply_state()`** — called on every boot (unless `ignore_state_on_boot` is true). Reads the on-disk config files via `_read_on_disk()` and compares them to the generated desired config. If both files match exactly, logs and returns without touching the system. If either differs (or is missing), validates with `dnsmasq --test`, writes both config files via `_write_file_sudo`, then restarts dnsmasq via `systemctl`. Calls `commit()` on success; logs a warning and returns on any failure (does not raise).
+**`_apply_state()`** — called on every boot (unless `ignore_state_on_boot` is true). Reads the on-disk config files via `_read_on_disk()` and compares them to the generated desired config. If both files match exactly, logs and returns without touching the system. If either differs (or is missing), validates with `dnsmasq --test`, writes both config files via `_write_file_sudo`, then restarts dnsmasq via `_restart_dnsmasq()`. Calls `commit()` on success; logs a warning and returns on any failure (does not raise).
 
 **`_read_on_disk(path)`** — reads a system config file and returns its contents as a string, or `None` if the file is missing or unreadable (no exception raised).
 
@@ -111,14 +111,14 @@ Returns `_desired_snapshot()` as a JSON object — the full structured desired s
 
 ## `POST /apply` flow
 
-When `debug: true` is set in plugin config, the temp file path, `dnsmasq --test` output, and `systemctl` output are logged and included in the response under a `"debug"` key. The temp file is also retained on disk for inspection.
+When `debug: true` is set in plugin config, the temp file path, `dnsmasq --test` output, and restart result are logged and included in the response under a `"debug"` key. The temp file is also retained on disk for inspection.
 
 1. `_desired_snapshot()` captured
 2. `_build_config()` + `_build_blocklist_config()` written to a temp file
 3. `_run_dnsmasq_test(tmp)` — `sudo dnsmasq --test --conf-file=<tmp>` (non-zero → return failure, no file written)
 4. `_write_file_sudo(config_path, content)` — `sudo tee <path>` for main config
 5. `_write_file_sudo(blocklist_path, content)` — `sudo tee <path>` for blocklist
-6. `_run_systemctl("restart")` — `sudo systemctl restart dnsmasq`
+6. `_restart_dnsmasq()` — emits `initsys.service.restart` on the bus; host plugin handles the actual restart
 7. On success: `self._state_file.commit(desired)` and emit `dnsmasq.applied`
 
 ## `POST /discard`
@@ -173,15 +173,18 @@ PXE service entries are stored in `_pxe_services` as an ordered list. Deletion i
 
 When enabled, the plugin emits `enable-ra` plus one `interface=` line per entry in `_mdns["interfaces"]`. This enables dnsmasq's router-advertisement and mDNS reflection between the listed interfaces. This is not the same as a standalone mDNS daemon (e.g. Avahi).
 
-## Subprocess wrappers
+## Subprocess wrappers and bus helpers
 
-| Method | Command |
+| Method | What it does |
 |---|---|
 | `_run_dnsmasq_test(path)` | `sudo dnsmasq --test --conf-file=<path>` |
-| `_run_systemctl(action)` | `sudo systemctl <action> dnsmasq` |
 | `_write_file_sudo(path, content)` | `sudo tee <path>` (stdin = content) |
+| `_restart_dnsmasq()` | Emits `initsys.service.restart` on the bus; returns `bool` success from `results[0].get("success")` |
+| `_sync_os_boot_service()` | Called from `setup()`; emits `initsys.service.add` (oneshot) or `initsys.service.disable` based on `enable_os_boot` |
 
-In tests, replace these with `MagicMock` on the instantiated plugin before calling any route handler. Also mock `_read_on_disk` to control what the boot-time diff check sees.
+`_run_systemctl` has been removed — service management is now routed through the host plugin via bus events.
+
+In tests, replace `_run_dnsmasq_test`, `_write_file_sudo`, and `_restart_dnsmasq` with `MagicMock` on the instantiated plugin before calling any route handler. Also mock `_read_on_disk` to control what the boot-time diff check sees.
 
 ## Config options (`plugin.yaml`)
 
@@ -192,7 +195,8 @@ In tests, replace these with `MagicMock` on the instantiated plugin before calli
 | `blocklist_path` | `/etc/dnsmasq.d/ff-blocklist.conf` | blocklist config written on apply |
 | `lease_file` | `/var/lib/dnsmasq/dnsmasq.leases` | path read by `GET /dhcp/leases` |
 | `ignore_state_on_boot` | `false` | skip `_apply_state()` on startup |
-| `debug` | `false` | log temp config path and dnsmasq/systemctl output; include `debug` key in `POST /apply` response |
+| `enable_os_boot` | `false` | register (or disable) dnsmasq as an OS boot service managed through the host plugin's `initsys` handlers |
+| `debug` | `false` | log temp config path and restart result; include `debug` key in `POST /apply` response |
 
 ## Events emitted
 
@@ -224,8 +228,8 @@ Tests in `test_dnsmasq_api_routes.py`. Subprocess calls are mocked via `MagicMoc
 Key mock targets:
 - `plugin._run_dnsmasq_test` — controls `dnsmasq --test` exit code
 - `plugin._write_file_sudo` — prevents actual file writes
-- `plugin._run_systemctl` — controls `systemctl restart` exit code
+- `plugin._restart_dnsmasq` — controls restart success; use `MagicMock(return_value=True)` for success
 - `plugin._read_on_disk` — controls what the boot-time diff sees (return `None` to simulate missing file, or return the exact desired config string to simulate no change needed)
-- `plugin._fetch_blocklist_domains` — since this is now `async`, `patch.object` auto-creates an `AsyncMock` in Python 3.8+; `return_value=[...]` is what `await` resolves to
+- `plugin._fetch_blocklist_domains` — since this is `async`, `patch.object` auto-creates an `AsyncMock`; `return_value=[...]` is what `await` resolves to
 
 Direct-call tests for `_fetch_blocklist_domains` must be `async def` and mock both `_validate_blocklist_url` (as `AsyncMock`) and `httpx.AsyncClient`.

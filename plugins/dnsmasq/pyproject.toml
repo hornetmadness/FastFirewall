@@ -22,9 +22,13 @@ fastfirewall-core = { workspace = true }
 fastfirewall-plugin-networking = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
-sources = {"." = "fastfirewall_plugin_dns"}
+packages = ["fastfirewall_plugin_dns"]
 exclude = ["data", "test_*.py", "CLAUDE.md", "*_state.json"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"plugin.py" = "fastfirewall_plugin_dns/plugin.py"
+"plugin.yaml" = "fastfirewall_plugin_dns/plugin.yaml"
+"libs" = "fastfirewall_plugin_dns/libs"
 
 [tool.hatch.build.targets.sdist]
 exclude = ["data", "test_*.py", "CLAUDE.md", "*_state.json"]

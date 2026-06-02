@@ -54,13 +54,17 @@ Additional routes: `GET /status`, `GET /interfaces`, `GET /interfaces/{name}`, `
 
 **`_desired_snapshot()`** — returns `json.loads(json.dumps({interfaces, routes, aliases}))`: a normalized deep copy used for diffing and snapshotting.
 
-**`_apply_state()`** — re-applies desired state on boot via `ifstatecli apply`. Calls `self._state_file.commit(self._desired_snapshot())` on success.
+**`_apply_state()`** — re-applies desired state on boot by writing `_ifstate_config_path` and running `ifstate apply`. Calls `self._state_file.commit(self._desired_snapshot())` on success.
 
-**`_import_state_from_system()`** — called at boot when the state file is empty; seeds `_interfaces` and `_routes` from `ifstatecli show` output, then calls `self._state_file.save_and_commit(self._desired_snapshot())` so desired and current start identical.
+**`_import_state_from_system()`** — called at boot when the state file is empty; seeds `_interfaces` and `_routes` from `ifstate show` output, then calls `self._state_file.save_and_commit(self._desired_snapshot())` so desired and current start identical.
 
-**`_build_ifstate_yaml()`** — serializes `_interfaces` and `_routes` into the YAML format expected by ifstatecli.
+**`_build_ifstate_yaml()`** — serializes `_interfaces` and `_routes` into the YAML format expected by ifstate.
 
-**`_run_ifstate(*args)`** — runs `sudo uv run ifstatecli <args>` as a subprocess.
+**`_ifstate_config_path`** (property) — `Path` to `data/ifstate.yaml`, the persistent ifstate config written on every apply. The path is exposed in `GET /status` as `config_file`.
+
+**`_run_ifstate(*args)`** — runs `sudo sys.executable -m ifstate.ifstate <args>` as a subprocess (uses the same Python interpreter that is running FastFirewall, avoiding `uv` path lookup issues).
+
+**`_sync_os_boot_service()`** — called from `setup()`; emits `initsys.service.add` (oneshot) when `enable_os_boot` is `true`, or `initsys.service.remove` when `false`. The registered service runs `sudo python -m ifstate.ifstate -c <config_path> apply` at OS boot.
 
 **`_resolve_interface_macro(*segments)`** — resolver for the `interface` macro namespace. `segments[0]` is the alias name, `segments[1]` is the field:
 
@@ -107,6 +111,15 @@ Interface alias `PUT`/`DELETE` mutations call `self._state_file.commit(self._des
 | `networking.route.removed` | `{route_id, to}` |
 | `networking.applied` | `{success, returncode}` |
 
+## Events emitted to init system
+
+At `setup()` time the plugin emits one of these to the host plugin's `initsys` handlers:
+
+| Event | When |
+|---|---|
+| `initsys.service.add` | `enable_os_boot: true` — registers `fastfirewall-networking` as a oneshot systemd service |
+| `initsys.service.remove` | `enable_os_boot: false` — removes the service if it exists |
+
 ## Events consumed
 
 | Event | Payload | Action |
@@ -119,7 +132,8 @@ Interface alias `PUT`/`DELETE` mutations call `self._state_file.commit(self._des
 |---|---|---|
 | `state_file` | `networking_state.json` | filename inside `data/` |
 | `ignore_state_on_boot` | `false` | skip `_apply_state()` / `_import_state_from_system()` on startup |
-| `debug` | `false` | log the temp config path and command; include `debug` key in `POST /apply` response |
+| `enable_os_boot` | `false` | register (or remove) a oneshot systemd service that applies networking config at OS boot, before FastFirewall starts |
+| `debug` | `false` | log the config path and command; include `debug` key in `POST /apply` response |
 
 ## Testing
 

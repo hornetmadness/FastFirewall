@@ -35,7 +35,7 @@ Built on FastAPI and driven entirely by plugins. Every feature is a plugin; the 
 
 - Python 3.12+
 - `pipx` and `uv` (see install steps below)
-- Root or sudo access (plugins call `nftables`, `systemctl`, `ifstatecli`, etc.)
+- Root or sudo access (plugins call `nftables`, `systemctl`, `ifstate`, etc.)
 - Linux (Debian/Ubuntu tested; most plugins work on any systemd-based distro)
 
 ## Installation
@@ -241,6 +241,29 @@ fastfirewall-api --enable-plugin smtp
 ```
 
 This edits the `enabled` field in the plugin's `plugin.yaml` and exits. The change takes effect on the next server start.
+
+### OS boot service registration (`enable_os_boot`)
+
+Some plugins can register a lightweight systemd oneshot service that applies their configuration at OS boot — before FastFirewall itself starts. This is useful for critical services like the firewall and networking, where you want rules and interfaces active during early boot even if FastFirewall fails to start.
+
+Set `enable_os_boot: true` in the relevant plugin's `plugin.yaml` config block:
+
+```yaml
+# plugins/firewall/plugin.yaml
+config:
+  enable_os_boot: true   # registers fastfirewall-nft.service — applies nft rules at boot
+```
+
+Supported plugins and their registered services:
+
+| Plugin | Service name | What it applies |
+|---|---|---|
+| `firewall` | `fastfirewall-nft` | Compiled `.nft` ruleset via `nft -f` |
+| `networking` | `fastfirewall-networking` | Interface config via `ifstate apply` |
+| `dnsmasq` | `dnsmasq` | Ensures dnsmasq is enabled for boot |
+| `apt_cacher_ng` | `apt-cacher-ng` | Ensures apt-cacher-ng is enabled for boot |
+
+The registration or removal happens automatically each time FastFirewall starts — setting the flag and restarting FastFirewall is all that's needed.
 
 ### API error responses
 
@@ -490,7 +513,7 @@ curl -su admin:admin -X POST http://localhost:8000/v1/firewall/apply
 **Routes:** `/v1/networking/`  
 **Depends on:** host plugin
 
-Manages network interfaces and static routes via [ifstate](https://github.com/ipinfra/ifstate) (`ifstatecli`). Desired state is stored in a JSON file; nothing is applied to the kernel until `POST /apply`. Sysctl parameters are managed by the host plugin (`PUT /v1/host/sysctl/{key}`).
+Manages network interfaces and static routes via [ifstate](https://github.com/ipinfra/ifstate). Desired state is stored in a JSON file; nothing is applied to the kernel until `POST /apply`. Sysctl parameters are managed by the host plugin (`PUT /v1/host/sysctl/{key}`).
 
 **Deferred apply model:** mutations (PUT/POST/DELETE) only update the state file. `GET /status` will show `pending_changes: true` until you apply.
 
@@ -647,6 +670,8 @@ curl -su admin:admin -X POST http://localhost:8000/v1/host/services/nginx/import
 ```
 
 List endpoints (`GET /users`, `GET /groups`, etc.) read live system state and merge it with the FF-managed dict. Every entry includes `ff_managed: true/false` so you can tell if FastFirewall manages it.
+
+**OS service coordinator:** The host plugin also acts as the init system manager for all other plugins. Plugins that need a service enabled or restarted (firewall, networking, dnsmasq, apt-cacher-ng) emit events like `initsys.service.restart` on the internal bus rather than calling `systemctl` directly — the host plugin handles the actual systemctl/upstart/sysvinit call. This keeps all init system logic in one place and makes the rest of the plugins init-system-agnostic.
 
 ---
 

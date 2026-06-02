@@ -16,3 +16,4 @@ config:
   state_file: firewall_state.json
   default_filter_name: fastfirewall
   ignore_state_on_boot: false
+  enable_os_boot: true

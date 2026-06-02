@@ -23,9 +23,13 @@ fastfirewall-plugin-smtp = { workspace = true }
 fastfirewall-plugin-audit = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
-sources = {"." = "fastfirewall_plugin_pkg_management"}
+packages = ["fastfirewall_plugin_pkg_management"]
 exclude = ["data", "test_*.py", "CLAUDE.md", "*_state.json"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"plugin.py" = "fastfirewall_plugin_pkg_management/plugin.py"
+"plugin.yaml" = "fastfirewall_plugin_pkg_management/plugin.yaml"
+"_pkg_manager.py" = "fastfirewall_plugin_pkg_management/_pkg_manager.py"
 
 [tool.hatch.build.targets.sdist]
 exclude = ["data", "test_*.py", "CLAUDE.md", "*_state.json"]

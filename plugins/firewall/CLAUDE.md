@@ -204,6 +204,7 @@ The wrapper path defaults to `plugin_dir / "nft_cmd"` and can be overridden with
 | `state_file` | `firewall_state.json` | filename inside `data/` |
 | `default_filter_name` | `fastfirewall` | nftables table/chain name |
 | `ignore_state_on_boot` | `false` | skip rule reload and re-apply on startup |
+| `enable_os_boot` | `false` | register (or remove) a oneshot systemd service that applies the compiled `.nft` script at OS boot via `nft -f` |
 | `nft_wrapper` | `<plugin_dir>/nft_cmd` | path to the sudo wrapper script |
 
 ## Events emitted
@@ -215,6 +216,8 @@ The wrapper path defaults to `plugin_dir / "nft_cmd"` and can be overridden with
 | `firewall.rule.deleted` | `{rule_id, name}` |
 | `firewall.compiled` | `{rule_count}` |
 | `firewall.applied` | `{rule_count, success}` |
+| `initsys.service.add` | emitted at `setup()` when `enable_os_boot: true` — registers `fastfirewall-nft` as a oneshot service running `nft -f <compiled.nft>` |
+| `initsys.service.remove` | emitted at `setup()` when `enable_os_boot: false` — removes the service if it exists |
 
 
 ## Testing

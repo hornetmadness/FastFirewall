@@ -30,3 +30,4 @@ config:
   cache_dir: /var/cache/apt-cacher-ng
   log_dir: /var/log/apt-cacher-ng
   ignore_state_on_boot: false
+  enable_os_boot: true

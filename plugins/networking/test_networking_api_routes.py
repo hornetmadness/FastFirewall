@@ -1320,3 +1320,76 @@ def test_macro_snapshot_omits_address_when_none(tmp_path):
     snap = plugin.macro_snapshot()
     assert "lan.address" not in snap["interface"]
     assert snap["interface"]["lan.name"] == "eth0"
+
+
+# ── os boot service ────────────────────────────────────────────────────────────
+
+def test_enable_os_boot_true_emits_service_add(tmp_path):
+    received = []
+    global_bus.subscribe("initsys.service.add", received.append)
+    try:
+        _make_plugin(tmp_path, config={"enable_os_boot": True})
+        assert len(received) == 1
+        p = received[0].payload
+        assert p["service_name"] == "fastfirewall-networking"
+        assert "ifstate.ifstate" in p["command"]
+        assert "ifstate.yaml" in p["command"]
+        assert p["service_type"] == "oneshot"
+        assert p["description"] == "FastFirewall networking config"
+    finally:
+        global_bus.unsubscribe("initsys.service.add", received.append)
+
+
+def test_enable_os_boot_false_emits_service_remove(tmp_path):
+    received = []
+    global_bus.subscribe("initsys.service.remove", received.append)
+    try:
+        _make_plugin(tmp_path, config={"enable_os_boot": False})
+        assert len(received) == 1
+        assert received[0].payload["service_name"] == "fastfirewall-networking"
+    finally:
+        global_bus.unsubscribe("initsys.service.remove", received.append)
+
+
+def test_enable_os_boot_true_command_uses_sys_executable(tmp_path):
+    received = []
+    global_bus.subscribe("initsys.service.add", received.append)
+    try:
+        _make_plugin(tmp_path, config={"enable_os_boot": True})
+        cmd = received[0].payload["command"]
+        assert "sudo" in cmd
+        assert sys.executable in cmd
+        assert "-m" in cmd
+        assert "ifstate.ifstate" in cmd
+    finally:
+        global_bus.unsubscribe("initsys.service.add", received.append)
+
+
+def test_run_ifstate_uses_sudo_and_sys_executable(tmp_path):
+    mod = _load_module()
+    plugin = mod.NetworkingPlugin()
+    plugin.plugin_id = "networking"
+    plugin.meta = {}
+    plugin.config = {}
+    plugin.plugin_dir = tmp_path
+    plugin.logger = logging.getLogger("test")
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        plugin._run_ifstate("show")
+    cmd = mock_run.call_args[0][0]
+    assert cmd[0] == "sudo"
+    assert cmd[1] == sys.executable
+    assert "-m" in cmd
+    assert "ifstate.ifstate" in cmd
+    assert cmd[-1] == "show"
+
+
+def test_enable_os_boot_default_false_emits_service_remove(tmp_path):
+    received = []
+    global_bus.subscribe("initsys.service.remove", received.append)
+    try:
+        _make_plugin(tmp_path)
+        assert len(received) == 1
+        assert received[0].payload["service_name"] == "fastfirewall-networking"
+    finally:
+        global_bus.unsubscribe("initsys.service.remove", received.append)

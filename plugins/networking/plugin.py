@@ -25,8 +25,8 @@ import ipaddress
 import json
 import os
 import re
-import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
@@ -216,6 +216,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             ))
         self.add_macro_namespace("interface", self._resolve_interface_macro)
         self._register_routes()
+        self._sync_os_boot_service()
 
     def teardown(self) -> None:
         self._save_state()
@@ -279,13 +280,18 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             "aliases": self._aliases,
         }))
 
+    @property
+    def _ifstate_config_path(self) -> Path:
+        return self.data_dir / "ifstate.yaml"
+
     def _apply_state(self) -> None:
         if not any([self._interfaces, self._routes]):
             return
         try:
             self.logger.info("Applying networking config on boot: %d interface(s), %d route(s)",
                              len(self._interfaces), len(self._routes))
-            config_path = self.plugin_dir / "data" / "ifstate.yaml"
+            config_path = self._ifstate_config_path
+            config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text(self._build_ifstate_yaml())
             result = self._run_ifstate("-c", str(config_path), "apply")
             if result.returncode == 0:
@@ -294,6 +300,21 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 self.logger.warning("Boot-time networking apply returned non-zero: %s", result.stderr.strip())
         except Exception as exc:
             self.logger.warning("Could not re-apply networking config on boot: %s", exc)
+
+    def _sync_os_boot_service(self) -> None:
+        service_name = "fastfirewall-networking"
+        if self.config.get("enable_os_boot", False):
+            bus.emit(Event("initsys.service.add", payload={
+                "service_name": service_name,
+                "command": f"sudo {sys.executable} -m ifstate.ifstate -c {self._ifstate_config_path} apply",
+                "working_dir": str(self.plugin_dir.parent.parent),
+                "description": "FastFirewall networking config",
+                "service_type": "oneshot",
+            }))
+        else:
+            bus.emit(Event("initsys.service.remove", payload={
+                "service_name": service_name,
+            }))
 
     def _import_state_from_system(self) -> None:
         """Populate interfaces and routes from the running kernel when state file is empty."""
@@ -372,21 +393,9 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
 
     # ── ifstate CLI wrapper ────────────────────────────────────────────
 
-    @staticmethod
-    def _find_uv() -> str:
-        """Return the uv binary path, falling back to ~/.local/bin/uv when not on PATH."""
-        uv = shutil.which("uv")
-        if uv:
-            return uv
-        home_uv = Path.home() / ".local/bin/uv"
-        if home_uv.is_file():
-            return str(home_uv)
-        return "uv"
-
     def _run_ifstate(self, *args: str) -> subprocess.CompletedProcess[str]:
-        uv = self._find_uv()
         return subprocess.run(
-            ["sudo", uv, "run", "ifstatecli", *args],
+            ["sudo", sys.executable, "-m", "ifstate.ifstate", *args],
             capture_output=True, text=True, timeout=30,
         )
 
@@ -444,6 +453,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             },
             "pending_changes": self._state_file.pending_changes,
             "state_file": str(self._state_file.path),
+            "config_file": str(self._ifstate_config_path),
         }
 
     # ── live state ─────────────────────────────────────────────────────
@@ -669,51 +679,38 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         desired = self._desired_snapshot()
         changes = _diff_state(self._state_file.current_snapshot or {}, desired)
         config_yaml = self._build_ifstate_yaml()
+        config_path = self._ifstate_config_path
         output: list[str] = []
         errors: list[str] = []
         success = True
-        tmp = None
-        try:
-            # Apply interfaces and routes via ifstatecli (only when there is
-            # something to apply — an empty YAML would still be a valid no-op,
-            # but skipping avoids a needless sudo round-trip).
-            if self._interfaces or self._routes:
-                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as fh:
-                    fh.write(config_yaml)
-                    tmp = fh.name
-                uv = self._find_uv()
-                if debug:
-                    self.logger.info("[debug] apply config: %s", tmp)
-                    self.logger.info("[debug] cmd: sudo %s run ifstatecli -c %s apply", uv, tmp)
-                result = self._run_ifstate("-c", tmp, "apply")
-                output = (result.stdout + result.stderr).strip().splitlines()
-                errors = [ln for ln in output if "fail" in ln.lower() or "error" in ln.lower()]
-                if debug:
-                    self.logger.info("[debug] returncode=%d", result.returncode)
-                    self.logger.info("[debug] output=%r", output)
-                success = result.returncode == 0
-
-            if success:
-                self._state_file.commit(desired)
-            bus.emit(Event(
-                name="networking.applied",
-                payload={"success": success, "returncode": 0 if success else 1},
-            ))
-            resp: dict[str, Any] = {"success": success, "returncode": 0 if success else 1, "changes": changes, "output": output}
-            if errors:
-                resp["errors"] = errors
+        # Apply interfaces and routes via ifstatecli (only when there is
+        # something to apply — an empty YAML would still be a valid no-op,
+        # but skipping avoids a needless sudo round-trip).
+        if self._interfaces or self._routes:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(config_yaml)
             if debug:
-                resp["debug"] = {"config_file": tmp, "output": output}
-            return resp
-        finally:
-            if tmp:
-                if debug:
-                    self.logger.info("[debug] temp config retained at: %s", tmp)
-                else:
-                    try:
-                        os.unlink(tmp)
-                    except OSError:
-                        pass
+                self.logger.info("[debug] apply config: %s", config_path)
+                self.logger.info("[debug] cmd: sudo ifstate_cmd -c %s apply", config_path)
+            result = self._run_ifstate("-c", str(config_path), "apply")
+            output = (result.stdout + result.stderr).strip().splitlines()
+            errors = [ln for ln in output if "fail" in ln.lower() or "error" in ln.lower()]
+            if debug:
+                self.logger.info("[debug] returncode=%d", result.returncode)
+                self.logger.info("[debug] output=%r", output)
+            success = result.returncode == 0
+        if success:
+            self._state_file.commit(desired)
+        bus.emit(Event(
+            name="networking.applied",
+            payload={"success": success, "returncode": 0 if success else 1},
+        ))
+        resp: dict[str, Any] = {"success": success, "returncode": 0 if success else 1, "changes": changes, "output": output}
+        if errors:
+            resp["errors"] = errors
+        if debug:
+            resp["debug"] = {"config_file": str(config_path), "output": output}
+        return resp
 
     def _discard(self) -> dict[str, Any]:
         current = self._state_file.current_snapshot

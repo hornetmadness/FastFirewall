@@ -76,7 +76,7 @@ Installs and manages apt-cacher-ng, a caching proxy for Debian/Ubuntu package do
 
 **`_write_conf_file(content)`** — writes the conf file via `_pyinfra_run` (requires `sudo`). Uses `files_ops.put` from `pyinfra.operations`.
 
-**`_reload_service()`** — runs `sudo systemctl reload-or-restart apt-cacher-ng`; raises `RuntimeError` on non-zero exit.
+**`_reload_service()`** — emits `initsys.service.restart` on the bus and inspects `results[0].get("success")`; raises `RuntimeError` if the host plugin reports failure.
 
 **`_pyinfra_run(op, **kwargs)`** — spawns `infra/pyinfra_worker.py` in a subprocess to avoid gevent/anyio event-loop conflicts with pyinfra. Shared with host and syslog plugins.
 
@@ -95,6 +95,9 @@ Installs and manages apt-cacher-ng, a caching proxy for Debian/Ubuntu package do
 | `apt_cacher_ng.config.updated` | `{keys: [changed field names]}` |
 | `apt_cacher_ng.cache.flushed` | `{cache_dir}` |
 | `apt_cacher_ng.service.reloaded` | `{}` |
+| `initsys.service.restart` | `{service_name: "apt-cacher-ng"}` — emitted by `_reload_service()` |
+| `initsys.service.add` | emitted at `setup()` when `enable_os_boot: true` |
+| `initsys.service.disable` | emitted at `setup()` when `enable_os_boot: false` |
 
 ## Config options (`plugin.yaml`)
 
@@ -104,17 +107,17 @@ Installs and manages apt-cacher-ng, a caching proxy for Debian/Ubuntu package do
 | `conf_file` | `/etc/apt-cacher-ng/acng.conf` | acng.conf path on disk |
 | `cache_dir` | `/var/cache/apt-cacher-ng` | package cache directory |
 | `log_dir` | `/var/log/apt-cacher-ng` | log directory |
-| `ignore_state_on_boot` | `false` | Skip `_apply_state()` on startup |
+| `ignore_state_on_boot` | `false` | skip `_apply_state()` on startup |
+| `enable_os_boot` | `false` | register (or disable) apt-cacher-ng as a boot-time managed service via `initsys.service.add` / `initsys.service.disable` |
 
 `skip_host_os_port_check: true` is set in `plugin.yaml` because apt-cacher-ng may already be running on port 3142 when the plugin loads.
 
 ## Testing
 
-Tests in `test_apt_cacher_ng_plugin.py`. No real apt-cacher-ng needed — `_pyinfra_run` and `_run_cmd` are replaced with `MagicMock` before `setup()` is called, and `ignore_state_on_boot: True` is set so no boot apply runs.
+Tests in `test_apt_cacher_ng_plugin.py`. No real apt-cacher-ng needed — `_pyinfra_run` is replaced with `MagicMock` before `setup()` is called, and `ignore_state_on_boot: True` is set so no boot apply runs. Service status is now fetched via `bus.emit(initsys.service.status)`, so tests that exercise `GET /status` should also mock the bus or patch `bus.emit` to return the expected status dict.
 
 ```python
 inst._pyinfra_run = MagicMock()
-inst._run_cmd = MagicMock(return_value=_proc(0))
 inst.config["ignore_state_on_boot"] = True
 inst.setup()
 ```

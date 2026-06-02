@@ -88,6 +88,7 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
             self._apply_state()
 
         self._register_routes()
+        self._sync_os_boot_service()
         self.logger.info(
             "Apt-Cacher-NG plugin loaded; conf=%s cache=%s",
             self._conf_file, self._cache_dir,
@@ -144,9 +145,15 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
         )
 
     def _reload_service(self) -> None:
-        proc = self._run_cmd(["sudo", "systemctl", "reload-or-restart", "apt-cacher-ng"])
-        if proc.returncode != 0:
-            raise RuntimeError(f"apt-cacher-ng reload failed: {proc.stderr.strip()}")
+        results = bus.emit(Event("initsys.service.restart", payload={"service_name": "apt-cacher-ng"}))
+        if not (results and results[0].get("success")):
+            raise RuntimeError("apt-cacher-ng reload failed; check server logs")
+
+    def _sync_os_boot_service(self) -> None:
+        if self.config.get("enable_os_boot", False):
+            bus.emit(Event("initsys.service.add", payload={"service_name": "apt-cacher-ng"}))
+        else:
+            bus.emit(Event("initsys.service.disable", payload={"service_name": "apt-cacher-ng"}))
 
     # ── proxy host resolution ─────────────────────────────────────────────────────
 
@@ -179,7 +186,8 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
     # ── route handlers ────────────────────────────────────────────────────────────
 
     def _status(self) -> dict:
-        proc = self._run_cmd(["systemctl", "is-active", "apt-cacher-ng"])
+        results = bus.emit(Event("initsys.service.status", payload={"service_name": "apt-cacher-ng"}))
+        svc_status = "active" if (results and results[0] and results[0].get("running")) else "inactive"
         live_port = _parse_acng_conf(self._conf_file).get("Port")
         state_port = self._state.get("acng_settings", {}).get("port")
         port = int(live_port or state_port or 3142)
@@ -190,7 +198,7 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
             "version": self.meta["version"],
             "conf_file": str(self._conf_file),
             "cache_dir": str(self._cache_dir),
-            "service": {"apt-cacher-ng": proc.stdout.strip() or "unknown"},
+            "service": {"apt-cacher-ng": svc_status},
             "proxy_url": proxy_url,
             "apt_proxy_conf": f'Acquire::http::proxy "{proxy_url}";',
             "managed_settings": len(self._state.get("acng_settings", {})),

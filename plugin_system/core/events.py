@@ -151,16 +151,18 @@ class EventBus:
             event.payload.setdefault("services", self.plugin_services[source_plugin])
         event.payload.setdefault("request_id", get_request_id())
 
-    def emit(self, event: Event) -> None:
+    def emit(self, event: Event) -> list[Any]:
         """Emit *event* to all matching subscribers.
 
-        Sync handlers run inline.  Async handlers are fire-and-forget: scheduled
-        as tasks when a loop is already running, or driven to completion via
-        ``asyncio.run`` otherwise.  Prefer ``emit_async`` in async contexts when
-        you need to await handler results.
+        Sync handlers run inline and their return values are collected into the
+        returned list.  Async handlers are fire-and-forget (no result collected).
+        Prefer ``emit_async`` in async contexts when you need to await handler
+        results.  Exceptions are caught and logged; failed handlers contribute
+        nothing to the result list.
         """
         self._inject_services(event)
         handlers = list(self._subscribers.get(event.name, [])) + list(self._wildcard)
+        results: list[Any] = []
         for handler in handlers:
             try:
                 result = handler(event)
@@ -171,20 +173,30 @@ class EventBus:
                     except RuntimeError:
                         # No running loop (e.g. called from a sync context outside asyncio).
                         asyncio.run(result)
+                else:
+                    results.append(result)
             except Exception:
                 logger.exception("Handler %s raised on event %s", handler.__qualname__, event.name)
+        return results
 
-    async def emit_async(self, event: Event) -> None:
-        """Emit *event* and await every handler before returning."""
+    async def emit_async(self, event: Event) -> list[Any]:
+        """Emit *event*, await every handler, and return all results.
+
+        Both sync and async handlers contribute their return value to the list.
+        Exceptions are caught and logged; failed handlers contribute nothing.
+        """
         self._inject_services(event)
         handlers = list(self._subscribers.get(event.name, [])) + list(self._wildcard)
+        results: list[Any] = []
         for handler in handlers:
             try:
                 result = handler(event)
                 if asyncio.iscoroutine(result):
-                    await result
+                    result = await result
+                results.append(result)
             except Exception:
                 logger.exception("Handler %s raised on event %s", handler.__qualname__, event.name)
+        return results
 
 
 # Module-level default bus – plugins import this directly

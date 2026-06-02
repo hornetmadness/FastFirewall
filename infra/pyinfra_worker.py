@@ -43,6 +43,8 @@ def _run_one(op_module: str, op_name: str, norm_kwargs: dict) -> tuple[bool, str
             with ctx_host.use(host):
                 op(**kwargs)
     run_ops(state)
+    if state.failed_hosts:
+        return False, f"{op_name} failed on local host"
     return True, None
 
 
