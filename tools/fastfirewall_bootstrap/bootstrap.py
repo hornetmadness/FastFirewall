@@ -954,7 +954,7 @@ def _gather_dhcp() -> dict[str, Any]:
 def _gather_firewall() -> dict[str, Any]:
     print("\n  -- Firewall --")
     lan_subnet = _prompt("LAN subnet to allow traffic from (CIDR)", "192.168.0.0/24")
-    allow_forward = _prompt_yn("Allow LAN forwarding (gateway mode)?", False)
+    allow_forward = _prompt_yn("Allow LAN forwarding (gateway mode)?", True)
     masquerade = False
     if allow_forward:
         masquerade = _prompt_yn("Enable WAN masquerade NAT (required for LAN internet access)?", True)
