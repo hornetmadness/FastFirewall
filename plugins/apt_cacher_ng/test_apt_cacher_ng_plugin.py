@@ -75,6 +75,7 @@ def _make_inst(tmp_path: Path, conf_content: str | None = None) -> Any:
     }
     inst._pyinfra_run = MagicMock()
     inst._run_cmd = MagicMock(return_value=_proc(0))
+    inst._reload_service = MagicMock()
     inst.setup()
     return inst
 
@@ -116,16 +117,20 @@ def test_status_includes_service_key(client):
     assert "apt-cacher-ng" in data["service"]
 
 
-def test_status_reflects_systemctl_active(ctx):
+def test_status_reflects_service_active(ctx):
     client, inst = ctx
-    inst._run_cmd.return_value = _proc(0, "active")
-    data = client.get("/v1/apt_cacher_ng/status").json()
-    assert data["service"]["apt-cacher-ng"] == "active"
+    handler = lambda e: {"service_name": "apt-cacher-ng", "running": True, "enabled": True, "init_system": "systemd"}
+    global_bus.subscribe("initsys.service.status", handler)
+    try:
+        data = client.get("/v1/apt_cacher_ng/status").json()
+        assert data["service"]["apt-cacher-ng"] == "active"
+    finally:
+        global_bus.unsubscribe("initsys.service.status", handler)
 
 
-def test_status_reflects_systemctl_inactive(ctx):
+def test_status_reflects_service_inactive(ctx):
     client, inst = ctx
-    inst._run_cmd.return_value = _proc(1, "inactive")
+    # No status handler registered → emit returns [] → "inactive"
     data = client.get("/v1/apt_cacher_ng/status").json()
     assert data["service"]["apt-cacher-ng"] == "inactive"
 
@@ -340,11 +345,7 @@ def test_update_config_writes_conf_file(ctx):
 def test_update_config_reloads_service(ctx):
     client, inst = ctx
     client.patch("/v1/apt_cacher_ng/config", json={"port": 3143})
-    reload_calls = [
-        c for c in inst._run_cmd.call_args_list
-        if "reload-or-restart" in str(c)
-    ]
-    assert reload_calls
+    inst._reload_service.assert_called()
 
 
 def test_update_config_returns_updated_keys(ctx):
@@ -375,25 +376,24 @@ def test_update_config_invalid_port_returns_422(ctx):
 
 def test_update_config_service_reload_failure_returns_500(ctx):
     client, inst = ctx
-    inst._run_cmd.return_value = _proc(1, "", "Failed to reload")
+    inst._reload_service.side_effect = RuntimeError("apt-cacher-ng reload failed")
     r = client.patch("/v1/apt_cacher_ng/config", json={"port": 3143})
     assert r.status_code == 500
 
 
 # ── config reload ─────────────────────────────────────────────────────────────────
 
-def test_reload_calls_systemctl(ctx):
+def test_reload_calls_service(ctx):
     client, inst = ctx
     r = client.post("/v1/apt_cacher_ng/config/reload")
     assert r.status_code == 200
     assert r.json()["reloaded"] is True
-    reload_calls = [c for c in inst._run_cmd.call_args_list if "reload-or-restart" in str(c)]
-    assert reload_calls
+    inst._reload_service.assert_called()
 
 
 def test_reload_failure_returns_500(ctx):
     client, inst = ctx
-    inst._run_cmd.return_value = _proc(1, "", "Unit not found")
+    inst._reload_service.side_effect = RuntimeError("Unit not found")
     r = client.post("/v1/apt_cacher_ng/config/reload")
     assert r.status_code == 500
 
@@ -616,3 +616,60 @@ def test_parse_acng_conf_missing_returns_empty(tmp_path):
     mod = _load_module()
     out = mod._parse_acng_conf(tmp_path / "missing.conf")
     assert out == {}
+
+
+# ── os boot service ────────────────────────────────────────────────────────────
+
+def _make_inst_boot(tmp_path: Path, enable_os_boot: bool) -> Any:
+    mod = _load_module()
+    inst = mod.AptCacherNgPlugin()
+    inst.plugin_id = "apt_cacher_ng"
+    inst.meta = {"name": "Apt-Cacher-NG Plugin", "version": "1.0.0", "description": "", "author": ""}
+    inst.plugin_dir = tmp_path
+    inst.logger = logging.getLogger("test.apt_cacher_ng")
+    inst.config = {
+        "state_file": "apt_cacher_ng_state.json",
+        "conf_file": str(tmp_path / "acng.conf"),
+        "cache_dir": str(tmp_path / "cache"),
+        "log_dir": str(tmp_path / "logs"),
+        "ignore_state_on_boot": True,
+        "enable_os_boot": enable_os_boot,
+    }
+    inst._pyinfra_run = MagicMock()
+    inst._run_cmd = MagicMock(return_value=_proc(0))
+    inst._reload_service = MagicMock()
+    inst.setup()
+    return inst
+
+
+def test_enable_os_boot_true_emits_service_add(tmp_path):
+    received = []
+    global_bus.subscribe("initsys.service.add", received.append)
+    try:
+        _make_inst_boot(tmp_path, enable_os_boot=True)
+        assert len(received) == 1
+        assert received[0].payload["service_name"] == "apt-cacher-ng"
+    finally:
+        global_bus.unsubscribe("initsys.service.add", received.append)
+
+
+def test_enable_os_boot_false_emits_service_disable(tmp_path):
+    received = []
+    global_bus.subscribe("initsys.service.disable", received.append)
+    try:
+        _make_inst_boot(tmp_path, enable_os_boot=False)
+        assert len(received) == 1
+        assert received[0].payload["service_name"] == "apt-cacher-ng"
+    finally:
+        global_bus.unsubscribe("initsys.service.disable", received.append)
+
+
+def test_enable_os_boot_default_false_emits_service_disable(tmp_path):
+    received = []
+    global_bus.subscribe("initsys.service.disable", received.append)
+    try:
+        _make_inst(tmp_path)  # enable_os_boot absent → defaults to False
+        assert len(received) == 1
+        assert received[0].payload["service_name"] == "apt-cacher-ng"
+    finally:
+        global_bus.unsubscribe("initsys.service.disable", received.append)

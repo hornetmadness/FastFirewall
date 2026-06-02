@@ -3220,3 +3220,66 @@ def test_src_address_macro_unresolved_skips_rule():
         assert expr is None
     finally:
         macro_registry.unregister_namespace("interface")
+
+
+# ---------------------------------------------------------------------------
+# OS boot service
+# ---------------------------------------------------------------------------
+
+def test_enable_os_boot_true_emits_service_add(tmp_path):
+    inst, mod = _make_inst(tmp_path, {"enable_os_boot": True})
+    inst._apply_nft_script = MagicMock()
+    received = []
+    global_bus.subscribe("initsys.service.add", received.append)
+    try:
+        with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+            inst.setup()
+        assert len(received) == 1
+        p = received[0].payload
+        assert p["service_name"] == "fastfirewall-nft"
+        assert "/usr/sbin/nft" in p["command"]
+        assert p["service_type"] == "oneshot"
+        assert p["description"] == "FastFirewall nftables rules"
+    finally:
+        global_bus.unsubscribe("initsys.service.add", received.append)
+
+
+def test_enable_os_boot_false_emits_service_remove(tmp_path):
+    inst, mod = _make_inst(tmp_path, {"enable_os_boot": False})
+    inst._apply_nft_script = MagicMock()
+    received = []
+    global_bus.subscribe("initsys.service.remove", received.append)
+    try:
+        with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+            inst.setup()
+        assert len(received) == 1
+        assert received[0].payload["service_name"] == "fastfirewall-nft"
+    finally:
+        global_bus.unsubscribe("initsys.service.remove", received.append)
+
+
+def test_enable_os_boot_default_false_emits_service_remove(tmp_path):
+    inst, mod = _make_inst(tmp_path)  # no enable_os_boot key — defaults to False
+    inst._apply_nft_script = MagicMock()
+    received = []
+    global_bus.subscribe("initsys.service.remove", received.append)
+    try:
+        with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+            inst.setup()
+        assert len(received) == 1
+        assert received[0].payload["service_name"] == "fastfirewall-nft"
+    finally:
+        global_bus.unsubscribe("initsys.service.remove", received.append)
+
+
+def test_enable_os_boot_command_contains_compiled_output_path(tmp_path):
+    inst, mod = _make_inst(tmp_path, {"enable_os_boot": True})
+    inst._apply_nft_script = MagicMock()
+    received = []
+    global_bus.subscribe("initsys.service.add", received.append)
+    try:
+        with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
+            inst.setup()
+        assert inst._compiled_output_path in received[0].payload["command"]
+    finally:
+        global_bus.unsubscribe("initsys.service.add", received.append)

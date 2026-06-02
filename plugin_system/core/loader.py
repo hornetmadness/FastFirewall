@@ -1027,9 +1027,9 @@ class PluginLoader:
         )
         if workspace_root is None:
             return
-        self.logger.info("Running uv sync --no-dev --frozen in %s", workspace_root)
+        self.logger.info("Running uv sync --all-packages --no-dev --frozen in %s", workspace_root)
         proc = subprocess.run(
-            [uv, "sync", "--no-dev", "--frozen"],
+            [uv, "sync", "--all-packages", "--no-dev", "--frozen", "--no-install-workspace"],
             capture_output=True,
             text=True,
             cwd=str(workspace_root),

@@ -27,4 +27,5 @@ service_ports:
 config:
   state_file: networking_state.json
   ignore_state_on_boot: false
+  enable_os_boot: true
   debug: true

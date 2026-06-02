@@ -17,6 +17,8 @@ dependencies = [
 fastfirewall-bootstrap = "fastfirewall_bootstrap.bootstrap:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
-sources = {"." = "fastfirewall_bootstrap"}
+packages = ["fastfirewall_bootstrap"]
 exclude = ["CLAUDE.md"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"bootstrap.py" = "fastfirewall_bootstrap/bootstrap.py"

@@ -136,10 +136,11 @@ uv run pytest plugins/firewall/test_firewall_api_routes.py
 uv run --with pyright pyright
 
 # Install dependencies (uses uv.lock)
-uv sync
+# --all-packages ensures plugin transitive deps (e.g. ifstate) are included
+uv sync --all-packages
 
 # Install with dev extras
-uv sync --extra dev
+uv sync --all-packages --extra dev
 
 # Build all workspace packages (wheels + sdists land in dist/)
 uv build --all-packages
@@ -296,13 +297,18 @@ Decorators also work on `PluginBase` instance methods.
 
 **Emitting:**
 ```python
-bus.emit(Event("firewall.rule.added", payload={"rule_id": rule.id}))
-await bus.emit_async(event)   # awaits async handlers; prefer in async contexts
+results = bus.emit(Event("firewall.rule.added", payload={"rule_id": rule.id}))
+results = await bus.emit_async(event)   # awaits async handlers; prefer in async contexts
 ```
 
-Only `name` and `payload` are constructor arguments. `source` and `timestamp` are set automatically by the bus — do not pass them.
+Both `emit()` and `emit_async()` return `list[Any]` — the collected return values of handlers that ran without error:
 
-`emit()` is fire-and-forget for async handlers (scheduled as a task on the running loop, or run via `asyncio.run` if no loop exists). `emit_async()` awaits each handler.
+- `emit()` collects results from **sync** handlers only; async handlers remain fire-and-forget (scheduled as a task or driven via `asyncio.run`)
+- `emit_async()` awaits every handler and collects results from both sync and async handlers
+
+This enables request/response patterns over the bus — for example, the host plugin returns `{"success": bool}` from `initsys.service.*` handlers, and callers inspect `results[0]` to know whether the operation succeeded.
+
+Only `name` and `payload` are constructor arguments. `source` and `timestamp` are set automatically by the bus — do not pass them.
 
 The bus auto-populates three fields on every event before dispatching to handlers:
 - `event.source` — `"<plugin_id>.<function_name>"` derived from the call stack; empty if called outside a plugin.

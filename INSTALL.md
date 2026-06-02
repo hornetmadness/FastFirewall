@@ -103,6 +103,22 @@ systemctl status fastfirewall
 
 Alternatively, run `fastfirewall-api` directly as the `fastfirewall` user to start the server in the foreground — useful for debugging or testing config changes before handing off to systemd.
 
+### Optional: Apply firewall and networking rules at OS boot
+
+By default, firewall rules and network interface config are applied by FastFirewall when it starts. If you want them active during early boot — before FastFirewall itself is up — enable the `enable_os_boot` flag in each plugin's `plugin.yaml`:
+
+```yaml
+# ~/.config/fastfirewall/plugins/firewall/plugin.yaml
+config:
+  enable_os_boot: true   # installs fastfirewall-nft.service (oneshot, runs at boot)
+
+# ~/.config/fastfirewall/plugins/networking/plugin.yaml
+config:
+  enable_os_boot: true   # installs fastfirewall-networking.service (oneshot, runs at boot)
+```
+
+Restart FastFirewall after editing — it registers the systemd units automatically on startup.
+
 ---
 
 ## 5. Bootstrap (Optional)
@@ -129,6 +145,26 @@ The saved JSON file can be replayed later to provision an identical machine:
 
 ```bash
 fastfirewall-bootstrap --apply ~/.config/fastfirewall/fw-init.json
+```
+
+---
+
+## From Source (Development)
+
+Clone the repo and install all workspace packages with dev extras:
+
+```bash
+git clone https://github.com/hornetmadness/FastFirewall.git
+cd FastFirewall
+uv sync --all-packages --extra dev
+```
+
+`--all-packages` is required — without it, transitive dependencies of workspace member plugins (e.g. `ifstate` from the networking plugin) are not installed and the dev environment is incomplete.
+
+Run the server from the repo root:
+
+```bash
+uv run python fastfirewall_app.py
 ```
 
 ---

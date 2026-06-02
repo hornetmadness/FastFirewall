@@ -278,14 +278,26 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         return "unknown"
 
     @staticmethod
-    def _systemd_unit(service_name: str, command: str, working_dir: Optional[str] = None) -> str:
+    def _systemd_unit(
+        service_name: str,
+        command: str,
+        working_dir: Optional[str] = None,
+        description: Optional[str] = None,
+        service_type: str = "simple",
+        environment: Optional[dict[str, str]] = None,
+    ) -> str:
         cfg = configparser.RawConfigParser()
         cfg.optionxform = lambda optionstr: optionstr  # preserve key case — systemd keys are CamelCase
-        cfg["Unit"] = {"Description": service_name, "After": "network.target"}
+        cfg["Unit"] = {"Description": description or service_name, "After": "network.target"}
         service: dict[str, str] = {}
         if working_dir:
             service["WorkingDirectory"] = working_dir
-        service |= {"ExecStart": command, "Restart": "on-failure", "RestartSec": "5"}
+        if environment:
+            service["Environment"] = " ".join(f'"{k}={v}"' for k, v in environment.items())
+        if service_type == "oneshot":
+            service |= {"Type": "oneshot", "ExecStart": command, "RemainAfterExit": "yes"}
+        else:
+            service |= {"ExecStart": command, "Restart": "on-failure", "RestartSec": "5"}
         cfg["Service"] = service
         cfg["Install"] = {"WantedBy": "multi-user.target"}
         buf = io.StringIO()
@@ -327,15 +339,23 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         )
 
     def _place_service_definition(
-        self, init_system: str, service_name: str, command: str, working_dir: Optional[str] = None
+        self,
+        init_system: str,
+        service_name: str,
+        command: str,
+        working_dir: Optional[str] = None,
+        description: Optional[str] = None,
+        service_type: str = "simple",
+        environment: Optional[dict[str, str]] = None,
     ) -> None:
         if init_system == "systemd":
             self._pyinfra_run(
                 files_ops.put,
                 name=f"Place {service_name}.service unit",
-                src=io.StringIO(self._systemd_unit(service_name, command, working_dir)),
+                src=io.StringIO(self._systemd_unit(service_name, command, working_dir, description, service_type, environment)),
                 dest=f"/etc/systemd/system/{service_name}.service",
                 mode="644",
+                _sudo=True,
             )
         elif init_system == "upstart":
             self._pyinfra_run(
@@ -344,6 +364,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 src=io.StringIO(self._upstart_conf(service_name, command, working_dir)),
                 dest=f"/etc/init/{service_name}.conf",
                 mode="644",
+                _sudo=True,
             )
         elif init_system == "sysvinit":
             self._pyinfra_run(
@@ -352,33 +373,41 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 src=io.StringIO(self._sysvinit_script(service_name, command, working_dir)),
                 dest=f"/etc/init.d/{service_name}",
                 mode="755",
+                _sudo=True,
             )
 
-    def _enable_service(self, init_system: str, service_name: str) -> None:
+    def _enable_service(self, init_system: str, service_name: str, service_type: str = "simple") -> None:
+        # Oneshot services run once at boot; don't start them during FastFirewall
+        # startup — the venv / config files they depend on may not exist yet.
+        start_now = service_type != "oneshot"
         if init_system == "systemd":
-            self._pyinfra_run(systemd_ops.daemon_reload, name="Reload systemd daemon")
+            self._pyinfra_run(systemd_ops.daemon_reload, name="Reload systemd daemon", _sudo=True)
+            subprocess.run(["sudo", "systemctl", "reset-failed", service_name],
+                           capture_output=True)
             self._pyinfra_run(
                 systemd_ops.service,
-                name=f"Enable and start {service_name}",
+                name=f"Enable {'and start ' if start_now else ''}{service_name}",
                 service=service_name,
-                running=True,
+                running=start_now,
                 enabled=True,
+                _sudo=True,
             )
         elif init_system == "upstart":
-            # upstart picks up start/stop from the conf file; just ensure it's running
             self._pyinfra_run(
                 server_ops.service,
-                name=f"Start {service_name}",
+                name=f"{'Start' if start_now else 'Enable'} {service_name}",
                 service=service_name,
-                running=True,
+                running=start_now,
+                _sudo=True,
             )
         else:  # sysvinit
             self._pyinfra_run(
                 server_ops.service,
-                name=f"Enable and start {service_name}",
+                name=f"Enable {'and start ' if start_now else ''}{service_name}",
                 service=service_name,
-                running=True,
+                running=start_now,
                 enabled=True,
+                _sudo=True,
             )
 
     def _run_init_script(self, init_cfg: dict[str, Any]) -> None:
@@ -441,6 +470,209 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         self._state["sysctl"][key] = {"value": value, "persist": persist}
         self._save_state()
         self._emit("host.sysctl.changed", {"key": key, "value": value, "persist": persist})
+
+    @on("initsys.service.add")
+    def _handle_service_add(self, event: Event) -> dict[str, bool]:
+        service_name: Optional[str] = event.payload.get("service_name")
+        if not service_name:
+            self.logger.warning(
+                "initsys.service.add event missing 'service_name': %r", event.payload
+            )
+            return {"success": False}
+        command: Optional[str] = event.payload.get("command") or None
+        working_dir: Optional[str] = event.payload.get("working_dir") or None
+        description: Optional[str] = event.payload.get("description") or None
+        service_type: str = event.payload.get("service_type", "simple")
+        environment: Optional[dict[str, str]] = event.payload.get("environment") or None
+
+        init_system = self._detect_init_system()
+        if init_system == "unknown":
+            self.logger.warning(
+                "initsys.service.add: no supported init system detected, skipping %r", service_name
+            )
+            return {"success": False}
+
+        status = self._get_service_status(init_system, service_name)
+        if status.get("exists") and status.get("enabled"):
+            self.logger.debug("initsys.service.add: %r already installed and enabled, skipping", service_name)
+            return {"success": True}
+
+        self.logger.info("initsys.service.add: %s %r via %s",
+                         "registering" if command else "enabling", service_name, init_system)
+        try:
+            if command:
+                self._place_service_definition(init_system, service_name, command, working_dir, description, service_type, environment)
+            self._enable_service(init_system, service_name, service_type=service_type)
+            return {"success": True}
+        except Exception:
+            self.logger.error(
+                "initsys.service.add: failed to register service %r", service_name, exc_info=True
+            )
+            return {"success": False}
+
+    def _get_service_status(self, init_system: str, service_name: str) -> dict[str, bool | None]:
+        if init_system == "systemd":
+            active_rc = subprocess.run(
+                ["systemctl", "is-active", service_name], capture_output=True
+            ).returncode
+            enabled_rc = subprocess.run(
+                ["systemctl", "is-enabled", service_name], capture_output=True
+            ).returncode
+            # is-enabled rc=4 means the unit file is not known to systemd at all
+            exists = enabled_rc != 4
+            running = active_rc == 0
+            enabled: bool | None = (enabled_rc == 0) if exists else None
+        elif init_system == "upstart":
+            result = subprocess.run(
+                ["initctl", "status", service_name], capture_output=True, text=True
+            )
+            exists = result.returncode != 1
+            running = "running" in result.stdout
+            enabled = None
+        else:  # sysvinit
+            active_rc = subprocess.run(
+                ["service", service_name, "status"], capture_output=True
+            ).returncode
+            exists = active_rc != 4
+            running = active_rc == 0
+            enabled = None
+        return {"running": running, "enabled": enabled, "exists": exists}
+
+    def _extract_service_name(self, event: Event, event_name: str) -> Optional[str]:
+        service_name: Optional[str] = event.payload.get("service_name")
+        if not service_name:
+            self.logger.warning("%s event missing 'service_name': %r", event_name, event.payload)
+        return service_name
+
+    @on("initsys.service.status")
+    def _handle_service_status(self, event: Event) -> dict[str, Any] | None:
+        service_name = self._extract_service_name(event, "initsys.service.status")
+        if not service_name:
+            return None
+        init_system = self._detect_init_system()
+        if init_system == "unknown":
+            self.logger.warning("initsys.service.status: no supported init system detected, skipping %r", service_name)
+            return None
+        status = self._get_service_status(init_system, service_name)
+        return {
+            "service_name": service_name,
+            "running": status["running"],
+            "enabled": status["enabled"],
+            "init_system": init_system,
+        }
+
+    @on("initsys.service.start")
+    def _handle_service_start(self, event: Event) -> dict[str, bool]:
+        service_name = self._extract_service_name(event, "initsys.service.start")
+        if not service_name:
+            return {"success": False}
+        init_system = self._detect_init_system()
+        if init_system == "unknown":
+            self.logger.warning("initsys.service.start: no supported init system detected, skipping %r", service_name)
+            return {"success": False}
+        status = self._get_service_status(init_system, service_name)
+        if status["running"] is True:
+            self.logger.debug("initsys.service.start: %r already running, skipping", service_name)
+            return {"success": True}
+        try:
+            if init_system == "systemd":
+                self._pyinfra_run(systemd_ops.service, name=f"Start {service_name}", service=service_name, running=True, _sudo=True)
+            else:
+                self._pyinfra_run(server_ops.service, name=f"Start {service_name}", service=service_name, running=True, _sudo=True)
+            return {"success": True}
+        except Exception:
+            self.logger.error("initsys.service.start: failed to start %r", service_name, exc_info=True)
+            return {"success": False}
+
+    @on("initsys.service.stop")
+    def _handle_service_stop(self, event: Event) -> dict[str, bool]:
+        service_name = self._extract_service_name(event, "initsys.service.stop")
+        if not service_name:
+            return {"success": False}
+        init_system = self._detect_init_system()
+        if init_system == "unknown":
+            self.logger.warning("initsys.service.stop: no supported init system detected, skipping %r", service_name)
+            return {"success": False}
+        status = self._get_service_status(init_system, service_name)
+        if status["running"] is False:
+            self.logger.debug("initsys.service.stop: %r already stopped, skipping", service_name)
+            return {"success": True}
+        try:
+            if init_system == "systemd":
+                self._pyinfra_run(systemd_ops.service, name=f"Stop {service_name}", service=service_name, running=False, _sudo=True)
+            else:
+                self._pyinfra_run(server_ops.service, name=f"Stop {service_name}", service=service_name, running=False, _sudo=True)
+            return {"success": True}
+        except Exception:
+            self.logger.error("initsys.service.stop: failed to stop %r", service_name, exc_info=True)
+            return {"success": False}
+
+    @on("initsys.service.restart")
+    def _handle_service_restart(self, event: Event) -> dict[str, bool]:
+        service_name = self._extract_service_name(event, "initsys.service.restart")
+        if not service_name:
+            return {"success": False}
+        init_system = self._detect_init_system()
+        if init_system == "unknown":
+            self.logger.warning("initsys.service.restart: no supported init system detected, skipping %r", service_name)
+            return {"success": False}
+        try:
+            if init_system == "systemd":
+                self._pyinfra_run(systemd_ops.service, name=f"Restart {service_name}", service=service_name, restarted=True, _sudo=True)
+            else:
+                self._pyinfra_run(server_ops.service, name=f"Restart {service_name}", service=service_name, restarted=True, _sudo=True)
+            return {"success": True}
+        except Exception:
+            self.logger.error("initsys.service.restart: failed to restart %r", service_name, exc_info=True)
+            return {"success": False}
+
+    @on("initsys.service.disable")
+    def _handle_service_disable(self, event: Event) -> dict[str, bool]:
+        service_name = self._extract_service_name(event, "initsys.service.disable")
+        if not service_name:
+            return {"success": False}
+        init_system = self._detect_init_system()
+        if init_system == "unknown":
+            self.logger.warning("initsys.service.disable: no supported init system detected, skipping %r", service_name)
+            return {"success": False}
+        status = self._get_service_status(init_system, service_name)
+        if status["running"] is False and status["enabled"] is False:
+            self.logger.debug("initsys.service.disable: %r already stopped and disabled, skipping", service_name)
+            return {"success": True}
+        try:
+            if init_system == "systemd":
+                self._pyinfra_run(systemd_ops.service, name=f"Disable {service_name}", service=service_name, running=False, enabled=False, _sudo=True)
+            else:
+                self._pyinfra_run(server_ops.service, name=f"Disable {service_name}", service=service_name, running=False, enabled=False, _sudo=True)
+            return {"success": True}
+        except Exception:
+            self.logger.error("initsys.service.disable: failed to disable %r", service_name, exc_info=True)
+            return {"success": False}
+
+    @on("initsys.service.remove")
+    def _handle_service_remove(self, event: Event) -> dict[str, bool]:
+        service_name = self._extract_service_name(event, "initsys.service.remove")
+        if not service_name:
+            return {"success": False}
+        init_system = self._detect_init_system()
+        if init_system == "unknown":
+            self.logger.warning("initsys.service.remove: no supported init system detected, skipping %r", service_name)
+            return {"success": False}
+        try:
+            if init_system == "systemd":
+                self._pyinfra_run(systemd_ops.service, name=f"Stop and disable {service_name}", service=service_name, running=False, enabled=False, _sudo=True)
+                self._pyinfra_run(files_ops.file, name=f"Remove {service_name} unit file", path=f"/etc/systemd/system/{service_name}.service", present=False, _sudo=True)
+                self._pyinfra_run(systemd_ops.daemon_reload, name="Reload systemd daemon", _sudo=True)
+            elif init_system == "upstart":
+                self._pyinfra_run(server_ops.service, name=f"Stop {service_name}", service=service_name, running=False, _sudo=True)
+                self._pyinfra_run(files_ops.file, name=f"Remove {service_name} upstart conf", path=f"/etc/init/{service_name}.conf", present=False, _sudo=True)
+            else:  # sysvinit
+                self._pyinfra_run(server_ops.service, name=f"Stop {service_name}", service=service_name, running=False, _sudo=True)
+                self._pyinfra_run(files_ops.file, name=f"Remove {service_name} init script", path=f"/etc/init.d/{service_name}", present=False, _sudo=True)
+            return {"success": True}
+        except Exception:
+            self.logger.error("initsys.service.remove: failed to remove %r", service_name, exc_info=True)
+            return {"success": False}
 
     # ── route registration ─────────────────────────────────────────────────────
 

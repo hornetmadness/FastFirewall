@@ -97,6 +97,7 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin,
         if not self.config.get("ignore_state_on_boot", False):
             self._apply_state()
         self._register_routes()
+        self._sync_os_boot_service()
         self.logger.info(
             "DNSMasq plugin loaded: %d DNS record(s), %d DHCP range(s), %d blocklist(s)",
             len(self._records), len(self._dhcp_ranges), len(self._blocklists),
@@ -156,8 +157,9 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin,
 
         if (self._read_on_disk(config_path) == config_content
                 and self._read_on_disk(blocklist_path) == blocklist_content):
-            active = self._run_systemctl("is-active")
-            if active.returncode == 0:
+            results = bus.emit(Event("initsys.service.status", payload={"service_name": "dnsmasq"}))
+            is_active = bool(results and results[0] and results[0].get("running"))
+            if is_active:
                 self.logger.info("Boot-time config check: on-disk config matches desired and dnsmasq is active, skipping restart")
                 return
             self.logger.info("Boot-time config check: on-disk config matches desired but dnsmasq is not active, restarting")
@@ -180,15 +182,11 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin,
                 self._ensure_lease_file(self.config.get("dhcp", {}).get("lease_file", "/var/lib/dnsmasq/dnsmasq.leases"))
             if self._pxe.get("enabled"):
                 self._mkdir(self.config.get("pxe", {}).get("data_dir", "/srv/tftp"))
-            result = self._run_systemctl("restart")
-            if result.returncode == 0:
+            if self._restart_dnsmasq():
                 self._state_file.commit(self._desired_snapshot())
                 self.logger.info("Boot-time config updated and dnsmasq restarted")
             else:
-                self.logger.warning(
-                    "Boot-time dnsmasq restart failed: %s",
-                    (result.stdout + result.stderr).strip(),
-                )
+                self.logger.warning("Boot-time dnsmasq restart failed")
         except Exception as exc:
             self.logger.warning("Could not re-apply dnsmasq config on boot: %s", exc)
         finally:
@@ -220,11 +218,15 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin,
             capture_output=True, text=True, timeout=15,
         )
 
-    def _run_systemctl(self, action: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["sudo", "systemctl", action, "dnsmasq"],
-            capture_output=True, text=True, timeout=30,
-        )
+    def _sync_os_boot_service(self) -> None:
+        if self.config.get("enable_os_boot", False):
+            bus.emit(Event("initsys.service.add", payload={"service_name": "dnsmasq"}))
+        else:
+            bus.emit(Event("initsys.service.disable", payload={"service_name": "dnsmasq"}))
+
+    def _restart_dnsmasq(self) -> bool:
+        results = bus.emit(Event("initsys.service.restart", payload={"service_name": "dnsmasq"}))
+        return bool(results and results[0].get("success"))
 
     def _write_file_sudo(self, path: str, content: str) -> None:
         owner = str(os.getuid())
@@ -375,21 +377,18 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin,
                 self._ensure_lease_file(self.config.get("dhcp", {}).get("lease_file", "/var/lib/dnsmasq/dnsmasq.leases"))
             if self._pxe.get("enabled"):
                 self._mkdir(self.config.get("pxe", {}).get("data_dir", "/srv/tftp"))
-            restart_result = self._run_systemctl("restart")
-            output = (restart_result.stdout + restart_result.stderr).strip()
+            success = self._restart_dnsmasq()
             if debug:
-                self.logger.info("[debug] systemctl restart returncode=%d output=%r", restart_result.returncode, output)
-            success = restart_result.returncode == 0
+                self.logger.info("[debug] initsys.service.restart dispatched, success=%s", success)
             if success:
                 self._state_file.commit(desired)
             bus.emit(Event("dnsmasq.applied",
-                           payload={"success": success, "returncode": restart_result.returncode}))
+                           payload={"success": success, "returncode": 0 if success else 1}))
             resp: dict[str, Any] = {
                 "success": success,
-                "returncode": restart_result.returncode,
+                "returncode": 0 if success else 1,
                 "config_path": config_path,
                 "blocklist_path": blocklist_path,
-                "output": output or None,
             }
             if debug:
                 resp["debug"] = {"config_file": tmp_conf, "test_output": test_output}

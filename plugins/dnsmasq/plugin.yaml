@@ -53,4 +53,5 @@ config:
   pxe:
     data_dir: /srv/tftp
   ignore_state_on_boot: false
+  enable_os_boot: true
   debug: false

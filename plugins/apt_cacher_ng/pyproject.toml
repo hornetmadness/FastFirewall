@@ -19,9 +19,12 @@ apt_cacher_ng = "fastfirewall_plugin_apt_cacher_ng"
 fastfirewall-core = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
-sources = {"." = "fastfirewall_plugin_apt_cacher_ng"}
+packages = ["fastfirewall_plugin_apt_cacher_ng"]
 exclude = ["data", "test_*.py", "CLAUDE.md", "*_state.json"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"plugin.py" = "fastfirewall_plugin_apt_cacher_ng/plugin.py"
+"plugin.yaml" = "fastfirewall_plugin_apt_cacher_ng/plugin.yaml"
 
 [tool.hatch.build.targets.sdist]
 exclude = ["data", "test_*.py", "CLAUDE.md", "*_state.json"]

@@ -47,6 +47,30 @@ def test_unsubscribe_unknown_handler_is_noop(bus):
     bus.unsubscribe("x", lambda e: None)  # different object — should not raise
 
 
+def test_emit_returns_sync_handler_results(bus):
+    bus.subscribe("evt", lambda e: "hello")
+    bus.subscribe("evt", lambda e: 42)
+    results = bus.emit(Event("evt"))
+    assert results == ["hello", 42]
+
+
+def test_emit_excludes_failed_handlers_from_results(bus):
+    def bad(e):
+        raise RuntimeError("boom")
+    bus.subscribe("evt", bad)
+    bus.subscribe("evt", lambda e: "ok")
+    results = bus.emit(Event("evt"))
+    assert results == ["ok"]
+
+
+def test_emit_async_handler_not_included_in_emit_results(bus):
+    async def async_handler(e):
+        return "async"
+    bus.subscribe("evt", async_handler)
+    results = bus.emit(Event("evt"))
+    assert results == []
+
+
 def test_emit_swallows_handler_exception(bus):
     def bad(e):
         raise RuntimeError("boom")
@@ -116,6 +140,17 @@ async def test_emit_async_calls_sync_handler(bus):
     bus.subscribe("sync.evt", lambda e: received.append(e.name))
     await bus.emit_async(Event("sync.evt"))
     assert received == ["sync.evt"]
+
+
+@pytest.mark.asyncio
+async def test_emit_async_returns_results(bus):
+    bus.subscribe("evt", lambda e: "sync")
+
+    async def async_h(e):
+        return "async"
+    bus.subscribe("evt", async_h)
+    results = await bus.emit_async(Event("evt"))
+    assert results == ["sync", "async"]
 
 
 @pytest.mark.asyncio

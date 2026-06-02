@@ -20,6 +20,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from plugin_system.core.events import bus as global_bus
+
 PLUGIN_PY = Path(__file__).parent / "plugin.py"
 _PROJECT_ROOT = str(PLUGIN_PY.parent.parent.parent)
 _PKG_NAME = "plugins.dnsmasq"
@@ -635,7 +637,7 @@ def test_apply_success(plugin, tmp_path):
     client = _make_client(plugin)
     plugin._run_dnsmasq_test = MagicMock(return_value=_ok())
     plugin._write_file_sudo = MagicMock()
-    plugin._run_systemctl = MagicMock(return_value=_ok(stdout=""))
+    plugin._restart_dnsmasq = MagicMock(return_value=True)
 
     client.put("/v1/dnsmasq/dns", json={"log_queries": True})
     r = client.post("/v1/dnsmasq/apply")
@@ -656,11 +658,11 @@ def test_apply_validation_failure(plugin):
     assert "bad option" in data["details"]
 
 
-def test_apply_systemctl_failure(plugin):
+def test_apply_restart_failure(plugin):
     client = _make_client(plugin)
     plugin._run_dnsmasq_test = MagicMock(return_value=_ok())
     plugin._write_file_sudo = MagicMock()
-    plugin._run_systemctl = MagicMock(return_value=_ok(returncode=1, stderr="failed to restart"))
+    plugin._restart_dnsmasq = MagicMock(return_value=False)
 
     r = client.post("/v1/dnsmasq/apply")
     assert r.status_code == 200
@@ -700,7 +702,7 @@ def test_discard_reverts_to_applied_state(plugin):
     client = _make_client(plugin)
     plugin._run_dnsmasq_test = MagicMock(return_value=_ok())
     plugin._write_file_sudo = MagicMock()
-    plugin._run_systemctl = MagicMock(return_value=_ok(stdout=""))
+    plugin._restart_dnsmasq = MagicMock(return_value=True)
 
     client.post("/v1/dnsmasq/apply")
     client.put("/v1/dnsmasq/dns", json={"upstream": ["9.9.9.9"]})
@@ -718,13 +720,13 @@ def test_apply_state_restarts_when_on_disk_config_differs(tmp_path):
     p.config["ignore_state_on_boot"] = False
     p._run_dnsmasq_test = MagicMock(return_value=_ok())
     p._write_file_sudo = MagicMock()
-    p._run_systemctl = MagicMock(return_value=_ok(stdout=""))
+    p._restart_dnsmasq = MagicMock(return_value=True)
     p._mkdir = MagicMock(return_value=True)
     p._ensure_lease_file = MagicMock()
     # on-disk config doesn't exist → differs from desired → should restart
     p._read_on_disk = MagicMock(return_value=None)
     p.setup()
-    p._run_systemctl.assert_called_once_with("restart")
+    p._restart_dnsmasq.assert_called_once()
 
 
 def test_apply_state_skipped_when_on_disk_config_matches(tmp_path):
@@ -732,22 +734,25 @@ def test_apply_state_skipped_when_on_disk_config_matches(tmp_path):
     p.config["ignore_state_on_boot"] = False
     p._run_dnsmasq_test = MagicMock(return_value=_ok())
     p._write_file_sudo = MagicMock()
-    # is-active returns 0 (service is running) so restart is skipped
-    p._run_systemctl = MagicMock(return_value=_ok(stdout="active"))
-    # Simulate on-disk config matching desired exactly
-    p._read_on_disk = MagicMock(side_effect=lambda path: p._build_config() if "ff-managed" in path else p._build_blocklist_config())
-    p.setup()
-    calls = [c.args[0] for c in p._run_systemctl.call_args_list]
-    assert calls == ["is-active"], f"Expected only is-active check, got: {calls}"
+    p._restart_dnsmasq = MagicMock(return_value=True)
+    # Register a handler that returns running=True so the status check sees dnsmasq as active
+    status_handler = lambda e: {"service_name": "dnsmasq", "running": True, "enabled": True, "init_system": "systemd"}
+    global_bus.subscribe("initsys.service.status", status_handler)
+    try:
+        p._read_on_disk = MagicMock(side_effect=lambda path: p._build_config() if "ff-managed" in path else p._build_blocklist_config())
+        p.setup()
+    finally:
+        global_bus.unsubscribe("initsys.service.status", status_handler)
+    p._restart_dnsmasq.assert_not_called()
     p._write_file_sudo.assert_not_called()
 
 
 def test_ignore_state_on_boot_skips_apply(tmp_path):
     p = _make_plugin(tmp_path, config={"ignore_state_on_boot": True})
-    p._run_systemctl = MagicMock()
+    p._restart_dnsmasq = MagicMock()
     p._read_on_disk = MagicMock(return_value=None)
     p.setup()
-    p._run_systemctl.assert_not_called()
+    p._restart_dnsmasq.assert_not_called()
 
 
 # ── state persistence across restarts ─────────────────────────────────────────
@@ -763,3 +768,38 @@ def test_state_persists_across_reload(tmp_path):
     r = c2.get("/v1/dnsmasq/dns")
     assert r.json()["domain"] == "corp.local"
     assert c2.get("/v1/dnsmasq/dns/records").json()["count"] == 1
+
+
+# ── os boot service ────────────────────────────────────────────────────────────
+
+def test_enable_os_boot_true_emits_service_add(tmp_path):
+    received = []
+    global_bus.subscribe("initsys.service.add", received.append)
+    try:
+        _make_plugin(tmp_path, config={"enable_os_boot": True})
+        assert len(received) == 1
+        assert received[0].payload["service_name"] == "dnsmasq"
+    finally:
+        global_bus.unsubscribe("initsys.service.add", received.append)
+
+
+def test_enable_os_boot_false_emits_service_disable(tmp_path):
+    received = []
+    global_bus.subscribe("initsys.service.disable", received.append)
+    try:
+        _make_plugin(tmp_path, config={"enable_os_boot": False})
+        assert len(received) == 1
+        assert received[0].payload["service_name"] == "dnsmasq"
+    finally:
+        global_bus.unsubscribe("initsys.service.disable", received.append)
+
+
+def test_enable_os_boot_default_false_emits_service_disable(tmp_path):
+    received = []
+    global_bus.subscribe("initsys.service.disable", received.append)
+    try:
+        _make_plugin(tmp_path)
+        assert len(received) == 1
+        assert received[0].payload["service_name"] == "dnsmasq"
+    finally:
+        global_bus.unsubscribe("initsys.service.disable", received.append)
