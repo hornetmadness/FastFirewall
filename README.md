@@ -259,11 +259,13 @@ Supported plugins and their registered services:
 | Plugin | Service name | What it applies |
 |---|---|---|
 | `firewall` | `fastfirewall-nft` | Compiled `.nft` ruleset via `nft -f` |
-| `networking` | `fastfirewall-networking` | Interface config via `ifstate apply` |
+| `networking` | `fastfirewall-networking` | Interface config via `ifstate apply` — see warning below |
 | `dnsmasq` | `dnsmasq` | Ensures dnsmasq is enabled for boot |
 | `apt_cacher_ng` | `apt-cacher-ng` | Ensures apt-cacher-ng is enabled for boot |
 
 The registration or removal happens automatically each time FastFirewall starts — setting the flag and restarting FastFirewall is all that's needed.
+
+> **Warning — non-reversible change for the networking plugin:** When `enable_os_boot: true` is set, the networking plugin stops and disables every service listed in `disable_os_managers` in `plugins/networking/plugin.yaml` (by default: `NetworkManager`, `networking`, `systemd-networkd`). This lets ifstate fully own interface bring-up at boot. **FastFirewall will not re-enable those services if you later set `enable_os_boot` back to `false`.** To restore a previous network manager run `sudo systemctl enable --now <service>` manually. Review `disable_os_managers` and remove any entries that should remain running before enabling this flag.
 
 ### API error responses
 

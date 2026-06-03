@@ -206,6 +206,10 @@ def make_cfg(dest: Path, cfg) -> None:
             import shutil as _shutil
             _shutil.copy2(src_yaml, dest_yaml)
             created.append(dest_yaml)
+        data_dir = dest / "plugins" / ep.name / "data"
+        if not data_dir.exists():
+            data_dir.mkdir(parents=True, exist_ok=True)
+            created.append(data_dir)
 
     if created:
         print("Created:")

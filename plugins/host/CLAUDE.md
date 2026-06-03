@@ -97,7 +97,7 @@ Groups store their member list in the state file:
 
 **`_read_system_services()`** — reads live running service state via `systemctl`/`initctl`/`/etc/init.d` depending on the detected init system. Returns `{name: {running, enabled}}`.
 
-**`_systemd_unit(service_name, command, working_dir, description, service_type, environment)`** — builds a systemd unit file string. `service_type` may be `"simple"` (default; includes `Restart=on-failure`) or `"oneshot"` (includes `Type=oneshot` and `RemainAfterExit=yes`, no restart). `environment` is an optional `dict[str, str]` written as `Environment=` directives.
+**`_systemd_unit(service_name, command, working_dir, description, service_type, environment, after, before, wanted_by)`** — builds a systemd unit file string. `service_type` may be `"simple"` (default; includes `Restart=on-failure`) or `"oneshot"` (includes `Type=oneshot` and `RemainAfterExit=yes`, no restart). `environment` is an optional `dict[str, str]` written as `Environment=` directives. `after` defaults to `"network.target"`; `before` is optional and omitted when `None`; `wanted_by` defaults to `["multi-user.target"]` and is joined with a space in the `WantedBy=` line.
 
 **`_enable_service(init_system, service_name, service_type)`** — enables the service and starts it, except for `service_type="oneshot"` where it enables only (the unit runs at next boot rather than being started immediately by FF to avoid ordering issues).
 
@@ -160,7 +160,7 @@ The package index is cached for `os_pkgmgr_max_cache_ttl_secs` seconds (default 
 | Event | Payload | Action | Return value |
 |---|---|---|---|
 | `host.sysctl.set` | `{key, value, persist=true}` | Applies the sysctl via pyinfra (`server_ops.sysctl`), saves it to managed state, and emits `host.sysctl.changed`. Any plugin may emit this instead of calling `sysctl` directly. On failure, logs the error and leaves state unchanged. | — |
-| `initsys.service.add` | `{service_name, command?, working_dir?, description?, service_type?, environment?}` | Detects the init system, writes a unit file (systemd/upstart/sysvinit), and enables the service. Skips silently if the service already exists and is enabled. `service_type` defaults to `"simple"`; pass `"oneshot"` for run-once-at-boot services (they are enabled but not started immediately). `environment` is `dict[str, str]` of env vars injected into the unit. | `{"success": bool}` |
+| `initsys.service.add` | `{service_name, command?, working_dir?, description?, service_type?, environment?, after?, before?, wanted_by?}` | Detects the init system, writes a unit file (systemd/upstart/sysvinit), and enables the service. Skips silently if the service already exists and is enabled. `service_type` defaults to `"simple"`; pass `"oneshot"` for run-once-at-boot services (they are enabled but not started immediately). `environment` is `dict[str, str]` of env vars injected into the unit. `after` defaults to `"network.target"`; `before` adds a `Before=` directive when set; `wanted_by` is a list of targets for `WantedBy=` (defaults to `["multi-user.target"]`). | `{"success": bool}` |
 | `initsys.service.remove` | `{service_name}` | Stops and disables the service, removes its unit file, and reloads the daemon. | `{"success": bool}` |
 | `initsys.service.disable` | `{service_name}` | Disables the service without removing its unit file. | `{"success": bool}` |
 | `initsys.service.restart` | `{service_name}` | Restarts the named service. | `{"success": bool}` |

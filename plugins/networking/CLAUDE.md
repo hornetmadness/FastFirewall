@@ -64,7 +64,7 @@ Additional routes: `GET /status`, `GET /interfaces`, `GET /interfaces/{name}`, `
 
 **`_run_ifstate(*args)`** — runs `sudo sys.executable -m ifstate.ifstate <args>` as a subprocess (uses the same Python interpreter that is running FastFirewall, avoiding `uv` path lookup issues).
 
-**`_sync_os_boot_service()`** — called from `setup()`; emits `initsys.service.add` (oneshot) when `enable_os_boot` is `true`, or `initsys.service.remove` when `false`. The registered service runs `sudo python -m ifstate.ifstate -c <config_path> apply` at OS boot.
+**`_sync_os_boot_service()`** — called from `setup()`; emits `initsys.service.add` (oneshot) when `enable_os_boot` is `true`, or `initsys.service.remove` when `false`. The registered service runs `sudo python -m ifstate.ifstate -c <config_path> apply` at OS boot. The emitted payload includes `after="network-pre.target"`, `before="network-online.target"`, and `wanted_by=["multi-user.target", "network-online.target"]` so ifstate participates in systemd's network-online synchronisation point without depending on the distro network manager.
 
 **`_resolve_interface_macro(*segments)`** — resolver for the `interface` macro namespace. `segments[0]` is the alias name, `segments[1]` is the field:
 
@@ -117,7 +117,8 @@ At `setup()` time the plugin emits one of these to the host plugin's `initsys` h
 
 | Event | When |
 |---|---|
-| `initsys.service.add` | `enable_os_boot: true` — registers `fastfirewall-networking` as a oneshot systemd service |
+| `initsys.service.disable` | `enable_os_boot: true` — one event per entry in `disable_os_managers`; stops and disables each competing network manager |
+| `initsys.service.add` | `enable_os_boot: true` — registers `fastfirewall-networking` as a oneshot systemd service with `After=network-pre.target`, `Before=network-online.target`, `WantedBy=multi-user.target network-online.target` |
 | `initsys.service.remove` | `enable_os_boot: false` — removes the service if it exists |
 
 ## Events consumed
@@ -132,7 +133,8 @@ At `setup()` time the plugin emits one of these to the host plugin's `initsys` h
 |---|---|---|
 | `state_file` | `networking_state.json` | filename inside `data/` |
 | `ignore_state_on_boot` | `false` | skip `_apply_state()` / `_import_state_from_system()` on startup |
-| `enable_os_boot` | `false` | register (or remove) a oneshot systemd service that applies networking config at OS boot, before FastFirewall starts |
+| `enable_os_boot` | `false` | register (or remove) a oneshot systemd service that applies networking config at OS boot, before FastFirewall starts. **Non-reversible:** enabling this disables the services in `disable_os_managers`; FastFirewall will not re-enable them if the flag is later set back to `false`. To restore, run `sudo systemctl enable --now <service>` manually. |
+| `disable_os_managers` | `[NetworkManager, networking, systemd-networkd]` | Systemd service names to stop and disable when `enable_os_boot` is `true`. Each entry triggers an `initsys.service.disable` event before the ifstate service is registered. Has no effect while `enable_os_boot` is `false`. |
 | `debug` | `false` | log the config path and command; include `debug` key in `POST /apply` response |
 
 ## Testing

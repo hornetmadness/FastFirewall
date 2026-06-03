@@ -27,5 +27,13 @@ service_ports:
 config:
   state_file: networking_state.json
   ignore_state_on_boot: false
-  enable_os_boot: true
+  enable_os_boot: false
   debug: true
+  # List of systemd service names to stop and disable when enable_os_boot is true.
+  # Enabling os_boot is non-reversible: FastFirewall will not re-enable these services
+  # if enable_os_boot is later set back to false. To restore, manually run:
+  #   sudo systemctl enable --now <service>
+  disable_os_managers:
+    - NetworkManager
+    - networking
+    - systemd-networkd
