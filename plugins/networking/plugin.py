@@ -310,7 +310,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                     self.logger.warning("Could not disable competing network manager %r", mgr)
             bus.emit(Event("initsys.service.add", payload={
                 "service_name": service_name,
-                "command": f"sudo {sys.executable} -m ifstate.ifstate -c {self._ifstate_config_path} apply",
+                "command": f"sudo {sys.executable} -B -m ifstate.ifstate -c {self._ifstate_config_path} apply",
                 "working_dir": str(self.plugin_dir.parent.parent),
                 "description": "FastFirewall networking config",
                 "service_type": "oneshot",
@@ -402,7 +402,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
 
     def _run_ifstate(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["sudo", sys.executable, "-m", "ifstate.ifstate", *args],
+            ["sudo", sys.executable, "-B", "-m", "ifstate.ifstate", *args],
             capture_output=True, text=True, timeout=30,
         )
 
