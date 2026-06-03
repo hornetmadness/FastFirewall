@@ -1408,6 +1408,7 @@ def test_enable_os_boot_true_command_uses_sys_executable(tmp_path):
         cmd = received[0].payload["command"]
         assert "sudo" in cmd
         assert sys.executable in cmd
+        assert "-B" in cmd
         assert "-m" in cmd
         assert "ifstate.ifstate" in cmd
     finally:
@@ -1428,6 +1429,7 @@ def test_run_ifstate_uses_sudo_and_sys_executable(tmp_path):
     cmd = mock_run.call_args[0][0]
     assert cmd[0] == "sudo"
     assert cmd[1] == sys.executable
+    assert cmd[2] == "-B"
     assert "-m" in cmd
     assert "ifstate.ifstate" in cmd
     assert cmd[-1] == "show"
