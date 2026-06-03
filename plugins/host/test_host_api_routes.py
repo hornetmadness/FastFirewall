@@ -899,6 +899,46 @@ def test_systemd_unit_default_description_is_service_name():
     assert "Description=ff-nft" in unit
 
 
+def test_systemd_unit_default_after_is_network_target():
+    mod = _load_plugin_module()
+    unit = mod.HostPlugin._systemd_unit("ff-nft", "/usr/sbin/nft -f /data/fastfirewall.nft")
+    assert "After=network.target" in unit
+
+
+def test_systemd_unit_custom_after():
+    mod = _load_plugin_module()
+    unit = mod.HostPlugin._systemd_unit("ff-nft", "/usr/sbin/nft -f /data/fastfirewall.nft", after="network-pre.target")
+    assert "After=network-pre.target" in unit
+    assert "After=network.target" not in unit
+
+
+def test_systemd_unit_before():
+    mod = _load_plugin_module()
+    unit = mod.HostPlugin._systemd_unit("ff-nft", "/usr/sbin/nft -f /data/fastfirewall.nft", before="network-online.target")
+    assert "Before=network-online.target" in unit
+
+
+def test_systemd_unit_no_before_omits_line():
+    mod = _load_plugin_module()
+    unit = mod.HostPlugin._systemd_unit("ff-nft", "/usr/sbin/nft -f /data/fastfirewall.nft")
+    assert "Before=" not in unit
+
+
+def test_systemd_unit_wanted_by_default():
+    mod = _load_plugin_module()
+    unit = mod.HostPlugin._systemd_unit("ff-nft", "/usr/sbin/nft -f /data/fastfirewall.nft")
+    assert "WantedBy=multi-user.target" in unit
+
+
+def test_systemd_unit_wanted_by_multi():
+    mod = _load_plugin_module()
+    unit = mod.HostPlugin._systemd_unit(
+        "ff-nft", "/usr/sbin/nft -f /data/fastfirewall.nft",
+        wanted_by=["multi-user.target", "network-online.target"],
+    )
+    assert "WantedBy=multi-user.target network-online.target" in unit
+
+
 def test_service_add_event_places_and_enables(tmp_path):
     from pyinfra.operations import files as files_ops, systemd as systemd_ops
     plugin, mod = _init_plugin(tmp_path, {})
@@ -961,6 +1001,32 @@ def test_service_add_event_oneshot_unit_content(tmp_path):
     assert "RemainAfterExit=yes" in unit
     assert "Description=FastFirewall nftables rules" in unit
     assert "Restart" not in unit
+
+
+def test_service_add_event_forwards_ordering_fields(tmp_path):
+    from pyinfra.operations import files as files_ops
+    plugin, mod = _init_plugin(tmp_path, {})
+    with patch.object(mod.HostPlugin, "_detect_init_system", return_value="systemd"):
+        plugin.setup()
+    plugin._pyinfra_run.reset_mock()
+
+    with patch.object(mod.HostPlugin, "_detect_init_system", return_value="systemd"), \
+         patch.object(mod.HostPlugin, "_get_service_status", _mock_status(False, None, exists=False)):
+        event = Event("initsys.service.add", payload={
+            "service_name": "ff-networking",
+            "command": "sudo python -m ifstate.ifstate apply",
+            "service_type": "oneshot",
+            "after": "network-pre.target",
+            "before": "network-online.target",
+            "wanted_by": ["multi-user.target", "network-online.target"],
+        })
+        plugin._handle_service_add(event)
+
+    put_call = next(c for c in plugin._pyinfra_run.call_args_list if c[0][0] is files_ops.put)
+    unit = put_call[1]["src"].getvalue()
+    assert "After=network-pre.target" in unit
+    assert "Before=network-online.target" in unit
+    assert "WantedBy=multi-user.target network-online.target" in unit
 
 
 def test_service_add_event_no_command_enables_without_placing_unit(tmp_path):

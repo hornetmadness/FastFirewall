@@ -1340,6 +1340,55 @@ def test_enable_os_boot_true_emits_service_add(tmp_path):
         global_bus.unsubscribe("initsys.service.add", received.append)
 
 
+def test_enable_os_boot_true_service_add_ordering_fields(tmp_path):
+    received = []
+    global_bus.subscribe("initsys.service.add", received.append)
+    try:
+        _make_plugin(tmp_path, config={"enable_os_boot": True})
+        assert len(received) == 1
+        p = received[0].payload
+        assert p["after"] == "network-pre.target"
+        assert p["before"] == "network-online.target"
+        assert p["wanted_by"] == ["multi-user.target", "network-online.target"]
+    finally:
+        global_bus.unsubscribe("initsys.service.add", received.append)
+
+
+def test_enable_os_boot_disables_configured_managers(tmp_path):
+    disable_events = []
+    global_bus.subscribe("initsys.service.disable", disable_events.append)
+    try:
+        _make_plugin(tmp_path, config={
+            "enable_os_boot": True,
+            "disable_os_managers": ["NetworkManager", "networking"],
+        })
+        names = [e.payload["service_name"] for e in disable_events]
+        assert "NetworkManager" in names
+        assert "networking" in names
+    finally:
+        global_bus.unsubscribe("initsys.service.disable", disable_events.append)
+
+
+def test_enable_os_boot_false_emits_no_disable_events(tmp_path):
+    disable_events = []
+    global_bus.subscribe("initsys.service.disable", disable_events.append)
+    try:
+        _make_plugin(tmp_path, config={"enable_os_boot": False, "disable_os_managers": ["NetworkManager"]})
+        assert disable_events == []
+    finally:
+        global_bus.unsubscribe("initsys.service.disable", disable_events.append)
+
+
+def test_enable_os_boot_empty_managers_list_emits_no_disable_events(tmp_path):
+    disable_events = []
+    global_bus.subscribe("initsys.service.disable", disable_events.append)
+    try:
+        _make_plugin(tmp_path, config={"enable_os_boot": True, "disable_os_managers": []})
+        assert disable_events == []
+    finally:
+        global_bus.unsubscribe("initsys.service.disable", disable_events.append)
+
+
 def test_enable_os_boot_false_emits_service_remove(tmp_path):
     received = []
     global_bus.subscribe("initsys.service.remove", received.append)

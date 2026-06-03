@@ -981,8 +981,11 @@ def test_scan_dir_yaml_only_falls_back_to_installed_module(tmp_path, loader):
     assert "alpha" in loader.plugins
 
 
-def test_scan_dir_yaml_only_plugin_dir_points_to_installed_package(tmp_path, loader):
-    """plugin_dir follows module_path.parent so resources in the package are found."""
+def test_scan_dir_yaml_only_plugin_dir_points_to_scan_dir(tmp_path, loader):
+    """plugin_dir is the yaml directory (scan_dir), not the installed package directory.
+
+    This ensures data/ and config files land next to plugin.yaml, not inside the venv.
+    """
     installed_dir = tmp_path / "installed" / "alpha"
     installed_dir.mkdir(parents=True)
     (installed_dir / "plugin.yaml").write_text(
@@ -1005,7 +1008,7 @@ def test_scan_dir_yaml_only_plugin_dir_points_to_installed_package(tmp_path, loa
     with patch.object(loader, "_find_installed_module", return_value=installed_module):
         loader.load_directory(scan_dir)
 
-    assert loader.plugins["alpha"].instance.plugin_dir == installed_dir.resolve()
+    assert loader.plugins["alpha"].instance.plugin_dir == (scan_dir / "alpha").resolve()
 
 
 def test_plugin_dir_equals_module_parent_for_normal_load(tmp_path, loader):

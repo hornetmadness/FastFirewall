@@ -285,10 +285,16 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         description: Optional[str] = None,
         service_type: str = "simple",
         environment: Optional[dict[str, str]] = None,
+        after: str = "network.target",
+        before: Optional[str] = None,
+        wanted_by: Optional[list[str]] = None,
     ) -> str:
         cfg = configparser.RawConfigParser()
         cfg.optionxform = lambda optionstr: optionstr  # preserve key case — systemd keys are CamelCase
-        cfg["Unit"] = {"Description": description or service_name, "After": "network.target"}
+        unit: dict[str, str] = {"Description": description or service_name, "After": after}
+        if before:
+            unit["Before"] = before
+        cfg["Unit"] = unit
         service: dict[str, str] = {}
         if working_dir:
             service["WorkingDirectory"] = working_dir
@@ -299,7 +305,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         else:
             service |= {"ExecStart": command, "Restart": "on-failure", "RestartSec": "5"}
         cfg["Service"] = service
-        cfg["Install"] = {"WantedBy": "multi-user.target"}
+        cfg["Install"] = {"WantedBy": " ".join(wanted_by or ["multi-user.target"])}
         buf = io.StringIO()
         cfg.write(buf, space_around_delimiters=False)
         return buf.getvalue()
@@ -347,12 +353,15 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         description: Optional[str] = None,
         service_type: str = "simple",
         environment: Optional[dict[str, str]] = None,
+        after: str = "network.target",
+        before: Optional[str] = None,
+        wanted_by: Optional[list[str]] = None,
     ) -> None:
         if init_system == "systemd":
             self._pyinfra_run(
                 files_ops.put,
                 name=f"Place {service_name}.service unit",
-                src=io.StringIO(self._systemd_unit(service_name, command, working_dir, description, service_type, environment)),
+                src=io.StringIO(self._systemd_unit(service_name, command, working_dir, description, service_type, environment, after, before, wanted_by)),
                 dest=f"/etc/systemd/system/{service_name}.service",
                 mode="644",
                 _sudo=True,
@@ -484,6 +493,9 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         description: Optional[str] = event.payload.get("description") or None
         service_type: str = event.payload.get("service_type", "simple")
         environment: Optional[dict[str, str]] = event.payload.get("environment") or None
+        after: str = event.payload.get("after", "network.target")
+        before: Optional[str] = event.payload.get("before") or None
+        wanted_by: Optional[list[str]] = event.payload.get("wanted_by") or None
 
         init_system = self._detect_init_system()
         if init_system == "unknown":
@@ -501,7 +513,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                          "registering" if command else "enabling", service_name, init_system)
         try:
             if command:
-                self._place_service_definition(init_system, service_name, command, working_dir, description, service_type, environment)
+                self._place_service_definition(init_system, service_name, command, working_dir, description, service_type, environment, after, before, wanted_by)
             self._enable_service(init_system, service_name, service_type=service_type)
             return {"success": True}
         except Exception:

@@ -304,12 +304,19 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
     def _sync_os_boot_service(self) -> None:
         service_name = "fastfirewall-networking"
         if self.config.get("enable_os_boot", False):
+            for mgr in self.config.get("disable_os_managers", []):
+                results = bus.emit(Event("initsys.service.disable", payload={"service_name": mgr}))
+                if not results or not (results[0] or {}).get("success"):
+                    self.logger.warning("Could not disable competing network manager %r", mgr)
             bus.emit(Event("initsys.service.add", payload={
                 "service_name": service_name,
                 "command": f"sudo {sys.executable} -m ifstate.ifstate -c {self._ifstate_config_path} apply",
                 "working_dir": str(self.plugin_dir.parent.parent),
                 "description": "FastFirewall networking config",
                 "service_type": "oneshot",
+                "after": "network-pre.target",
+                "before": "network-online.target",
+                "wanted_by": ["multi-user.target", "network-online.target"],
             }))
         else:
             bus.emit(Event("initsys.service.remove", payload={

@@ -63,7 +63,9 @@ class PluginStateFile:
         dev / filesystem plugins).
         """
         base = data_dir if data_dir is not None else (plugin_dir / "data")
-        return cls(base / config.get(key, default_filename), logger, mutation_model=mutation_model)
+        path = base / config.get(key, default_filename)
+        (logger or _log).debug("State file resolved to %s", path)
+        return cls(path, logger, mutation_model=mutation_model)
 
     @property
     def path(self) -> Path:
@@ -95,10 +97,12 @@ class PluginStateFile:
         on the first mutation.
         """
         if not self._path.exists():
+            self._log.debug("State file %s not found — initialising with defaults", self._path)
             self._desired = default
             self._current = default if self._mutation_model == "immediate" else None
             self._flush()
             return default
+        self._log.debug("Loading state from %s", self._path)
         raw = self.load(default={})
         self._current = raw.get("current_state")
         self._macro_snapshot = raw.get("macro_snapshot")

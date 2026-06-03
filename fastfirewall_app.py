@@ -188,6 +188,13 @@ for scan_dir in cfg.plugins_scan_dirs():
         loader.load_directory(scan_dir, only=only_plugins, skip_requirements=show_macros, data_dir=data_dir)
 
 # 3. Installed package entry points (fills in anything not found on the filesystem)
+# If data_dir is not configured, derive a default from scan_dirs so installed packages
+# write state to the same location as filesystem-discovered plugins would (e.g.
+# ~/.config/fastfirewall/plugins/<plugin_id>/data/).  Falls back to plugins_dir if
+# scan_dirs is not configured.
+if not data_dir:
+    _scan_dirs = cfg.plugins_scan_dirs()
+    data_dir = _scan_dirs[0] if _scan_dirs else plugins_dir
 loader.load_installed(only=only_plugins, skip_requirements=show_macros, data_dir=data_dir)
 macro_registry.register_service_port("fastfirewall-api", "tcp", [cfg.server.port])
 loader.finished()

@@ -677,22 +677,26 @@ class PluginLoader:
                 errored.append((pid, str(exc)))
                 failed.add(pid)
 
-        total = len(loaded) + len(errored) + len(disabled)
-        res = f"Plugin loading complete: {len(loaded)}/{total} loaded, {len(errored)} errored, {len(disabled)} disabled"
-        if len(errored) > 0:
-            self.logger.error(res)
-        else:
-            self.logger.info(res)
+        # Skip the summary entirely when this pass produced no actionable output
+        # (e.g. load_installed found nothing new — disabled entries were already
+        # reported by load_directory).
+        if loaded or errored:
+            total = len(loaded) + len(errored) + len(disabled)
+            res = f"Plugin loading complete [{source}]: {len(loaded)}/{total} loaded, {len(errored)} errored, {len(disabled)} disabled"
+            if errored:
+                self.logger.error(res)
+            else:
+                self.logger.info(res)
 
-        if loaded:
-            self.logger.info("  Loaded:   %s", ", ".join(loaded))
-        if errored:
-            self.logger.warning(
-                "  Errored:  %s",
-                ", ".join(f"{pid} ({msg})" for pid, msg in errored),
-            )
-        if disabled:
-            self.logger.info("  Disabled: %s", ", ".join(sorted(disabled)))
+            if loaded:
+                self.logger.info("  Loaded:   %s", ", ".join(loaded))
+            if errored:
+                self.logger.warning(
+                    "  Errored:  %s",
+                    ", ".join(f"{pid} ({msg})" for pid, msg in errored),
+                )
+            if disabled:
+                self.logger.info("  Disabled: %s", ", ".join(sorted(disabled)))
 
         # Accumulate loaded ids and rebuild the full service_ports snapshot
         # across every plugin loaded so far (both filesystem and installed).
@@ -781,9 +785,9 @@ class PluginLoader:
             module_path = self._find_installed_module(plugin_id)
             if module_path is None:
                 raise PluginError(f"Missing {MODULE_FILENAME} in {path}")
-            self.logger.debug("Plugin %r: using installed module from %s", plugin_id, module_path.parent)
+            self.logger.debug("Plugin %r: code (plugin.py) from installed package at %s", plugin_id, module_path.parent)
 
-        self.logger.debug("Plugin %r found in %s", plugin_id, path)
+        self.logger.debug("Plugin %r: config (plugin.yaml) from %s", plugin_id, path)
 
         config: dict[str, Any] = dict(raw.get("config", {}) or {})
         if self.ignore_state_on_boot:
@@ -817,10 +821,10 @@ class PluginLoader:
                 instance.plugin_id = plugin_id
                 instance.meta = meta
                 instance.config = config
-                instance.plugin_dir = module_path.parent.resolve()
+                instance.plugin_dir = path.resolve()
                 instance.logger = self.logger.getChild(plugin_id)
                 if data_dir is not None:
-                    instance._data_dir = data_dir / plugin_id
+                    instance._data_dir = data_dir / plugin_id / "data"
                 break
 
         # --- resolve and check service claims from the class ----------

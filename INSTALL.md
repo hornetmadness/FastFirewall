@@ -117,6 +117,12 @@ config:
   enable_os_boot: true   # installs fastfirewall-networking.service (oneshot, runs at boot)
 ```
 
+> **Warning — non-reversible change for the networking plugin:** Setting `enable_os_boot: true` in the networking plugin stops and disables every service listed in `disable_os_managers` (by default: `NetworkManager`, `networking`, `systemd-networkd`). FastFirewall will **not** re-enable those services if you later set the flag back to `false`. To restore the original network manager you must manually run:
+> ```bash
+> sudo systemctl enable --now NetworkManager   # or networking / systemd-networkd
+> ```
+> Review `disable_os_managers` in `plugins/networking/plugin.yaml` before enabling and remove any entries that should remain running on your system.
+
 Restart FastFirewall after editing — it registers the systemd units automatically on startup.
 
 ---
