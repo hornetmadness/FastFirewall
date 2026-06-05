@@ -722,8 +722,15 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
 
     # ── networkd file writer / pruner ──────────────────────────────────
 
+    @property
+    def _networkd_staging_dir(self) -> Path:
+        return self.data_dir / "networkd"
+
     def _write_networkd_files(self, files: dict[str, str]) -> None:
+        staging = self._networkd_staging_dir
+        staging.mkdir(parents=True, exist_ok=True)
         for filename, content in files.items():
+            (staging / filename).write_text(content)
             dest = f"/etc/systemd/network/{filename}"
             mode = "644"
             group: str | None = None
@@ -735,7 +742,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                     group = "systemd-network"
             kwargs: dict[str, Any] = dict(
                 name=f"Write {filename}",
-                src=io.StringIO(content),
+                src=str(staging / filename),
                 dest=dest,
                 mode=mode,
                 _sudo=True,
@@ -745,26 +752,20 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             self._pyinfra_run(files_ops.put, **kwargs)
 
     def _prune_networkd_files(self, active_names: set[str]) -> None:
-        result = subprocess.run(
-            ["sudo", "find", "/etc/systemd/network", "-maxdepth", "1",
-             "-name", "10-ff-*", "-type", "f"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
+        staging = self._networkd_staging_dir
+        if not staging.exists():
             return
-        for filepath in result.stdout.splitlines():
-            filepath = filepath.strip()
-            if not filepath:
-                continue
-            filename = Path(filepath).name
+        for local_path in staging.glob("10-ff-*"):
+            filename = local_path.name
             for suffix in (".network", ".netdev"):
                 if filename.endswith(suffix):
                     iface_name = filename[len("10-ff-"):-len(suffix)]
                     if iface_name not in active_names:
+                        local_path.unlink(missing_ok=True)
                         try:
                             self._pyinfra_run(
                                 files_ops.file,
-                                path=filepath,
+                                path=f"/etc/systemd/network/{filename}",
                                 present=False,
                                 _sudo=True,
                             )
@@ -971,6 +972,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             "state_file": str(self._state_file.path),
             "networkd_dir": "/etc/systemd/network",
             "networkd_prefix": "10-ff-",
+            "networkd_staging_dir": str(self._networkd_staging_dir),
         }
 
     # ── live state ─────────────────────────────────────────────────────

@@ -156,6 +156,7 @@ def test_status_has_networkd_dir(client):
     data = client.get("/v1/networking/status").json()
     assert data["networkd_dir"] == "/etc/systemd/network"
     assert data["networkd_prefix"] == "10-ff-"
+    assert "networkd_staging_dir" in data
 
 
 # ── live state (ip addr show) ──────────────────────────────────────────────────
@@ -782,12 +783,30 @@ def test_apply_writes_networkd_file_with_correct_content(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["192.168.1.1/24"]})
     with patch("subprocess.run", side_effect=_subprocess_run_ok):
         client.post("/v1/networking/apply")
-    # Find the put call for eth0
     put_calls = [
         c for c in plugin._pyinfra_run.call_args_list
         if c.kwargs.get("dest") == "/etc/systemd/network/10-ff-eth0.network"
     ]
     assert len(put_calls) == 1
+    # Local staging file written
+    staging = plugin._networkd_staging_dir / "10-ff-eth0.network"
+    assert staging.exists()
+    assert "Address=192.168.1.1/24" in staging.read_text()
+
+
+def test_apply_staging_file_src_is_local_path(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
+    put_calls = [
+        c for c in plugin._pyinfra_run.call_args_list
+        if c.kwargs.get("dest") == "/etc/systemd/network/10-ff-eth0.network"
+    ]
+    assert len(put_calls) == 1
+    # src must be a filesystem path, not StringIO
+    src = put_calls[0].kwargs["src"]
+    assert isinstance(src, str)
+    assert src.endswith("10-ff-eth0.network")
 
 
 def test_apply_skips_networkd_when_no_interfaces_or_routes(plugin, client):
