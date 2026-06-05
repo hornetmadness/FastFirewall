@@ -10,6 +10,7 @@ import importlib.util
 import json
 import logging
 import sys
+import types
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -25,6 +26,7 @@ if _REPO_ROOT not in sys.path:
 from plugin_system.core.events import bus as global_bus
 
 PLUGIN_PY = Path(__file__).parent / "plugin.py"
+_PKG_NAME = "plugins.networking"
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -32,12 +34,22 @@ PLUGIN_PY = Path(__file__).parent / "plugin.py"
 def _load_module():
     if _REPO_ROOT not in sys.path:
         sys.path.insert(0, _REPO_ROOT)
-    name = "_test_networking"
-    sys.modules.pop(name, None)
-    spec = importlib.util.spec_from_file_location(name, PLUGIN_PY)
+    # Register package stub so relative imports (from .libs.x) resolve
+    if _PKG_NAME not in sys.modules:
+        pkg = types.ModuleType(_PKG_NAME)
+        pkg.__path__ = [str(PLUGIN_PY.parent)]  # type: ignore[attr-defined]
+        pkg.__package__ = _PKG_NAME
+        sys.modules[_PKG_NAME] = pkg
+    # Clear libs submodules so each load gets a fresh plugin module tree
+    for key in list(sys.modules.keys()):
+        if key.startswith(f"{_PKG_NAME}."):
+            del sys.modules[key]
+    mod_name = f"{_PKG_NAME}.plugin"
+    spec = importlib.util.spec_from_file_location(mod_name, PLUGIN_PY)
     assert spec is not None
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
+    mod.__package__ = _PKG_NAME
+    sys.modules[mod_name] = mod
     assert spec.loader is not None
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
     return mod
@@ -241,13 +253,13 @@ def test_identify_reads_perm_hwaddr(plugin, client, tmp_path):
     eth0_dir.mkdir(parents=True)
     (eth0_dir / "perm_hwaddr").write_text("aa:bb:cc:dd:ee:ff\n")
 
-    mod = sys.modules["_test_networking"]
-    original = getattr(mod, "_SYS_NET_DIR")
-    setattr(mod, "_SYS_NET_DIR", net_dir)
+    live_mod = sys.modules[f"{_PKG_NAME}.libs.live"]
+    original = getattr(live_mod, "_SYS_NET_DIR")
+    setattr(live_mod, "_SYS_NET_DIR", net_dir)
     try:
         r = client.get("/v1/networking/identify")
     finally:
-        setattr(mod, "_SYS_NET_DIR", original)
+        setattr(live_mod, "_SYS_NET_DIR", original)
 
     assert r.status_code == 200
     assert r.json() == {"eth0": {"perm_address": "aa:bb:cc:dd:ee:ff"}}
@@ -259,26 +271,26 @@ def test_identify_falls_back_to_address(plugin, client, tmp_path):
     eth0_dir.mkdir(parents=True)
     (eth0_dir / "address").write_text("11:22:33:44:55:66\n")
 
-    mod = sys.modules["_test_networking"]
-    original = getattr(mod, "_SYS_NET_DIR")
-    setattr(mod, "_SYS_NET_DIR", net_dir)
+    live_mod = sys.modules[f"{_PKG_NAME}.libs.live"]
+    original = getattr(live_mod, "_SYS_NET_DIR")
+    setattr(live_mod, "_SYS_NET_DIR", net_dir)
     try:
         r = client.get("/v1/networking/identify")
     finally:
-        setattr(mod, "_SYS_NET_DIR", original)
+        setattr(live_mod, "_SYS_NET_DIR", original)
 
     assert r.status_code == 200
     assert r.json()["eth0"]["perm_address"] == "11:22:33:44:55:66"
 
 
 def test_identify_500_on_os_error(plugin, client):
-    mod = sys.modules["_test_networking"]
-    original = getattr(mod, "_SYS_NET_DIR")
-    setattr(mod, "_SYS_NET_DIR", Path("/nonexistent/path"))
+    live_mod = sys.modules[f"{_PKG_NAME}.libs.live"]
+    original = getattr(live_mod, "_SYS_NET_DIR")
+    setattr(live_mod, "_SYS_NET_DIR", Path("/nonexistent/path"))
     try:
         r = client.get("/v1/networking/identify")
     finally:
-        setattr(mod, "_SYS_NET_DIR", original)
+        setattr(live_mod, "_SYS_NET_DIR", original)
     assert r.status_code == 500
 
 
