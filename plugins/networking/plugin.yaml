@@ -2,7 +2,7 @@ name: Networking Plugin
 id: networking
 version: "1.0.0"
 description: >
-  Manages network interfaces and routes declaratively via ifstate (ifstatecli).
+  Manages network interfaces and routes declaratively via systemd-networkd.
   Desired state is stored locally and pushed to the running kernel with
   POST /apply.  Routes mount at /v1/networking/.
 author: hornetmadness@gmail.com
@@ -12,7 +12,8 @@ enabled: true
 plugin_requirements: ["host"]
 os_requirements:
   - mtr
-  - isc-dhcp-client
+  - wpasupplicant
+  - wireguard-tools
 
 service_ports:
   networking:
@@ -28,13 +29,12 @@ service_ports:
 config:
   state_file: networking_state.json
   ignore_state_on_boot: false
-  enable_os_boot: false
+  use_systemd_networkd: false
   debug: true
-  # List of systemd service names to stop and disable when enable_os_boot is true.
-  # Enabling os_boot is non-reversible: FastFirewall will not re-enable these services
-  # if enable_os_boot is later set back to false. To restore, manually run:
+  # List of systemd service names to stop and disable when use_systemd_networkd is true.
+  # This is non-reversible: FastFirewall will not re-enable these services
+  # if use_systemd_networkd is later set back to false. To restore, manually run:
   #   sudo systemctl enable --now <service>
   disable_os_managers:
     - NetworkManager
     - networking
-    - systemd-networkd

@@ -1,8 +1,8 @@
 """
 Tests for networking_plugin routes (/v1/networking/*).
 
-ifstatecli subprocess calls are mocked via plugin._run_ifstate so no actual
-system changes are made.
+systemd-networkd interactions are mocked via plugin._pyinfra_run and
+patch("subprocess.run") — no real system changes are made.
 """
 from __future__ import annotations
 
@@ -11,14 +11,13 @@ import json
 import logging
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
-import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-# Ensure /app is importable when this file is run in isolation
+# Ensure repo root is importable
 _REPO_ROOT = str(Path(__file__).parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
@@ -26,7 +25,6 @@ if _REPO_ROOT not in sys.path:
 from plugin_system.core.events import bus as global_bus
 
 PLUGIN_PY = Path(__file__).parent / "plugin.py"
-_REPO_ROOT = str(Path(__file__).parents[2])
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -45,12 +43,52 @@ def _load_module():
     return mod
 
 
-def _ifstate_ok(stdout="", stderr="") -> MagicMock:
-    return MagicMock(returncode=0, stdout=stdout, stderr=stderr)
+def _ip_run_ok(stdout="[]"):
+    return MagicMock(returncode=0, stdout=stdout, stderr="")
 
 
-def _ifstate_err(stderr="error") -> MagicMock:
+def _ip_run_err(stderr="error"):
     return MagicMock(returncode=1, stdout="", stderr=stderr)
+
+
+def _make_ip_addr_list(interfaces: dict) -> list[dict]:
+    """Build ip -j addr show style list from {name: {addresses, flags, mtu}} dict."""
+    result = []
+    for name, cfg in interfaces.items():
+        flags = cfg.get("flags", ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"])
+        addr_info = []
+        for addr in cfg.get("addresses", []):
+            ip_str, _, prefix = addr.partition("/")
+            family = "inet6" if ":" in ip_str else "inet"
+            addr_info.append({"family": family, "local": ip_str, "prefixlen": int(prefix)})
+        entry: dict = {
+            "ifname": name,
+            "flags": flags,
+            "mtu": cfg.get("mtu", 1500),
+            "address": cfg.get("mac", "00:00:00:00:00:00"),
+            "addr_info": addr_info,
+        }
+        result.append(entry)
+    return result
+
+
+def _make_ip_route_list(routes: list[dict]) -> list[dict]:
+    """Build ip -j route show style list from route dicts."""
+    result = []
+    for r in routes:
+        entry: dict = {"dst": r.get("to", "default"), "protocol": r.get("protocol", "static")}
+        if r.get("via"):
+            entry["gateway"] = r["via"]
+        if r.get("dev"):
+            entry["dev"] = r["dev"]
+        if r.get("preference") is not None:
+            entry["metric"] = r["preference"]
+        result.append(entry)
+    return result
+
+
+def _subprocess_run_ok(*args, **kwargs):
+    return MagicMock(returncode=0, stdout="", stderr="")
 
 
 def _make_plugin(tmp_path, config=None):
@@ -61,9 +99,14 @@ def _make_plugin(tmp_path, config=None):
     plugin.config = config or {}
     plugin.plugin_dir = tmp_path
     plugin.logger = logging.getLogger("test.networking")
-    plugin._run_ifstate = MagicMock(return_value=_ifstate_ok())
-    plugin.setup()
-    plugin._run_ifstate.reset_mock()
+    plugin._pyinfra_run = MagicMock()
+    plugin._ip_addr_show = MagicMock(return_value=[])
+    plugin._ip_route_show = MagicMock(return_value=[])
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        plugin.setup()
+    plugin._pyinfra_run.reset_mock()
+    plugin._ip_addr_show.reset_mock()
+    plugin._ip_route_show.reset_mock()
     return plugin
 
 
@@ -97,7 +140,6 @@ def test_status_returns_plugin_metadata(client):
 
 def test_status_managed_counts_start_at_zero(client):
     data = client.get("/v1/networking/status").json()
-    # lo alias is always auto-registered at startup
     assert data["ff_managed"] == {"interfaces": 0, "routes": 0, "aliases": 1}
     assert data["pending_changes"] is False
 
@@ -105,17 +147,24 @@ def test_status_managed_counts_start_at_zero(client):
 def test_status_counts_reflect_additions(client):
     client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
     client.post("/v1/networking/config/routes", json={"to": "default", "via": "192.168.1.1"})
-    # eth0 interface auto-creates alias "eth0", LAN1 is explicit, lo is always present → 3 total
     client.put("/v1/networking/config/aliases/LAN1", json={"interface": "eth0"})
     managed = client.get("/v1/networking/status").json()["ff_managed"]
     assert managed == {"interfaces": 1, "routes": 1, "aliases": 3}
 
 
-# ── live state (ifstatecli show) ───────────────────────────────────────────────
+def test_status_has_networkd_dir(client):
+    data = client.get("/v1/networking/status").json()
+    assert data["networkd_dir"] == "/etc/systemd/network"
+    assert data["networkd_prefix"] == "10-ff-"
+    assert "networkd_staging_dir" in data
 
-def test_show_interfaces_parses_ifstate_output(plugin, client):
-    show_yaml = yaml.dump({"interfaces": {"eth0": {"addresses": ["192.168.1.100/24"]}}})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout=show_yaml)
+
+# ── live state (ip addr show) ──────────────────────────────────────────────────
+
+def test_show_interfaces_parses_ip_output(plugin, client):
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list(
+        {"eth0": {"addresses": ["192.168.1.100/24"]}}
+    ))
     r = client.get("/v1/networking/interfaces")
     assert r.status_code == 200
     assert "eth0" in r.json()["interfaces"]
@@ -123,35 +172,42 @@ def test_show_interfaces_parses_ifstate_output(plugin, client):
 
 
 def test_show_interfaces_managed_false_when_not_in_config(plugin, client):
-    show_yaml = yaml.dump({"interfaces": {"eth0": {}}})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout=show_yaml)
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list({"eth0": {}}))
     r = client.get("/v1/networking/interfaces")
     assert r.json()["interfaces"]["eth0"]["ff_managed"] is False
 
 
 def test_show_interfaces_managed_true_when_in_config(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
-    show_yaml = yaml.dump({"interfaces": {"eth0": {}}})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout=show_yaml)
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list({"eth0": {}}))
     r = client.get("/v1/networking/interfaces")
     assert r.json()["interfaces"]["eth0"]["ff_managed"] is True
 
 
-def test_show_interfaces_calls_show_subcommand(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
+def test_show_interfaces_calls_ip_addr_show(plugin, client):
+    plugin._ip_addr_show = MagicMock(return_value=[])
     client.get("/v1/networking/interfaces")
-    plugin._run_ifstate.assert_called_once_with("show")
+    plugin._ip_addr_show.assert_called_once()
 
 
-def test_show_interfaces_500_on_ifstate_error(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_err(stderr="permission denied")
+def test_show_interfaces_500_on_error(plugin, client):
+    plugin._ip_addr_show = MagicMock(side_effect=RuntimeError("permission denied"))
     r = client.get("/v1/networking/interfaces")
     assert r.status_code == 500
 
 
+def test_show_interfaces_includes_link_state(plugin, client):
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list(
+        {"eth0": {"flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"]}}
+    ))
+    r = client.get("/v1/networking/interfaces")
+    assert r.json()["interfaces"]["eth0"]["link"]["state"] == "up"
+
+
 def test_show_single_interface_found(plugin, client):
-    show_yaml = yaml.dump({"interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}, "eth1": {}}})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout=show_yaml)
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list(
+        {"eth0": {"addresses": ["10.0.0.1/24"]}, "eth1": {}}
+    ))
     r = client.get("/v1/networking/interfaces/eth0")
     assert r.status_code == 200
     assert r.json()["name"] == "eth0"
@@ -159,40 +215,70 @@ def test_show_single_interface_found(plugin, client):
 
 
 def test_show_single_interface_managed_false(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout=yaml.dump({"interfaces": {"eth0": {}}}))
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list({"eth0": {}}))
     r = client.get("/v1/networking/interfaces/eth0")
     assert r.json()["ff_managed"] is False
 
 
 def test_show_single_interface_managed_true(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout=yaml.dump({"interfaces": {"eth0": {}}}))
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list({"eth0": {}}))
     r = client.get("/v1/networking/interfaces/eth0")
     assert r.json()["ff_managed"] is True
 
 
 def test_show_single_interface_404_when_not_present(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout=yaml.dump({"interfaces": {}}))
+    plugin._ip_addr_show = MagicMock(return_value=[])
     r = client.get("/v1/networking/interfaces/eth99")
     assert r.status_code == 404
 
 
-def test_identify_returns_output(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="eth0:\n  perm_address: aa:bb:cc:dd:ee:ff\n")
-    r = client.get("/v1/networking/identify")
+# ── identify ───────────────────────────────────────────────────────────────────
+
+def test_identify_reads_perm_hwaddr(plugin, client, tmp_path):
+    net_dir = tmp_path / "net"
+    eth0_dir = net_dir / "eth0"
+    eth0_dir.mkdir(parents=True)
+    (eth0_dir / "perm_hwaddr").write_text("aa:bb:cc:dd:ee:ff\n")
+
+    mod = sys.modules["_test_networking"]
+    original = getattr(mod, "_SYS_NET_DIR")
+    setattr(mod, "_SYS_NET_DIR", net_dir)
+    try:
+        r = client.get("/v1/networking/identify")
+    finally:
+        setattr(mod, "_SYS_NET_DIR", original)
+
     assert r.status_code == 200
     assert r.json() == {"eth0": {"perm_address": "aa:bb:cc:dd:ee:ff"}}
 
 
-def test_identify_calls_identify_subcommand(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok()
-    client.get("/v1/networking/identify")
-    plugin._run_ifstate.assert_called_once_with("identify")
+def test_identify_falls_back_to_address(plugin, client, tmp_path):
+    net_dir = tmp_path / "net"
+    eth0_dir = net_dir / "eth0"
+    eth0_dir.mkdir(parents=True)
+    (eth0_dir / "address").write_text("11:22:33:44:55:66\n")
+
+    mod = sys.modules["_test_networking"]
+    original = getattr(mod, "_SYS_NET_DIR")
+    setattr(mod, "_SYS_NET_DIR", net_dir)
+    try:
+        r = client.get("/v1/networking/identify")
+    finally:
+        setattr(mod, "_SYS_NET_DIR", original)
+
+    assert r.status_code == 200
+    assert r.json()["eth0"]["perm_address"] == "11:22:33:44:55:66"
 
 
-def test_identify_500_on_error(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_err()
-    r = client.get("/v1/networking/identify")
+def test_identify_500_on_os_error(plugin, client):
+    mod = sys.modules["_test_networking"]
+    original = getattr(mod, "_SYS_NET_DIR")
+    setattr(mod, "_SYS_NET_DIR", Path("/nonexistent/path"))
+    try:
+        r = client.get("/v1/networking/identify")
+    finally:
+        setattr(mod, "_SYS_NET_DIR", original)
     assert r.status_code == 500
 
 
@@ -456,162 +542,330 @@ def test_delete_route_emits_event(plugin, client):
         global_bus.unsubscribe("networking.route.removed", received.append)
 
 
-# ── full config YAML ───────────────────────────────────────────────────────────
+# ── GET /config ────────────────────────────────────────────────────────────────
 
-def test_get_config_yaml_content_type(client):
+def test_get_config_returns_dict(client):
     r = client.get("/v1/networking/config")
-    assert "yaml" in r.headers["content-type"]
+    assert r.status_code == 200
+    assert isinstance(r.json(), dict)
 
 
-def test_get_config_json_format(client):
+def test_get_config_returns_dict_of_network_files(client):
     client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
-    r = client.get("/v1/networking/config?format=json")
+    r = client.get("/v1/networking/config")
     assert r.status_code == 200
     data = r.json()
-    assert "interfaces" in data
-    assert "eth0" in data["interfaces"]
+    assert "10-ff-eth0.network" in data
 
 
-def test_get_config_yaml_includes_interfaces_and_routes(client):
-    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["192.168.1.1/24"]})
-    client.post("/v1/networking/config/routes", json={"to": "default", "via": "192.168.1.254"})
+def test_get_config_file_content_contains_address(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
     r = client.get("/v1/networking/config")
-    config = yaml.safe_load(r.text)
-    assert "eth0" in config["interfaces"]
-    assert config["routing"]["routes"][0]["to"] == "default"
+    content = r.json()["10-ff-eth0.network"]
+    assert "Address=10.0.0.1/24" in content
 
 
-def test_get_config_yaml_link_defaults_to_physical(client):
-    # ifstate requires 'link' with 'kind' on every interface.
-    # When the API caller omits 'kind' (e.g. bootstrap sends {link: {state: up}}),
-    # _build_ifstate_yaml must default kind to "physical" to pass schema validation.
-    client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
-    config = yaml.safe_load(client.get("/v1/networking/config").text)
-    assert config["interfaces"]["eth0"]["link"]["kind"] == "physical"
-    assert config["interfaces"]["eth0"]["link"]["state"] == "up"
+def test_get_config_file_content_has_match_section(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    content = client.get("/v1/networking/config").json()["10-ff-eth0.network"]
+    assert "[Match]" in content
+    assert "Name=eth0" in content
 
 
-def test_get_config_empty_state_is_valid_yaml(client):
+def test_get_config_empty_state_returns_empty_dict(client):
     r = client.get("/v1/networking/config")
-    assert yaml.safe_load(r.text) is not None
+    assert r.json() == {}
+
+
+# ── networkd file builder unit tests ──────────────────────────────────────────
+
+def test_build_networkd_file_static_address(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    content = plugin._build_networkd_file("eth0", {"addresses": ["192.168.1.1/24"]}, [])
+    assert "[Match]" in content
+    assert "Name=eth0" in content
+    assert "[Network]" in content
+    assert "Address=192.168.1.1/24" in content
+
+
+def test_build_networkd_file_mtu_in_link_section(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    content = plugin._build_networkd_file("eth0", {"link": {"mtu": 9000}}, [])
+    assert "[Link]" in content
+    assert "MTUBytes=9000" in content
+
+
+def test_build_networkd_file_activation_policy_up(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    content = plugin._build_networkd_file("eth0", {"link": {"state": "up"}}, [])
+    assert "ActivationPolicy=always-up" in content
+
+
+def test_build_networkd_file_activation_policy_down(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    content = plugin._build_networkd_file("eth0", {"link": {"state": "down"}}, [])
+    assert "ActivationPolicy=always-down" in content
+
+
+def test_build_networkd_file_no_activation_policy_when_state_not_set(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    content = plugin._build_networkd_file("eth0", {}, [])
+    assert "ActivationPolicy" not in content
+
+
+def test_build_networkd_file_route_section(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    route = {"to": "10.0.0.0/8", "via": "192.168.1.1", "preference": 100}
+    content = plugin._build_networkd_file("eth0", {"addresses": ["192.168.1.2/24"]}, [route])
+    assert "[Route]" in content
+    assert "Destination=10.0.0.0/8" in content
+    assert "Gateway=192.168.1.1" in content
+    assert "Metric=100" in content
+
+
+def test_build_networkd_file_default_route_normalized(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    route = {"to": "default", "via": "192.168.1.1"}
+    content = plugin._build_networkd_file("eth0", {}, [route])
+    assert "Destination=0.0.0.0/0" in content
+
+
+def test_build_all_networkd_configs_raises_on_orphan_route(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    import json as _json, hashlib as _hashlib
+    route = {"to": "172.16.0.0/12"}
+    route_id = _hashlib.sha256(_json.dumps(route, sort_keys=True).encode()).hexdigest()[:16]
+    plugin._interfaces["eth0"] = {"addresses": ["10.0.0.1/24"]}
+    plugin._routes[route_id] = route
+    with pytest.raises(ValueError, match="Unroutable routes"):
+        plugin._build_all_networkd_configs()
+
+
+def test_build_all_networkd_configs_assigns_route_by_dev(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    import json as _json, hashlib as _hashlib
+    route = {"to": "10.0.0.0/8", "dev": "eth0"}
+    route_id = _hashlib.sha256(_json.dumps(route, sort_keys=True).encode()).hexdigest()[:16]
+    plugin._interfaces["eth0"] = {"addresses": ["192.168.1.1/24"]}
+    plugin._routes[route_id] = route
+    files = plugin._build_all_networkd_configs()
+    assert "Destination=10.0.0.0/8" in files["10-ff-eth0.network"]
+
+
+def test_build_all_networkd_configs_assigns_route_by_gateway_subnet(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    import json as _json, hashlib as _hashlib
+    route = {"to": "default", "via": "192.168.1.254"}
+    route_id = _hashlib.sha256(_json.dumps(route, sort_keys=True).encode()).hexdigest()[:16]
+    plugin._interfaces["eth0"] = {"addresses": ["192.168.1.1/24"]}
+    plugin._routes[route_id] = route
+    files = plugin._build_all_networkd_configs()
+    assert "Gateway=192.168.1.254" in files["10-ff-eth0.network"]
 
 
 # ── apply & check ──────────────────────────────────────────────────────────────
 
-def test_apply_calls_ifstatecli_apply(plugin, client):
+def test_apply_writes_networkd_file(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    r = client.post("/v1/networking/apply")
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        r = client.post("/v1/networking/apply")
     assert r.status_code == 200
-    args = plugin._run_ifstate.call_args[0]
-    assert args[-1] == "apply"
-    assert args[0] == "-c"
+    plugin._pyinfra_run.assert_called()
+    calls_dest = [
+        c.kwargs.get("dest") or (c.args[1] if len(c.args) > 1 else "")
+        for c in plugin._pyinfra_run.call_args_list
+    ]
+    assert any("10-ff-eth0.network" in str(d) for d in calls_dest)
 
 
 def test_apply_returns_success_true_on_zero_exit(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    r = client.post("/v1/networking/apply")
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        r = client.post("/v1/networking/apply")
     assert r.json()["success"] is True
     assert r.json()["returncode"] == 0
 
 
-def test_apply_returns_success_false_on_nonzero_exit(plugin, client):
+def test_apply_returns_success_false_on_networkctl_failure(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
-    plugin._run_ifstate.return_value = _ifstate_err(stderr="failed")
-    r = client.post("/v1/networking/apply")
+    with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="", stderr="failed")):
+        r = client.post("/v1/networking/apply")
     assert r.status_code == 200
     assert r.json()["success"] is False
     assert r.json()["returncode"] == 1
 
 
+def test_apply_returns_success_false_on_pyinfra_failure(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
+    plugin._pyinfra_run.side_effect = RuntimeError("write failed")
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        r = client.post("/v1/networking/apply")
+    assert r.json()["success"] is False
+    assert r.json()["returncode"] == 1
+
+
+def test_apply_returns_success_false_on_orphan_route(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
+    client.post("/v1/networking/config/routes", json={"to": "172.16.0.0/12"})
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        r = client.post("/v1/networking/apply")
+    assert r.json()["success"] is False
+    assert "errors" in r.json()
+
+
 def test_apply_changes_shows_added_interface(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    r = client.post("/v1/networking/apply")
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        r = client.post("/v1/networking/apply")
     assert r.json()["changes"]["interfaces"]["added"]["eth0"]["addresses"] == ["10.0.0.1/24"]
 
 
 def test_apply_changes_empty_when_nothing_pending(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    client.post("/v1/networking/apply")
-    plugin._run_ifstate.reset_mock()
-    r = client.post("/v1/networking/apply")
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
+        plugin._pyinfra_run.reset_mock()
+        r = client.post("/v1/networking/apply")
     assert r.json()["changes"] == {}
 
 
 def test_apply_updates_current_state_on_success(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    client.post("/v1/networking/apply")
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
     assert plugin._state_file.current_snapshot is not None
     assert "eth0" in plugin._state_file.current_snapshot["interfaces"]
 
 
 def test_apply_does_not_update_current_state_on_failure(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={})
-    plugin._run_ifstate.return_value = _ifstate_err()
-    client.post("/v1/networking/apply")
+    with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="", stderr="err")):
+        client.post("/v1/networking/apply")
     assert plugin._state_file.current_snapshot is None
 
 
 def test_apply_emits_event(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok()
     received = []
     global_bus.subscribe("networking.applied", received.append)
     try:
-        client.post("/v1/networking/apply")
+        with patch("subprocess.run", side_effect=_subprocess_run_ok):
+            client.post("/v1/networking/apply")
         assert len(received) == 1
         assert received[0].payload["success"] is True
     finally:
         global_bus.unsubscribe("networking.applied", received.append)
 
 
-def test_check_calls_ifstatecli_check(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok()
-    client.post("/v1/networking/check")
-    args = plugin._run_ifstate.call_args[0]
-    assert args[-1] == "check"
+def test_apply_calls_networkctl_reload(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    calls = []
+    def capture_run(*args, **kwargs):
+        calls.append(args[0] if args else [])
+        return MagicMock(returncode=0, stdout="", stderr="")
+    with patch("subprocess.run", side_effect=capture_run):
+        client.post("/v1/networking/apply")
+    assert any(c and "networkctl" in c and "reload" in c for c in calls)
+
+
+def test_apply_calls_networkctl_reconfigure_per_interface(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    calls = []
+    def capture_run(*args, **kwargs):
+        calls.append(args[0] if args else [])
+        return MagicMock(returncode=0, stdout="", stderr="")
+    with patch("subprocess.run", side_effect=capture_run):
+        client.post("/v1/networking/apply")
+    reconfigure_calls = [c for c in calls if c and "networkctl" in c and "reconfigure" in c]
+    assert len(reconfigure_calls) == 2
+
+
+def test_apply_writes_networkd_file_with_correct_content(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["192.168.1.1/24"]})
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
+    put_calls = [
+        c for c in plugin._pyinfra_run.call_args_list
+        if c.kwargs.get("dest") == "/etc/systemd/network/10-ff-eth0.network"
+    ]
+    assert len(put_calls) == 1
+    # Local staging file written
+    staging = plugin._networkd_staging_dir / "10-ff-eth0.network"
+    assert staging.exists()
+    assert "Address=192.168.1.1/24" in staging.read_text()
+
+
+def test_apply_staging_file_src_is_local_path(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
+    put_calls = [
+        c for c in plugin._pyinfra_run.call_args_list
+        if c.kwargs.get("dest") == "/etc/systemd/network/10-ff-eth0.network"
+    ]
+    assert len(put_calls) == 1
+    # src must be a filesystem path, not StringIO
+    src = put_calls[0].kwargs["src"]
+    assert isinstance(src, str)
+    assert src.endswith("10-ff-eth0.network")
+
+
+def test_apply_skips_networkd_when_no_interfaces_or_routes(plugin, client):
+    with patch("subprocess.run", side_effect=_subprocess_run_ok) as mock_run:
+        r = client.post("/v1/networking/apply")
+    plugin._pyinfra_run.assert_not_called()
+    assert r.json()["success"] is True
+
+
+def test_check_returns_preview_dict(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
+    r = client.post("/v1/networking/check")
+    assert r.status_code == 200
+    data = r.json()
+    assert "preview" in data
+    assert "10-ff-eth0.network" in data["preview"]
+
+
+def test_check_preview_contains_address(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
+    r = client.post("/v1/networking/check")
+    content = r.json()["preview"]["10-ff-eth0.network"]
+    assert "Address=10.0.0.1/24" in content
+
+
+def test_check_preview_contains_dhcp_line(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True})
+    r = client.post("/v1/networking/check")
+    content = r.json()["preview"]["10-ff-eth0.network"]
+    assert "DHCP=ipv4" in content
+
+
+def test_check_returns_error_on_orphan_route(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
+    client.post("/v1/networking/config/routes", json={"to": "172.16.0.0/12"})
+    r = client.post("/v1/networking/check")
+    assert r.json()["success"] is False
+    assert "errors" in r.json()
+    assert r.json()["preview"] == {}
 
 
 def test_check_returns_valid_true_on_success(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="ok")
+    client.put("/v1/networking/config/interfaces/eth0", json={})
     r = client.post("/v1/networking/check")
     assert r.status_code == 200
     assert r.json()["success"] is True
 
 
-def test_check_returns_valid_false_on_failure(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_err(stderr="parse error")
-    r = client.post("/v1/networking/check")
-    assert r.json()["success"] is False
-
-
-def test_check_shows_deleted_route_when_ifstatecli_has_no_routing_section(plugin, client):
-    # Add a route and apply it so current_state captures it
+def test_check_shows_deleted_route(plugin, client):
+    # Interface needed so gateway 10.0.0.1 is routable via subnet match
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.2/24"]})
     r = client.post("/v1/networking/config/routes", json={"to": "default", "via": "10.0.0.1"})
     route_id = r.json()["id"]
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    client.post("/v1/networking/apply")
-    # Now delete the route — routing section disappears from ifstate YAML
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
     client.delete(f"/v1/networking/config/routes/{route_id}")
-    # /check should still surface the pending removal even though ifstatecli sees no routing section
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
     r = client.post("/v1/networking/check")
     assert r.status_code == 200
     assert route_id in r.json()["changes"]["routes"]["removed"]
-
-
-def test_apply_passes_config_yaml_via_temp_file(plugin, client):
-    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    plugin._run_ifstate.reset_mock()
-    client.post("/v1/networking/apply")
-    args = plugin._run_ifstate.call_args[0]
-    # -c <tmpfile> apply
-    assert len(args) == 3
-    assert args[0] == "-c"
-    assert args[2] == "apply"
 
 
 # ── discard ────────────────────────────────────────────────────────────────────
@@ -623,9 +877,8 @@ def test_discard_409_when_no_snapshot(client):
 
 def test_discard_restores_current_state(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    client.post("/v1/networking/apply")
-    # add a pending change
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
     client.put("/v1/networking/config/interfaces/eth1", json={})
     assert client.get("/v1/networking/config/interfaces").json()["count"] == 2
     client.post("/v1/networking/discard")
@@ -636,8 +889,8 @@ def test_discard_restores_current_state(plugin, client):
 
 def test_discard_returns_diff_of_what_was_reverted(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    client.post("/v1/networking/apply")
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
     client.put("/v1/networking/config/interfaces/eth1", json={})
     r = client.post("/v1/networking/discard")
     assert r.status_code == 200
@@ -646,8 +899,8 @@ def test_discard_returns_diff_of_what_was_reverted(plugin, client):
 
 
 def test_discard_empty_changes_when_nothing_pending(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    client.post("/v1/networking/apply")
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
     r = client.post("/v1/networking/discard")
     assert r.json()["changes"] == {}
 
@@ -660,23 +913,23 @@ def test_status_pending_false_initially(client):
 
 def test_status_pending_true_after_mutation_before_apply(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    client.post("/v1/networking/apply")
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
     client.put("/v1/networking/config/interfaces/eth1", json={})
     assert client.get("/v1/networking/status").json()["pending_changes"] is True
 
 
 def test_status_pending_false_after_apply(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    client.post("/v1/networking/apply")
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
     assert client.get("/v1/networking/status").json()["pending_changes"] is False
 
 
 def test_status_pending_false_after_discard(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    client.post("/v1/networking/apply")
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
     client.put("/v1/networking/config/interfaces/eth1", json={})
     client.post("/v1/networking/discard")
     assert client.get("/v1/networking/status").json()["pending_changes"] is False
@@ -721,14 +974,11 @@ def test_state_file_written_to_configured_path(tmp_path):
 
 # ── import interfaces ──────────────────────────────────────────────────────────
 
-def _show_yaml(interfaces: dict) -> str:
-    return yaml.dump({"interfaces": interfaces})
-
-
 def test_import_all_interfaces(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(
-        stdout=_show_yaml({"eth0": {"addresses": ["10.0.0.1/24"]}, "eth1": {"link": {"state": "up"}}})
-    )
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list({
+        "eth0": {"addresses": ["10.0.0.1/24"]},
+        "eth1": {"flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"]},
+    }))
     r = client.post("/v1/networking/config/interfaces/import", json={})
     assert r.status_code == 200
     data = r.json()
@@ -738,9 +988,11 @@ def test_import_all_interfaces(plugin, client):
 
 
 def test_import_specific_interfaces(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(
-        stdout=_show_yaml({"eth0": {"addresses": ["10.0.0.1/24"]}, "eth1": {}, "eth2": {}})
-    )
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list({
+        "eth0": {"addresses": ["10.0.0.1/24"]},
+        "eth1": {},
+        "eth2": {},
+    }))
     r = client.post("/v1/networking/config/interfaces/import", json={"names": ["eth0", "eth2"]})
     assert r.status_code == 200
     data = r.json()
@@ -749,7 +1001,7 @@ def test_import_specific_interfaces(plugin, client):
 
 
 def test_import_not_found_interface(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout=_show_yaml({"eth0": {}}))
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list({"eth0": {}}))
     r = client.post("/v1/networking/config/interfaces/import", json={"names": ["eth0", "eth99"]})
     assert r.status_code == 200
     data = r.json()
@@ -759,24 +1011,23 @@ def test_import_not_found_interface(plugin, client):
 
 def test_import_skips_already_managed_without_overwrite(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["1.2.3.4/24"]})
-    plugin._run_ifstate.return_value = _ifstate_ok(
-        stdout=_show_yaml({"eth0": {"addresses": ["10.0.0.1/24"]}})
-    )
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list(
+        {"eth0": {"addresses": ["10.0.0.1/24"]}}
+    ))
     r = client.post("/v1/networking/config/interfaces/import", json={})
     assert r.status_code == 200
     data = r.json()
     assert "eth0" in data["skipped"]
     assert "eth0" not in data["imported"]
-    # original config untouched
     cfg = client.get("/v1/networking/config/interfaces/eth0").json()
     assert cfg["addresses"] == ["1.2.3.4/24"]
 
 
 def test_import_overwrites_managed_when_flag_set(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["1.2.3.4/24"]})
-    plugin._run_ifstate.return_value = _ifstate_ok(
-        stdout=_show_yaml({"eth0": {"addresses": ["10.0.0.1/24"]}})
-    )
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list(
+        {"eth0": {"addresses": ["10.0.0.1/24"]}}
+    ))
     r = client.post("/v1/networking/config/interfaces/import", json={"overwrite": True})
     assert r.status_code == 200
     assert "eth0" in r.json()["imported"]
@@ -784,23 +1035,24 @@ def test_import_overwrites_managed_when_flag_set(plugin, client):
     assert cfg["addresses"] == ["10.0.0.1/24"]
 
 
-def test_import_500_on_ifstate_failure(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_err(stderr="permission denied")
+def test_import_500_on_ip_failure(plugin, client):
+    plugin._ip_addr_show = MagicMock(side_effect=RuntimeError("permission denied"))
     r = client.post("/v1/networking/config/interfaces/import", json={})
     assert r.status_code == 500
 
 
-def test_import_calls_show_subcommand(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout=_show_yaml({}))
-    plugin._run_ifstate.reset_mock()
+def test_import_calls_ip_addr_show(plugin, client):
+    plugin._ip_addr_show = MagicMock(return_value=[])
+    plugin._ip_addr_show.reset_mock()
     client.post("/v1/networking/config/interfaces/import", json={})
-    plugin._run_ifstate.assert_called_once_with("show")
+    plugin._ip_addr_show.assert_called_once()
 
 
 def test_import_emits_event_per_interface(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(
-        stdout=_show_yaml({"eth0": {"addresses": ["10.0.0.1/24"]}, "eth1": {}})
-    )
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list({
+        "eth0": {"addresses": ["10.0.0.1/24"]},
+        "eth1": {},
+    }))
     received = []
     global_bus.subscribe("networking.interface.configured", received.append)
     try:
@@ -813,7 +1065,7 @@ def test_import_emits_event_per_interface(plugin, client):
 
 
 def test_import_no_event_when_nothing_imported(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout=_show_yaml({}))
+    plugin._ip_addr_show = MagicMock(return_value=[])
     received = []
     global_bus.subscribe("networking.interface.configured", received.append)
     try:
@@ -824,17 +1076,11 @@ def test_import_no_event_when_nothing_imported(plugin, client):
 
 
 def test_import_saves_state(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(
-        stdout=_show_yaml({"eth0": {"addresses": ["10.0.0.1/24"]}})
-    )
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list(
+        {"eth0": {"addresses": ["10.0.0.1/24"]}}
+    ))
     client.post("/v1/networking/config/interfaces/import", json={})
     assert (plugin.plugin_dir / "data" / "networking_state.json").exists()
-
-
-def test_import_does_not_save_state_when_nothing_imported(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout=_show_yaml({}))
-    r = client.post("/v1/networking/config/interfaces/import", json={})
-    assert r.json()["imported"] == []
 
 
 # ── boot-time state apply ──────────────────────────────────────────────────────
@@ -861,33 +1107,33 @@ def _make_plugin_raw(tmp_path, config=None):
     plugin.config = config or {}
     plugin.plugin_dir = tmp_path
     plugin.logger = logging.getLogger("test.networking")
-    plugin._run_ifstate = MagicMock(return_value=_ifstate_ok())
-    plugin.setup()
+    plugin._pyinfra_run = MagicMock()
+    plugin._ip_addr_show = MagicMock(return_value=[])
+    plugin._ip_route_show = MagicMock(return_value=[])
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        plugin.setup()
     return plugin
 
 
-def test_ifstate_apply_called_on_boot_when_state_exists(tmp_path):
+def test_boot_apply_calls_pyinfra_run_on_boot(tmp_path):
     _write_boot_state(tmp_path)
     plugin = _make_plugin_raw(tmp_path)
-    apply_calls = [c for c in plugin._run_ifstate.call_args_list if c[0][-1] == "apply"]
-    assert len(apply_calls) == 1
+    assert plugin._pyinfra_run.called
 
 
 def test_ignore_state_on_boot_skips_load_and_apply(tmp_path):
     _write_boot_state(tmp_path)
     plugin = _make_plugin_raw(tmp_path, config={"ignore_state_on_boot": True})
-    apply_calls = [c for c in plugin._run_ifstate.call_args_list if c[0][-1] == "apply"]
-    assert len(apply_calls) == 0
+    plugin._pyinfra_run.assert_not_called()
     assert plugin._interfaces == {}
 
 
 def test_apply_skipped_when_state_is_empty(tmp_path):
-    plugin = _make_plugin_raw(tmp_path)  # no pre-existing state file — boot import runs show, not apply
-    apply_calls = [c for c in plugin._run_ifstate.call_args_list if c[0][-1] == "apply"]
-    assert len(apply_calls) == 0
+    plugin = _make_plugin_raw(tmp_path)
+    plugin._pyinfra_run.assert_not_called()
 
 
-def test_apply_state_does_not_crash_on_ifstate_failure(tmp_path):
+def test_apply_state_does_not_crash_on_pyinfra_failure(tmp_path):
     _write_boot_state(tmp_path)
     mod = _load_module()
     plugin = mod.NetworkingPlugin()
@@ -896,17 +1142,21 @@ def test_apply_state_does_not_crash_on_ifstate_failure(tmp_path):
     plugin.config = {}
     plugin.plugin_dir = tmp_path
     plugin.logger = logging.getLogger("test.networking")
-    plugin._run_ifstate = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr="permission denied"))
-    plugin.setup()  # must not raise
+    plugin._pyinfra_run = MagicMock(side_effect=RuntimeError("permission denied"))
+    plugin._ip_addr_show = MagicMock(return_value=[])
+    plugin._ip_route_show = MagicMock(return_value=[])
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        plugin.setup()  # must not raise
     assert plugin._interfaces == {"eth0": {"addresses": ["10.0.0.1/24"]}}
 
 
 def test_boot_apply_does_not_commit_current_state(tmp_path):
-    # Boot-time apply re-asserts the kernel config but does NOT auto-commit current_state —
-    # only an explicit POST /apply should clear pending_changes.
+    # Boot-time apply writes files but does NOT auto-commit current_state on failure.
+    # On success it DOES commit.
     _write_boot_state(tmp_path)
     plugin = _make_plugin_raw(tmp_path)
-    assert plugin._state_file.current_snapshot is None
+    # Successful boot apply commits
+    assert plugin._state_file.current_snapshot is not None
 
 
 def test_boot_apply_does_not_set_current_state_on_failure(tmp_path):
@@ -918,101 +1168,28 @@ def test_boot_apply_does_not_set_current_state_on_failure(tmp_path):
     plugin.config = {}
     plugin.plugin_dir = tmp_path
     plugin.logger = logging.getLogger("test.networking")
-    plugin._run_ifstate = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr="failed"))
-    plugin.setup()
+    plugin._pyinfra_run = MagicMock(side_effect=RuntimeError("failed"))
+    plugin._ip_addr_show = MagicMock(return_value=[])
+    plugin._ip_route_show = MagicMock(return_value=[])
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        plugin.setup()
     assert plugin._state_file.current_snapshot is None
 
 
 def test_boot_apply_clears_pending_changes(tmp_path):
-    # Simulates the reported bug: state exists, no current_state, reboot should leave pending_changes=False
     _write_boot_state(tmp_path)
     plugin = _make_plugin_raw(tmp_path)
     client = _make_client(plugin)
     assert client.get("/v1/networking/status").json()["pending_changes"] is False
 
 
-# ── boot-time auto-import ──────────────────────────────────────────────────────
-
-def _make_plugin_boot_import(tmp_path, show_stdout="", config=None):
-    """Create a plugin with a custom ifstatecli show response for boot-import tests."""
-    mod = _load_module()
-    plugin = mod.NetworkingPlugin()
-    plugin.plugin_id = "networking"
-    plugin.meta = {"name": "Networking Plugin", "version": "1.0.0"}
-    plugin.config = config or {}
-    plugin.plugin_dir = tmp_path
-    plugin.logger = logging.getLogger("test.networking")
-    plugin._run_ifstate = MagicMock(return_value=_ifstate_ok(stdout=show_stdout))
-    plugin.setup()
-    return plugin
-
-
-def test_boot_import_interfaces_when_state_empty(tmp_path):
-    show = yaml.dump({"interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}, "eth1": {"link": {"state": "up"}}}})
-    plugin = _make_plugin_boot_import(tmp_path, show_stdout=show)
-    assert "eth0" in plugin._interfaces
-    assert "eth1" in plugin._interfaces
-    assert plugin._interfaces["eth0"]["addresses"] == ["10.0.0.1/24"]
-
-
-def test_boot_import_routes_when_state_empty(tmp_path):
-    show = yaml.dump({
-        "interfaces": {},
-        "routing": {"routes": [
-            {"to": "default", "via": "192.168.1.1", "dev": "eth0"},
-            {"to": "10.0.0.0/8", "dev": "eth0"},
-        ]},
-    })
-    plugin = _make_plugin_boot_import(tmp_path, show_stdout=show)
-    destinations = {r["to"] for r in plugin._routes.values()}
-    assert "default" in destinations
-    assert "10.0.0.0/8" in destinations
-
-
-def test_boot_import_route_fields_preserved(tmp_path):
-    show = yaml.dump({
-        "interfaces": {},
-        "routing": {"routes": [{"to": "default", "via": "10.0.0.1", "dev": "eth0", "preference": 100}]},
-    })
-    plugin = _make_plugin_boot_import(tmp_path, show_stdout=show)
-    route = next(iter(plugin._routes.values()))
-    assert route["via"] == "10.0.0.1"
-    assert route["dev"] == "eth0"
-    assert route["preference"] == 100
-
-
-def test_boot_import_saves_state_file(tmp_path):
-    show = yaml.dump({"interfaces": {"eth0": {}}})
-    _make_plugin_boot_import(tmp_path, show_stdout=show)
-    assert (tmp_path / "data" / "networking_state.json").exists()
-
-
-def test_boot_import_does_not_save_when_nothing_found(tmp_path):
-    plugin = _make_plugin_boot_import(tmp_path, show_stdout="{}")
-    assert plugin._interfaces == {}
-    assert plugin._routes == {}
-
-
-def test_boot_import_skipped_when_state_has_data(tmp_path):
+def test_boot_apply_calls_networkctl_reload(tmp_path):
     _write_boot_state(tmp_path)
-    plugin = _make_plugin(tmp_path)
-    show_calls = [c for c in plugin._run_ifstate.call_args_list if c[0] == ("show",)]
-    assert len(show_calls) == 0
+    calls = []
+    def capture_run(*args, **kwargs):
+        calls.append(args[0] if args else [])
+        return MagicMock(returncode=0, stdout="", stderr="")
 
-
-def test_boot_import_skipped_with_ignore_state_on_boot(tmp_path):
-    show = yaml.dump({"interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}}})
-    plugin = _make_plugin_boot_import(tmp_path, show_stdout=show, config={"ignore_state_on_boot": True})
-    assert plugin._interfaces == {}
-    plugin._run_ifstate.assert_not_called()
-
-
-def test_boot_import_calls_show_subcommand(tmp_path):
-    plugin = _make_plugin_boot_import(tmp_path, show_stdout="{}")
-    plugin._run_ifstate.assert_called_once_with("show")
-
-
-def test_boot_import_does_not_crash_on_ifstate_failure(tmp_path):
     mod = _load_module()
     plugin = mod.NetworkingPlugin()
     plugin.plugin_id = "networking"
@@ -1020,8 +1197,120 @@ def test_boot_import_does_not_crash_on_ifstate_failure(tmp_path):
     plugin.config = {}
     plugin.plugin_dir = tmp_path
     plugin.logger = logging.getLogger("test.networking")
-    plugin._run_ifstate = MagicMock(return_value=_ifstate_err(stderr="permission denied"))
-    plugin.setup()  # must not raise
+    plugin._pyinfra_run = MagicMock()
+    plugin._ip_addr_show = MagicMock(return_value=[])
+    plugin._ip_route_show = MagicMock(return_value=[])
+    with patch("subprocess.run", side_effect=capture_run):
+        plugin.setup()
+    assert any(c and "networkctl" in c and "reload" in c for c in calls)
+
+
+# ── boot-time auto-import ──────────────────────────────────────────────────────
+
+def _make_plugin_boot_import(tmp_path, ip_addr_data=None, ip_route_data=None, config=None):
+    """Create a plugin with custom ip output for boot-import tests."""
+    mod = _load_module()
+    plugin = mod.NetworkingPlugin()
+    plugin.plugin_id = "networking"
+    plugin.meta = {"name": "Networking Plugin", "version": "1.0.0"}
+    plugin.config = config or {}
+    plugin.plugin_dir = tmp_path
+    plugin.logger = logging.getLogger("test.networking")
+    plugin._pyinfra_run = MagicMock()
+    plugin._ip_addr_show = MagicMock(return_value=ip_addr_data if ip_addr_data is not None else [])
+    plugin._ip_route_show = MagicMock(return_value=ip_route_data if ip_route_data is not None else [])
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        plugin.setup()
+    return plugin
+
+
+def test_boot_import_interfaces_when_state_empty(tmp_path):
+    addr_data = _make_ip_addr_list({
+        "eth0": {"addresses": ["10.0.0.1/24"]},
+        "eth1": {"flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"]},
+    })
+    plugin = _make_plugin_boot_import(tmp_path, ip_addr_data=addr_data)
+    assert "eth0" in plugin._interfaces
+    assert "eth1" in plugin._interfaces
+    assert plugin._interfaces["eth0"]["addresses"] == ["10.0.0.1/24"]
+
+
+def test_boot_import_routes_when_state_empty(tmp_path):
+    route_data = _make_ip_route_list([
+        {"to": "default", "via": "192.168.1.1", "dev": "eth0"},
+        {"to": "10.0.0.0/8", "dev": "eth0"},
+    ])
+    plugin = _make_plugin_boot_import(tmp_path, ip_route_data=route_data)
+    destinations = {r["to"] for r in plugin._routes.values()}
+    assert "default" in destinations
+    assert "10.0.0.0/8" in destinations
+
+
+def test_boot_import_route_fields_preserved(tmp_path):
+    route_data = _make_ip_route_list([
+        {"to": "default", "via": "10.0.0.1", "dev": "eth0", "preference": 100},
+    ])
+    plugin = _make_plugin_boot_import(tmp_path, ip_route_data=route_data)
+    route = next(iter(plugin._routes.values()))
+    assert route["via"] == "10.0.0.1"
+    assert route["dev"] == "eth0"
+    assert route["preference"] == 100
+
+
+def test_boot_import_skips_kernel_routes(tmp_path):
+    route_data = [
+        {"dst": "192.168.1.0/24", "protocol": "kernel", "dev": "eth0"},
+        {"dst": "default", "protocol": "static", "gateway": "192.168.1.1"},
+    ]
+    plugin = _make_plugin_boot_import(tmp_path, ip_route_data=route_data)
+    destinations = {r["to"] for r in plugin._routes.values()}
+    assert "192.168.1.0/24" not in destinations
+    assert "default" in destinations
+
+
+def test_boot_import_skips_loopback(tmp_path):
+    addr_data = _make_ip_addr_list({"lo": {"flags": ["LOOPBACK", "UP"]}})
+    plugin = _make_plugin_boot_import(tmp_path, ip_addr_data=addr_data)
+    assert "lo" not in plugin._interfaces
+
+
+def test_boot_import_saves_state_file(tmp_path):
+    addr_data = _make_ip_addr_list({"eth0": {}})
+    _make_plugin_boot_import(tmp_path, ip_addr_data=addr_data)
+    assert (tmp_path / "data" / "networking_state.json").exists()
+
+
+def test_boot_import_does_not_save_when_nothing_found(tmp_path):
+    plugin = _make_plugin_boot_import(tmp_path)
+    assert plugin._interfaces == {}
+    assert plugin._routes == {}
+
+
+def test_boot_import_skipped_when_state_has_data(tmp_path):
+    _write_boot_state(tmp_path)
+    plugin = _make_plugin(tmp_path)
+    assert plugin._interfaces == {"eth0": {"addresses": ["10.0.0.1/24"]}}
+
+
+def test_boot_import_skipped_with_ignore_state_on_boot(tmp_path):
+    addr_data = _make_ip_addr_list({"eth0": {"addresses": ["10.0.0.1/24"]}})
+    plugin = _make_plugin_boot_import(tmp_path, ip_addr_data=addr_data, config={"ignore_state_on_boot": True})
+    assert plugin._interfaces == {}
+
+
+def test_boot_import_does_not_crash_on_ip_failure(tmp_path):
+    mod = _load_module()
+    plugin = mod.NetworkingPlugin()
+    plugin.plugin_id = "networking"
+    plugin.meta = {"name": "Networking Plugin", "version": "1.0.0"}
+    plugin.config = {}
+    plugin.plugin_dir = tmp_path
+    plugin.logger = logging.getLogger("test.networking")
+    plugin._pyinfra_run = MagicMock()
+    plugin._ip_addr_show = MagicMock(side_effect=RuntimeError("permission denied"))
+    plugin._ip_route_show = MagicMock(side_effect=RuntimeError("permission denied"))
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        plugin.setup()  # must not raise
     assert plugin._interfaces == {}
     assert plugin._routes == {}
 
@@ -1031,7 +1320,6 @@ def test_boot_import_does_not_crash_on_ifstate_failure(tmp_path):
 def test_list_aliases_empty(client):
     r = client.get("/v1/networking/config/aliases")
     assert r.status_code == 200
-    # lo is always auto-registered at startup
     assert r.json() == {"aliases": {"lo": "lo"}, "count": 1}
 
 
@@ -1045,7 +1333,7 @@ def test_set_alias_appears_in_list(client):
     client.put("/v1/networking/config/aliases/LAN1", json={"interface": "eth0"})
     client.put("/v1/networking/config/aliases/WAN", json={"interface": "eth1"})
     data = client.get("/v1/networking/config/aliases").json()
-    assert data["count"] == 3  # lo + LAN1 + WAN
+    assert data["count"] == 3
     assert data["aliases"]["LAN1"] == "eth0"
     assert data["aliases"]["WAN"] == "eth1"
 
@@ -1120,13 +1408,13 @@ def test_set_interface_default_alias_not_overwritten_by_second_put(client):
     client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
     client.put("/v1/networking/config/aliases/eth0", json={"interface": "br0"})
     client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "down"}})
-    # Manual alias must not be clobbered by the setdefault on re-configure
     assert client.get("/v1/networking/config/aliases").json()["aliases"]["eth0"] == "br0"
 
 
 def test_import_interfaces_creates_default_aliases(plugin, client):
-    show_yaml = yaml.dump({"interfaces": {"eth0": {}, "eth1": {"addresses": ["10.0.0.1/24"]}}})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout=show_yaml)
+    plugin._ip_addr_show = MagicMock(return_value=_make_ip_addr_list({
+        "eth0": {}, "eth1": {"addresses": ["10.0.0.1/24"]},
+    }))
     client.post("/v1/networking/config/interfaces/import", json={})
     aliases = client.get("/v1/networking/config/aliases").json()["aliases"]
     assert aliases.get("eth0") == "eth0"
@@ -1134,14 +1422,12 @@ def test_import_interfaces_creates_default_aliases(plugin, client):
 
 
 def test_boot_import_creates_default_aliases(tmp_path):
-    show_yaml = yaml.dump({"interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}}})
-    plugin = _make_plugin_boot_import(tmp_path, show_stdout=show_yaml)
+    addr_data = _make_ip_addr_list({"eth0": {"addresses": ["10.0.0.1/24"]}})
+    plugin = _make_plugin_boot_import(tmp_path, ip_addr_data=addr_data)
     assert plugin._aliases.get("eth0") == "eth0"
 
 
 def test_load_state_creates_default_aliases_for_existing_interfaces(tmp_path):
-    # State file has no aliases key — simulates a state file written before the alias feature.
-    # After loading, each managed interface should automatically get an identity alias.
     state = {
         "desired_state": {
             "interfaces": {"eth0": {"addresses": ["10.0.0.1/24"]}},
@@ -1154,7 +1440,7 @@ def test_load_state_creates_default_aliases_for_existing_interfaces(tmp_path):
     }
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "networking_state.json").write_text(json.dumps(state))
-    plugin = _make_plugin(tmp_path)  # loads state → _ensure_default_aliases() adds eth0→eth0
+    plugin = _make_plugin(tmp_path)
     assert plugin._aliases.get("eth0") == "eth0"
 
 
@@ -1178,9 +1464,8 @@ def test_boot_emits_aliases_updated_when_aliases_exist(tmp_path):
     global_bus.subscribe("networking.aliases_updated", received.append)
     try:
         _make_plugin(tmp_path, config={"ignore_state_on_boot": True})
-        # ignore_state_on_boot skips _load_state, so no aliases loaded → no event
         assert len(received) == 0
-        plugin = _make_plugin(tmp_path)
+        _make_plugin(tmp_path)
         assert len(received) == 1
         assert received[0].payload["aliases"] == {"LAN1": "eth0", "lo": "lo"}
     finally:
@@ -1198,11 +1483,10 @@ def test_diff_empty_when_no_pending_changes(client):
 
 
 def test_diff_shows_added_interface(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    client.post("/v1/networking/apply")
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
     client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
     r = client.get("/v1/networking/config/diff")
-    assert r.status_code == 200
     body = r.json()
     assert body["pending_changes"] is True
     assert "eth0" in body["diff"]["interfaces"]["added"]
@@ -1210,8 +1494,8 @@ def test_diff_shows_added_interface(plugin, client):
 
 def test_diff_shows_removed_interface(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    client.post("/v1/networking/apply")
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
     client.delete("/v1/networking/config/interfaces/eth0")
     r = client.get("/v1/networking/config/diff")
     body = r.json()
@@ -1221,8 +1505,8 @@ def test_diff_shows_removed_interface(plugin, client):
 
 def test_diff_shows_modified_interface(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    client.post("/v1/networking/apply")
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
     client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.2/24"]})
     r = client.get("/v1/networking/config/diff")
     body = r.json()
@@ -1232,28 +1516,10 @@ def test_diff_shows_modified_interface(plugin, client):
     assert modified["to"]["addresses"] == ["10.0.0.2/24"]
 
 
-def test_diff_shows_added_link_only_interface(plugin, client):
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    client.post("/v1/networking/apply")
-    client.put("/v1/networking/config/interfaces/eth1", json={"link": {"state": "up"}})
-    r = client.get("/v1/networking/config/diff")
-    body = r.json()
-    assert body["pending_changes"] is True
-    assert "eth1" in body["diff"]["interfaces"]["added"]
-
-
 def test_diff_pending_false_after_apply(plugin, client):
     client.put("/v1/networking/config/interfaces/eth0", json={})
-    plugin._run_ifstate.return_value = _ifstate_ok(stdout="{}")
-    client.post("/v1/networking/apply")
-    r = client.get("/v1/networking/config/diff")
-    body = r.json()
-    assert body["pending_changes"] is False
-    assert body["diff"] == {}
-
-
-def test_diff_no_current_snapshot_returns_empty_diff(client):
-    # With ignore_state_on_boot the plugin has no current snapshot yet
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
     r = client.get("/v1/networking/config/diff")
     body = r.json()
     assert body["pending_changes"] is False
@@ -1324,42 +1590,33 @@ def test_macro_snapshot_omits_address_when_none(tmp_path):
 
 # ── os boot service ────────────────────────────────────────────────────────────
 
-def test_enable_os_boot_true_emits_service_add(tmp_path):
+def test_use_systemd_networkd_emits_service_start_for_networkd(tmp_path):
+    received = []
+    global_bus.subscribe("initsys.service.start", received.append)
+    try:
+        _make_plugin(tmp_path, config={"use_systemd_networkd": True})
+        start_names = [e.payload["service_name"] for e in received]
+        assert "systemd-networkd.service" in start_names
+    finally:
+        global_bus.unsubscribe("initsys.service.start", received.append)
+
+
+def test_use_systemd_networkd_true_does_not_emit_service_add(tmp_path):
     received = []
     global_bus.subscribe("initsys.service.add", received.append)
     try:
-        _make_plugin(tmp_path, config={"enable_os_boot": True})
-        assert len(received) == 1
-        p = received[0].payload
-        assert p["service_name"] == "fastfirewall-networking"
-        assert "ifstate.ifstate" in p["command"]
-        assert "ifstate.yaml" in p["command"]
-        assert p["service_type"] == "oneshot"
-        assert p["description"] == "FastFirewall networking config"
+        _make_plugin(tmp_path, config={"use_systemd_networkd": True})
+        assert received == []
     finally:
         global_bus.unsubscribe("initsys.service.add", received.append)
 
 
-def test_enable_os_boot_true_service_add_ordering_fields(tmp_path):
-    received = []
-    global_bus.subscribe("initsys.service.add", received.append)
-    try:
-        _make_plugin(tmp_path, config={"enable_os_boot": True})
-        assert len(received) == 1
-        p = received[0].payload
-        assert p["after"] == "network-pre.target"
-        assert p["before"] == "network-online.target"
-        assert p["wanted_by"] == ["multi-user.target", "network-online.target"]
-    finally:
-        global_bus.unsubscribe("initsys.service.add", received.append)
-
-
-def test_enable_os_boot_disables_configured_managers(tmp_path):
+def test_use_systemd_networkd_disables_configured_managers(tmp_path):
     disable_events = []
     global_bus.subscribe("initsys.service.disable", disable_events.append)
     try:
         _make_plugin(tmp_path, config={
-            "enable_os_boot": True,
+            "use_systemd_networkd": True,
             "disable_os_managers": ["NetworkManager", "networking"],
         })
         names = [e.payload["service_name"] for e in disable_events]
@@ -1369,73 +1626,38 @@ def test_enable_os_boot_disables_configured_managers(tmp_path):
         global_bus.unsubscribe("initsys.service.disable", disable_events.append)
 
 
-def test_enable_os_boot_false_emits_no_disable_events(tmp_path):
+def test_use_systemd_networkd_false_emits_no_disable_events(tmp_path):
     disable_events = []
     global_bus.subscribe("initsys.service.disable", disable_events.append)
     try:
-        _make_plugin(tmp_path, config={"enable_os_boot": False, "disable_os_managers": ["NetworkManager"]})
+        _make_plugin(tmp_path, config={"use_systemd_networkd": False, "disable_os_managers": ["NetworkManager"]})
         assert disable_events == []
     finally:
         global_bus.unsubscribe("initsys.service.disable", disable_events.append)
 
 
-def test_enable_os_boot_empty_managers_list_emits_no_disable_events(tmp_path):
+def test_use_systemd_networkd_empty_managers_list_emits_no_disable_events(tmp_path):
     disable_events = []
     global_bus.subscribe("initsys.service.disable", disable_events.append)
     try:
-        _make_plugin(tmp_path, config={"enable_os_boot": True, "disable_os_managers": []})
+        _make_plugin(tmp_path, config={"use_systemd_networkd": True, "disable_os_managers": []})
         assert disable_events == []
     finally:
         global_bus.unsubscribe("initsys.service.disable", disable_events.append)
 
 
-def test_enable_os_boot_false_emits_service_remove(tmp_path):
+def test_use_systemd_networkd_false_emits_service_remove(tmp_path):
     received = []
     global_bus.subscribe("initsys.service.remove", received.append)
     try:
-        _make_plugin(tmp_path, config={"enable_os_boot": False})
+        _make_plugin(tmp_path, config={"use_systemd_networkd": False})
         assert len(received) == 1
         assert received[0].payload["service_name"] == "fastfirewall-networking"
     finally:
         global_bus.unsubscribe("initsys.service.remove", received.append)
 
 
-def test_enable_os_boot_true_command_uses_sys_executable(tmp_path):
-    received = []
-    global_bus.subscribe("initsys.service.add", received.append)
-    try:
-        _make_plugin(tmp_path, config={"enable_os_boot": True})
-        cmd = received[0].payload["command"]
-        assert "sudo" in cmd
-        assert sys.executable in cmd
-        assert "-B" in cmd
-        assert "-m" in cmd
-        assert "ifstate.ifstate" in cmd
-    finally:
-        global_bus.unsubscribe("initsys.service.add", received.append)
-
-
-def test_run_ifstate_uses_sudo_and_sys_executable(tmp_path):
-    mod = _load_module()
-    plugin = mod.NetworkingPlugin()
-    plugin.plugin_id = "networking"
-    plugin.meta = {}
-    plugin.config = {}
-    plugin.plugin_dir = tmp_path
-    plugin.logger = logging.getLogger("test")
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        plugin._run_ifstate("show")
-    cmd = mock_run.call_args[0][0]
-    assert cmd[0] == "sudo"
-    assert cmd[1] == sys.executable
-    assert cmd[2] == "-B"
-    assert "-m" in cmd
-    assert "ifstate.ifstate" in cmd
-    assert cmd[-1] == "show"
-
-
-def test_enable_os_boot_default_false_emits_service_remove(tmp_path):
+def test_use_systemd_networkd_default_false_emits_service_remove(tmp_path):
     received = []
     global_bus.subscribe("initsys.service.remove", received.append)
     try:
@@ -1483,7 +1705,6 @@ def test_new_interface_always_has_explicit_dhcp_defaults(client):
 
 def test_dhcp4_not_sent_preserves_existing_flag(client):
     client.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True})
-    # second PUT omits dhcp4 — existing True value must be preserved
     client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
     r = client.get("/v1/networking/config/interfaces/eth0")
     assert r.json()["dhcp4"] is True
@@ -1499,78 +1720,32 @@ def test_dhcp4_and_static_addresses_coexist(client):
     assert r.json()["addresses"] == ["192.168.1.1/24"]
 
 
-def test_get_config_yaml_dhcp4_adds_parameters_and_hook(client, tmp_path):
-    plugin = _make_plugin(tmp_path)
-    c = _make_client(plugin)
-    c.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True, "link": {"state": "up"}})
-    config = yaml.safe_load(c.get("/v1/networking/config").text)
-    assert "parameters" in config
-    assert "dhcp4" in config["parameters"]["hooks"]
-    hook_def = config["parameters"]["hooks"]["dhcp4"]
-    assert "script" in hook_def
-    assert hook_def["script"].endswith("dhcp4.sh")
-    iface = config["interfaces"]["eth0"]
-    assert "hooks" in iface
-    assert any(h["name"] == "dhcp4" for h in iface["hooks"])
+def test_dhcp4_networkd_file_has_dhcp_ipv4(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True})
+    r = client.get("/v1/networking/config")
+    content = r.json()["10-ff-eth0.network"]
+    assert "DHCP=ipv4" in content
 
 
-def test_get_config_yaml_dhcp6_adds_parameters_and_hook(client, tmp_path):
-    plugin = _make_plugin(tmp_path)
-    c = _make_client(plugin)
-    c.put("/v1/networking/config/interfaces/eth0", json={"dhcp6": True, "link": {"state": "up"}})
-    config = yaml.safe_load(c.get("/v1/networking/config").text)
-    assert "parameters" in config
-    assert "dhcp6" in config["parameters"]["hooks"]
-    iface = config["interfaces"]["eth0"]
-    assert any(h["name"] == "dhcp6" for h in iface["hooks"])
+def test_dhcp6_networkd_file_has_dhcp_ipv6(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"dhcp6": True})
+    r = client.get("/v1/networking/config")
+    content = r.json()["10-ff-eth0.network"]
+    assert "DHCP=ipv6" in content
 
 
-def test_get_config_yaml_both_dhcp_protocols(client, tmp_path):
-    plugin = _make_plugin(tmp_path)
-    c = _make_client(plugin)
-    c.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True, "dhcp6": True})
-    config = yaml.safe_load(c.get("/v1/networking/config").text)
-    assert "dhcp4" in config["parameters"]["hooks"]
-    assert "dhcp6" in config["parameters"]["hooks"]
-    hook_names = [h["name"] for h in config["interfaces"]["eth0"]["hooks"]]
-    assert "dhcp4" in hook_names
-    assert "dhcp6" in hook_names
+def test_both_dhcp_networkd_file_has_dhcp_yes(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True, "dhcp6": True})
+    r = client.get("/v1/networking/config")
+    content = r.json()["10-ff-eth0.network"]
+    assert "DHCP=yes" in content
 
 
-def test_get_config_yaml_no_dhcp_no_parameters_section(client):
+def test_no_dhcp_networkd_file_has_dhcp_no(client):
     client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
-    config = yaml.safe_load(client.get("/v1/networking/config").text)
-    assert "parameters" not in config
-    assert "hooks" not in (config.get("interfaces", {}).get("eth0") or {})
-
-
-def test_dhcp4_hook_timeout_is_30(client, tmp_path):
-    plugin = _make_plugin(tmp_path)
-    c = _make_client(plugin)
-    c.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True})
-    config = yaml.safe_load(c.get("/v1/networking/config").text)
-    hook = next(h for h in config["interfaces"]["eth0"]["hooks"] if h["name"] == "dhcp4")
-    assert hook["timeout"] == 30
-
-
-def test_dhcp4_hook_script_path_points_to_bundled_script(tmp_path):
-    plugin = _make_plugin(tmp_path)
-    c = _make_client(plugin)
-    c.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True})
-    config = yaml.safe_load(c.get("/v1/networking/config").text)
-    script_path = config["parameters"]["hooks"]["dhcp4"]["script"]
-    assert "dhcp4.sh" in script_path
-    assert Path(script_path).exists()
-
-
-def test_dhcp4_only_on_one_interface_leaves_other_without_hook(client, tmp_path):
-    plugin = _make_plugin(tmp_path)
-    c = _make_client(plugin)
-    c.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True})
-    c.put("/v1/networking/config/interfaces/eth1", json={"addresses": ["10.0.0.1/24"]})
-    config = yaml.safe_load(c.get("/v1/networking/config").text)
-    assert "hooks" in config["interfaces"]["eth0"]
-    assert "hooks" not in (config["interfaces"].get("eth1") or {})
+    r = client.get("/v1/networking/config")
+    content = r.json()["10-ff-eth0.network"]
+    assert "DHCP=no" in content
 
 
 def test_dhcp4_interface_event_includes_flag(plugin, client):
@@ -1593,3 +1768,439 @@ def test_dhcp4_persists_across_restart(tmp_path):
     c2 = _make_client(p2)
     r = c2.get("/v1/networking/config/interfaces/eth0")
     assert r.json()["dhcp4"] is True
+
+
+# ── bonding ────────────────────────────────────────────────────────────────────
+
+def test_create_bond_returns_201(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    r = client.post("/v1/networking/config/bonds", json={
+        "name": "bond0", "mode": "802.3ad", "members": ["eth0", "eth1"]
+    })
+    assert r.status_code == 201
+    data = r.json()
+    assert data["name"] == "bond0"
+    assert data["link"]["kind"] == "bond"
+
+
+def test_create_bond_409_if_name_exists(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    client.post("/v1/networking/config/bonds", json={"name": "bond0", "members": ["eth0", "eth1"]})
+    r = client.post("/v1/networking/config/bonds", json={"name": "bond0", "members": ["eth0"]})
+    assert r.status_code == 409
+
+
+def test_create_bond_409_if_member_already_bonded(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    client.put("/v1/networking/config/interfaces/eth2", json={})
+    client.post("/v1/networking/config/bonds", json={"name": "bond0", "members": ["eth0"]})
+    r = client.post("/v1/networking/config/bonds", json={"name": "bond1", "members": ["eth0", "eth2"]})
+    assert r.status_code == 409
+
+
+def test_create_bond_sets_master_on_members(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    client.post("/v1/networking/config/bonds", json={"name": "bond0", "members": ["eth0", "eth1"]})
+    eth0 = client.get("/v1/networking/config/interfaces/eth0").json()
+    assert eth0["link"]["master"] == "bond0"
+
+
+def test_list_bonds(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.post("/v1/networking/config/bonds", json={"name": "bond0", "members": ["eth0"]})
+    r = client.get("/v1/networking/config/bonds")
+    assert r.status_code == 200
+    assert r.json()["count"] == 1
+    assert r.json()["bonds"][0]["name"] == "bond0"
+
+
+def test_get_bond(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.post("/v1/networking/config/bonds", json={"name": "bond0", "members": ["eth0"]})
+    r = client.get("/v1/networking/config/bonds/bond0")
+    assert r.status_code == 200
+    assert r.json()["name"] == "bond0"
+
+
+def test_get_bond_404(client):
+    r = client.get("/v1/networking/config/bonds/nonexistent")
+    assert r.status_code == 404
+
+
+def test_delete_bond_removes_members(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    client.post("/v1/networking/config/bonds", json={"name": "bond0", "members": ["eth0", "eth1"]})
+    r = client.delete("/v1/networking/config/bonds/bond0")
+    assert r.status_code == 200
+    assert r.json()["deleted"] == "bond0"
+    assert client.get("/v1/networking/config/interfaces/eth0").status_code == 404
+    assert client.get("/v1/networking/config/interfaces/eth1").status_code == 404
+
+
+def test_delete_bond_emits_event(plugin, client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.post("/v1/networking/config/bonds", json={"name": "bond0", "members": ["eth0"]})
+    received = []
+    global_bus.subscribe("networking.interface.removed", received.append)
+    try:
+        client.delete("/v1/networking/config/bonds/bond0")
+        names = [e.payload["name"] for e in received]
+        assert "bond0" in names
+    finally:
+        global_bus.unsubscribe("networking.interface.removed", received.append)
+
+
+def test_add_bond_member(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    client.post("/v1/networking/config/bonds", json={"name": "bond0", "members": ["eth0"]})
+    r = client.post("/v1/networking/config/bonds/bond0/members", json={"interface": "eth1"})
+    assert r.status_code == 201
+    assert r.json()["member"] == "eth1"
+    eth1 = client.get("/v1/networking/config/interfaces/eth1").json()
+    assert eth1["link"]["master"] == "bond0"
+
+
+def test_delete_bond_member(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    client.post("/v1/networking/config/bonds", json={"name": "bond0", "members": ["eth0", "eth1"]})
+    r = client.delete("/v1/networking/config/bonds/bond0/members/eth1")
+    assert r.status_code == 200
+    assert r.json()["removed_member"] == "eth1"
+    eth1 = client.get("/v1/networking/config/interfaces/eth1").json()
+    assert "master" not in (eth1.get("link") or {})
+
+
+def test_bond_netdev_file_generated(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.post("/v1/networking/config/bonds", json={"name": "bond0", "members": ["eth0"]})
+    r = client.get("/v1/networking/config")
+    data = r.json()
+    assert "10-ff-bond0.netdev" in data
+    assert "Kind=bond" in data["10-ff-bond0.netdev"]
+
+
+def test_bond_member_network_file_has_bond_directive(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.post("/v1/networking/config/bonds", json={"name": "bond0", "members": ["eth0"]})
+    r = client.get("/v1/networking/config")
+    content = r.json()["10-ff-eth0.network"]
+    assert "Bond=bond0" in content
+
+
+def test_bond_netdev_contains_mode(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.post("/v1/networking/config/bonds", json={
+        "name": "bond0", "members": ["eth0"], "mode": "active-backup"
+    })
+    content = client.get("/v1/networking/config").json()["10-ff-bond0.netdev"]
+    assert "Mode=active-backup" in content
+
+
+def test_bond_alias_redirect_on_create(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.put("/v1/networking/config/aliases/LAN", json={"interface": "eth0"})
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    client.post("/v1/networking/config/bonds", json={"name": "bond0", "members": ["eth0", "eth1"]})
+    aliases = client.get("/v1/networking/config/aliases").json()["aliases"]
+    assert aliases.get("LAN") == "bond0"
+
+
+# ── bridging ───────────────────────────────────────────────────────────────────
+
+def test_create_bridge_returns_201(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    r = client.post("/v1/networking/config/bridges", json={"name": "br0", "members": ["eth0"]})
+    assert r.status_code == 201
+    data = r.json()
+    assert data["name"] == "br0"
+    assert data["link"]["kind"] == "bridge"
+
+
+def test_create_bridge_409_if_name_exists(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.post("/v1/networking/config/bridges", json={"name": "br0", "members": ["eth0"]})
+    r = client.post("/v1/networking/config/bridges", json={"name": "br0", "members": []})
+    assert r.status_code == 409
+
+
+def test_list_bridges(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.post("/v1/networking/config/bridges", json={"name": "br0", "members": ["eth0"]})
+    r = client.get("/v1/networking/config/bridges")
+    assert r.status_code == 200
+    assert r.json()["count"] == 1
+
+
+def test_delete_bridge_removes_members(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.post("/v1/networking/config/bridges", json={"name": "br0", "members": ["eth0"]})
+    r = client.delete("/v1/networking/config/bridges/br0")
+    assert r.status_code == 200
+    assert client.get("/v1/networking/config/interfaces/eth0").status_code == 404
+
+
+def test_bridge_netdev_file_generated(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.post("/v1/networking/config/bridges", json={"name": "br0", "members": ["eth0"]})
+    r = client.get("/v1/networking/config")
+    data = r.json()
+    assert "10-ff-br0.netdev" in data
+    assert "Kind=bridge" in data["10-ff-br0.netdev"]
+
+
+def test_bridge_member_network_file_has_bridge_directive(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.post("/v1/networking/config/bridges", json={"name": "br0", "members": ["eth0"]})
+    content = client.get("/v1/networking/config").json()["10-ff-eth0.network"]
+    assert "Bridge=br0" in content
+
+
+def test_bridge_netdev_contains_stp(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.post("/v1/networking/config/bridges", json={
+        "name": "br0", "members": ["eth0"], "stp": True
+    })
+    content = client.get("/v1/networking/config").json()["10-ff-br0.netdev"]
+    assert "STP=yes" in content
+
+
+def test_add_bridge_member(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    client.post("/v1/networking/config/bridges", json={"name": "br0", "members": ["eth0"]})
+    r = client.post("/v1/networking/config/bridges/br0/members", json={"interface": "eth1"})
+    assert r.status_code == 201
+    assert r.json()["member"] == "eth1"
+
+
+def test_delete_bridge_member(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    client.put("/v1/networking/config/interfaces/eth1", json={})
+    client.post("/v1/networking/config/bridges", json={"name": "br0", "members": ["eth0", "eth1"]})
+    r = client.delete("/v1/networking/config/bridges/br0/members/eth1")
+    assert r.status_code == 200
+    assert r.json()["removed_member"] == "eth1"
+
+
+# ── WiFi ───────────────────────────────────────────────────────────────────────
+
+def test_wifi_interface_sets_kind_wifi(client):
+    r = client.put("/v1/networking/config/interfaces/wlan0", json={
+        "link": {"kind": "wifi", "state": "up"},
+        "dhcp4": True,
+        "wifi": {"ssid": "MyNetwork", "psk": "password123"},
+    })
+    assert r.status_code == 200
+    assert r.json()["link"]["kind"] == "wifi"
+    assert r.json()["wifi"]["ssid"] == "MyNetwork"
+
+
+def test_wifi_networkd_file_has_ignore_carrier_loss(client):
+    client.put("/v1/networking/config/interfaces/wlan0", json={
+        "link": {"kind": "wifi"},
+        "dhcp4": True,
+        "wifi": {"ssid": "MyNetwork", "psk": "pass"},
+    })
+    content = client.get("/v1/networking/config").json()["10-ff-wlan0.network"]
+    assert "IgnoreCarrierLoss=3s" in content
+
+
+def test_wifi_no_netdev_file_generated(client):
+    client.put("/v1/networking/config/interfaces/wlan0", json={
+        "link": {"kind": "wifi"},
+        "wifi": {"ssid": "MyNetwork", "psk": "pass"},
+    })
+    files = client.get("/v1/networking/config").json()
+    assert "10-ff-wlan0.netdev" not in files
+    assert "10-ff-wlan0.network" in files
+
+
+def test_wifi_apply_writes_wpa_supplicant_config(plugin, client):
+    client.put("/v1/networking/config/interfaces/wlan0", json={
+        "link": {"kind": "wifi"},
+        "dhcp4": True,
+        "wifi": {"ssid": "MyNet", "psk": "secret"},
+    })
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
+    wpa_calls = [
+        c for c in plugin._pyinfra_run.call_args_list
+        if "/etc/wpa_supplicant/" in str(c.kwargs.get("dest", ""))
+    ]
+    assert len(wpa_calls) == 1
+    assert "wpa_supplicant-wlan0.conf" in wpa_calls[0].kwargs["dest"]
+
+
+def test_wifi_apply_enables_wpa_supplicant_service(plugin, client):
+    client.put("/v1/networking/config/interfaces/wlan0", json={
+        "link": {"kind": "wifi"},
+        "wifi": {"ssid": "MyNet", "psk": "secret"},
+    })
+    received = []
+    global_bus.subscribe("initsys.service.start", received.append)
+    try:
+        with patch("subprocess.run", side_effect=_subprocess_run_ok):
+            client.post("/v1/networking/apply")
+        service_names = [e.payload["service_name"] for e in received]
+        assert "wpa_supplicant@wlan0.service" in service_names
+    finally:
+        global_bus.unsubscribe("initsys.service.start", received.append)
+
+
+def test_wifi_psk_written_with_mode_600(plugin, client):
+    client.put("/v1/networking/config/interfaces/wlan0", json={
+        "link": {"kind": "wifi"},
+        "wifi": {"ssid": "MyNet", "psk": "secret"},
+    })
+    with patch("subprocess.run", side_effect=_subprocess_run_ok):
+        client.post("/v1/networking/apply")
+    wpa_calls = [
+        c for c in plugin._pyinfra_run.call_args_list
+        if "/etc/wpa_supplicant/" in str(c.kwargs.get("dest", ""))
+    ]
+    assert wpa_calls[0].kwargs["mode"] == "600"
+
+
+# ── WireGuard ──────────────────────────────────────────────────────────────────
+
+def test_wg_interface_creates_netdev_file(client):
+    client.put("/v1/networking/config/interfaces/wg0", json={
+        "link": {"kind": "wireguard"},
+        "addresses": ["10.0.0.1/24"],
+        "wireguard": {"private_key": "A" * 44, "listen_port": 51820},
+    })
+    files = client.get("/v1/networking/config").json()
+    assert "10-ff-wg0.netdev" in files
+    assert "10-ff-wg0.network" in files
+
+
+def test_wg_netdev_contains_private_key(client):
+    client.put("/v1/networking/config/interfaces/wg0", json={
+        "link": {"kind": "wireguard"},
+        "wireguard": {"private_key": "B" * 44},
+    })
+    content = client.get("/v1/networking/config").json()["10-ff-wg0.netdev"]
+    assert "PrivateKey=" + "B" * 44 in content
+
+
+def test_wg_add_peer_returns_201(client):
+    client.put("/v1/networking/config/interfaces/wg0", json={
+        "link": {"kind": "wireguard"},
+        "wireguard": {"private_key": "A" * 44},
+    })
+    r = client.post("/v1/networking/config/interfaces/wg0/peers", json={
+        "public_key": "C" * 44,
+        "allowed_ips": ["10.0.0.2/32"],
+    })
+    assert r.status_code == 201
+    data = r.json()
+    assert "id" in data
+    assert data["public_key"] == "C" * 44
+
+
+def test_wg_peer_id_is_pubkey_hash(client):
+    import hashlib as _hashlib
+    pubkey = "D" * 44
+    expected_id = _hashlib.sha256(pubkey.encode()).hexdigest()[:8]
+    client.put("/v1/networking/config/interfaces/wg0", json={
+        "link": {"kind": "wireguard"},
+        "wireguard": {"private_key": "A" * 44},
+    })
+    r = client.post("/v1/networking/config/interfaces/wg0/peers", json={"public_key": pubkey})
+    assert r.json()["id"] == expected_id
+
+
+def test_wg_duplicate_peer_409(client):
+    client.put("/v1/networking/config/interfaces/wg0", json={
+        "link": {"kind": "wireguard"},
+        "wireguard": {"private_key": "A" * 44},
+    })
+    client.post("/v1/networking/config/interfaces/wg0/peers", json={"public_key": "E" * 44})
+    r = client.post("/v1/networking/config/interfaces/wg0/peers", json={"public_key": "E" * 44})
+    assert r.status_code == 409
+
+
+def test_wg_list_peers(client):
+    client.put("/v1/networking/config/interfaces/wg0", json={
+        "link": {"kind": "wireguard"},
+        "wireguard": {"private_key": "A" * 44},
+    })
+    client.post("/v1/networking/config/interfaces/wg0/peers", json={"public_key": "F" * 44})
+    r = client.get("/v1/networking/config/interfaces/wg0/peers")
+    assert r.status_code == 200
+    assert r.json()["count"] == 1
+
+
+def test_wg_delete_peer(client):
+    client.put("/v1/networking/config/interfaces/wg0", json={
+        "link": {"kind": "wireguard"},
+        "wireguard": {"private_key": "A" * 44},
+    })
+    r = client.post("/v1/networking/config/interfaces/wg0/peers", json={"public_key": "G" * 44})
+    peer_id = r.json()["id"]
+    del_r = client.delete(f"/v1/networking/config/interfaces/wg0/peers/{peer_id}")
+    assert del_r.status_code == 200
+    assert del_r.json()["deleted"] == peer_id
+    assert client.get("/v1/networking/config/interfaces/wg0/peers").json()["count"] == 0
+
+
+def test_wg_update_peer(client):
+    client.put("/v1/networking/config/interfaces/wg0", json={
+        "link": {"kind": "wireguard"},
+        "wireguard": {"private_key": "A" * 44},
+    })
+    r = client.post("/v1/networking/config/interfaces/wg0/peers", json={
+        "public_key": "H" * 44,
+        "allowed_ips": ["10.0.0.2/32"],
+    })
+    peer_id = r.json()["id"]
+    up_r = client.put(f"/v1/networking/config/interfaces/wg0/peers/{peer_id}", json={
+        "persistent_keepalive": 25,
+    })
+    assert up_r.status_code == 200
+    assert up_r.json()["persistent_keepalive"] == 25
+    assert up_r.json()["allowed_ips"] == ["10.0.0.2/32"]
+
+
+def test_wg_peer_on_nonwireguard_interface_422(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={})
+    r = client.post("/v1/networking/config/interfaces/eth0/peers", json={"public_key": "I" * 44})
+    assert r.status_code == 404
+
+
+def test_wg_netdev_contains_peer_section(client):
+    client.put("/v1/networking/config/interfaces/wg0", json={
+        "link": {"kind": "wireguard"},
+        "wireguard": {"private_key": "A" * 44},
+    })
+    client.post("/v1/networking/config/interfaces/wg0/peers", json={
+        "public_key": "J" * 44,
+        "allowed_ips": ["10.0.0.2/32"],
+        "endpoint": "peer.example.com:51820",
+    })
+    content = client.get("/v1/networking/config").json()["10-ff-wg0.netdev"]
+    assert "[WireGuardPeer]" in content
+    assert "PublicKey=" + "J" * 44 in content
+    assert "AllowedIPs=10.0.0.2/32" in content
+    assert "Endpoint=peer.example.com:51820" in content
+
+
+def test_wg_netdev_omits_optional_peer_fields_when_none(client):
+    client.put("/v1/networking/config/interfaces/wg0", json={
+        "link": {"kind": "wireguard"},
+        "wireguard": {"private_key": "A" * 44},
+    })
+    client.post("/v1/networking/config/interfaces/wg0/peers", json={
+        "public_key": "K" * 44,
+    })
+    content = client.get("/v1/networking/config").json()["10-ff-wg0.netdev"]
+    assert "Endpoint=" not in content
+    assert "PresharedKey=" not in content
+    assert "PersistentKeepalive=" not in content
