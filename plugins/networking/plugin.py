@@ -60,6 +60,8 @@ class LinkConfig(BaseModel):
 class InterfaceUpdate(BaseModel):
     addresses: Optional[list[str]] = None  # CIDR notation, e.g. "192.168.1.1/24"
     link: Optional[LinkConfig] = None
+    dhcp4: Optional[bool] = None  # enable DHCPv4 client via ifstate hook
+    dhcp6: Optional[bool] = None  # enable DHCPv6 client via ifstate hook
 
     @field_validator("addresses", mode="before")
     @classmethod
@@ -217,6 +219,7 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         self.add_macro_namespace("interface", self._resolve_interface_macro)
         self._register_routes()
         self._sync_os_boot_service()
+        self._ensure_hooks_executable()
 
     def teardown(self) -> None:
         self._save_state()
@@ -342,6 +345,8 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 entry["addresses"] = iface_data["addresses"]
             if iface_data.get("link"):
                 entry["link"] = iface_data["link"]
+            entry["dhcp4"] = False
+            entry["dhcp6"] = False
             self._interfaces[name] = entry
 
         for r in (data.get("routing", {}) or {}).get("routes", []) or []:
@@ -362,10 +367,29 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 len(self._interfaces), len(self._routes), len(self._aliases),
             )
 
+    def _ensure_hooks_executable(self) -> None:
+        hooks_dir = Path(__file__).parent / "hooks"
+        if not hooks_dir.is_dir():
+            return
+        for script in hooks_dir.glob("*.sh"):
+            script.chmod(script.stat().st_mode | 0o111)
+
     # ── ifstate YAML builder ───────────────────────────────────────────
 
     def _build_ifstate_yaml(self) -> str:
         config: dict[str, Any] = {}
+
+        # Determine which DHCP protocols are needed across all interfaces.
+        needs_dhcp4 = any(iface.get("dhcp4") for iface in self._interfaces.values())
+        needs_dhcp6 = any(iface.get("dhcp6") for iface in self._interfaces.values())
+        if needs_dhcp4 or needs_dhcp6:
+            hooks: dict[str, Any] = {}
+            hooks_dir = Path(__file__).parent / "hooks"
+            if needs_dhcp4:
+                hooks["dhcp4"] = {"script": str(hooks_dir / "dhcp4.sh")}
+            if needs_dhcp6:
+                hooks["dhcp6"] = {"script": str(hooks_dir / "dhcp6.sh")}
+            config["parameters"] = {"hooks": hooks}
 
         if self._interfaces:
             config["interfaces"] = {}
@@ -380,6 +404,13 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 if "kind" not in link:
                     link["kind"] = "physical"
                 entry["link"] = link
+                iface_hooks = []
+                if iface.get("dhcp4"):
+                    iface_hooks.append({"name": "dhcp4", "timeout": 30})
+                if iface.get("dhcp6"):
+                    iface_hooks.append({"name": "dhcp6", "timeout": 30})
+                if iface_hooks:
+                    entry["hooks"] = iface_hooks
                 config["interfaces"][name] = entry
 
         if self._routes:
@@ -520,6 +551,8 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         if "link" in updates and updates["link"] is not None:
             updates["link"] = {k: v for k, v in updates["link"].items() if v is not None}
         existing.update(updates)
+        existing.setdefault("dhcp4", False)
+        existing.setdefault("dhcp6", False)
         self._interfaces[name] = existing
         self._aliases.setdefault(name, name)
         self._save_state()
@@ -570,6 +603,8 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
                 entry["addresses"] = iface_data["addresses"]
             if iface_data.get("link"):
                 entry["link"] = iface_data["link"]
+            entry.setdefault("dhcp4", False)
+            entry.setdefault("dhcp6", False)
             self._interfaces[name] = entry
             self._aliases.setdefault(name, name)
             imported.append(name)

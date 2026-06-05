@@ -96,7 +96,7 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             mutation_model="deferred", data_dir=self.data_dir,
         )
         self._default_filter = self.config.get("default_filter_name", "fastfirewall")
-        self._nft_wrapper = self.config.get("nft_wrapper") or str(self.plugin_dir / "nft_cmd")
+        self._nft_wrapper = self.config.get("nft_wrapper") or str(Path(__file__).parent / "nft_cmd")
         self._rules: dict[str, FirewallRule] = {}
         self._chains: dict[str, ChainConfig] = {
             name: ChainConfig(**cfg) for name, cfg in _DEFAULT_CHAINS.items()

@@ -12,6 +12,7 @@ enabled: true
 plugin_requirements: ["host"]
 os_requirements:
   - mtr
+  - isc-dhcp-client
 
 service_ports:
   networking:
