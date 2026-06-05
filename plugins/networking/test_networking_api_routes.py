@@ -1444,3 +1444,152 @@ def test_enable_os_boot_default_false_emits_service_remove(tmp_path):
         assert received[0].payload["service_name"] == "fastfirewall-networking"
     finally:
         global_bus.unsubscribe("initsys.service.remove", received.append)
+
+
+# ── DHCP interfaces ────────────────────────────────────────────────────────────
+
+def test_dhcp4_true_stored_on_interface(client):
+    r = client.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True, "link": {"state": "up"}})
+    assert r.status_code == 200
+    assert r.json()["dhcp4"] is True
+
+
+def test_dhcp6_true_stored_on_interface(client):
+    r = client.put("/v1/networking/config/interfaces/eth0", json={"dhcp6": True, "link": {"state": "up"}})
+    assert r.status_code == 200
+    assert r.json()["dhcp6"] is True
+
+
+def test_dhcp4_false_stored_explicitly(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True})
+    r = client.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": False})
+    assert r.status_code == 200
+    assert r.json()["dhcp4"] is False
+
+
+def test_dhcp6_false_stored_explicitly(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"dhcp6": True})
+    r = client.put("/v1/networking/config/interfaces/eth0", json={"dhcp6": False})
+    assert r.status_code == 200
+    assert r.json()["dhcp6"] is False
+
+
+def test_new_interface_always_has_explicit_dhcp_defaults(client):
+    r = client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
+    assert r.status_code == 200
+    assert r.json()["dhcp4"] is False
+    assert r.json()["dhcp6"] is False
+
+
+def test_dhcp4_not_sent_preserves_existing_flag(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True})
+    # second PUT omits dhcp4 — existing True value must be preserved
+    client.put("/v1/networking/config/interfaces/eth0", json={"link": {"state": "up"}})
+    r = client.get("/v1/networking/config/interfaces/eth0")
+    assert r.json()["dhcp4"] is True
+
+
+def test_dhcp4_and_static_addresses_coexist(client):
+    r = client.put("/v1/networking/config/interfaces/eth0", json={
+        "dhcp4": True,
+        "addresses": ["192.168.1.1/24"],
+    })
+    assert r.status_code == 200
+    assert r.json()["dhcp4"] is True
+    assert r.json()["addresses"] == ["192.168.1.1/24"]
+
+
+def test_get_config_yaml_dhcp4_adds_parameters_and_hook(client, tmp_path):
+    plugin = _make_plugin(tmp_path)
+    c = _make_client(plugin)
+    c.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True, "link": {"state": "up"}})
+    config = yaml.safe_load(c.get("/v1/networking/config").text)
+    assert "parameters" in config
+    assert "dhcp4" in config["parameters"]["hooks"]
+    hook_def = config["parameters"]["hooks"]["dhcp4"]
+    assert "script" in hook_def
+    assert hook_def["script"].endswith("dhcp4.sh")
+    iface = config["interfaces"]["eth0"]
+    assert "hooks" in iface
+    assert any(h["name"] == "dhcp4" for h in iface["hooks"])
+
+
+def test_get_config_yaml_dhcp6_adds_parameters_and_hook(client, tmp_path):
+    plugin = _make_plugin(tmp_path)
+    c = _make_client(plugin)
+    c.put("/v1/networking/config/interfaces/eth0", json={"dhcp6": True, "link": {"state": "up"}})
+    config = yaml.safe_load(c.get("/v1/networking/config").text)
+    assert "parameters" in config
+    assert "dhcp6" in config["parameters"]["hooks"]
+    iface = config["interfaces"]["eth0"]
+    assert any(h["name"] == "dhcp6" for h in iface["hooks"])
+
+
+def test_get_config_yaml_both_dhcp_protocols(client, tmp_path):
+    plugin = _make_plugin(tmp_path)
+    c = _make_client(plugin)
+    c.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True, "dhcp6": True})
+    config = yaml.safe_load(c.get("/v1/networking/config").text)
+    assert "dhcp4" in config["parameters"]["hooks"]
+    assert "dhcp6" in config["parameters"]["hooks"]
+    hook_names = [h["name"] for h in config["interfaces"]["eth0"]["hooks"]]
+    assert "dhcp4" in hook_names
+    assert "dhcp6" in hook_names
+
+
+def test_get_config_yaml_no_dhcp_no_parameters_section(client):
+    client.put("/v1/networking/config/interfaces/eth0", json={"addresses": ["10.0.0.1/24"]})
+    config = yaml.safe_load(client.get("/v1/networking/config").text)
+    assert "parameters" not in config
+    assert "hooks" not in (config.get("interfaces", {}).get("eth0") or {})
+
+
+def test_dhcp4_hook_timeout_is_30(client, tmp_path):
+    plugin = _make_plugin(tmp_path)
+    c = _make_client(plugin)
+    c.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True})
+    config = yaml.safe_load(c.get("/v1/networking/config").text)
+    hook = next(h for h in config["interfaces"]["eth0"]["hooks"] if h["name"] == "dhcp4")
+    assert hook["timeout"] == 30
+
+
+def test_dhcp4_hook_script_path_points_to_bundled_script(tmp_path):
+    plugin = _make_plugin(tmp_path)
+    c = _make_client(plugin)
+    c.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True})
+    config = yaml.safe_load(c.get("/v1/networking/config").text)
+    script_path = config["parameters"]["hooks"]["dhcp4"]["script"]
+    assert "dhcp4.sh" in script_path
+    assert Path(script_path).exists()
+
+
+def test_dhcp4_only_on_one_interface_leaves_other_without_hook(client, tmp_path):
+    plugin = _make_plugin(tmp_path)
+    c = _make_client(plugin)
+    c.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True})
+    c.put("/v1/networking/config/interfaces/eth1", json={"addresses": ["10.0.0.1/24"]})
+    config = yaml.safe_load(c.get("/v1/networking/config").text)
+    assert "hooks" in config["interfaces"]["eth0"]
+    assert "hooks" not in (config["interfaces"].get("eth1") or {})
+
+
+def test_dhcp4_interface_event_includes_flag(plugin, client):
+    received = []
+    global_bus.subscribe("networking.interface.configured", received.append)
+    try:
+        client.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True})
+        assert received[0].payload["dhcp4"] is True
+    finally:
+        global_bus.unsubscribe("networking.interface.configured", received.append)
+
+
+def test_dhcp4_persists_across_restart(tmp_path):
+    p1 = _make_plugin(tmp_path)
+    c1 = _make_client(p1)
+    c1.put("/v1/networking/config/interfaces/eth0", json={"dhcp4": True})
+    p1.teardown()
+
+    p2 = _make_plugin(tmp_path)
+    c2 = _make_client(p2)
+    r = c2.get("/v1/networking/config/interfaces/eth0")
+    assert r.json()["dhcp4"] is True

@@ -494,9 +494,12 @@ def run_gateway(client: FFClient, cfg: dict[str, Any]) -> None:
     wan_iface = wan.get("interface")
     if wan_iface:
         _print_step(f"Configuring WAN interface '{wan_iface}'")
+        wan_mode = wan.get("mode", "dhcp")
         wan_body: dict[str, Any] = {"link": {"state": "up"}}
-        if wan.get("mode", "dhcp") == "static" and wan.get("address"):
+        if wan_mode == "static" and wan.get("address"):
             wan_body["addresses"] = [wan["address"]]
+        elif wan_mode == "dhcp":
+            wan_body["dhcp4"] = True
         client.put(
             f"/v1/networking/config/interfaces/{wan_iface}",
             wan_body,

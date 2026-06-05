@@ -29,6 +29,8 @@ exclude = ["data", "test_*.py", "CLAUDE.md", "*_state.json"]
 [tool.hatch.build.targets.wheel.force-include]
 "plugin.py" = "fastfirewall_plugin_networking/plugin.py"
 "plugin.yaml" = "fastfirewall_plugin_networking/plugin.yaml"
+"hooks/dhcp4.sh" = "fastfirewall_plugin_networking/hooks/dhcp4.sh"
+"hooks/dhcp6.sh" = "fastfirewall_plugin_networking/hooks/dhcp6.sh"
 
 [tool.hatch.build.targets.sdist]
 exclude = ["data", "test_*.py", "CLAUDE.md", "*_state.json"]

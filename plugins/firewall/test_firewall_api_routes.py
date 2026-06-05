@@ -54,6 +54,7 @@ def _make_app(tmp_path):
         "state_file": "rules.json",
         "default_filter_name": "test-fw",
     }
+    inst._apply_nft_script = MagicMock(side_effect=RuntimeError("nft stub — no kernel in tests"))
     inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
@@ -1477,12 +1478,13 @@ def test_port_range_and_exact_port_are_exclusive():
 
 def test_live_state_returns_500_when_nft_fails(tmp_path):
     inst, _ = _make_inst(tmp_path)
+    inst._apply_nft_script = MagicMock(side_effect=RuntimeError("nft stub"))
     inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
     client = TestClient(app)
-    # nft_cmd will fail since we're not root — expect a 500
-    r = client.get("/v1/firewall/live-state")
+    with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="", stderr="Table not found")):
+        r = client.get("/v1/firewall/live-state")
     assert r.status_code == 500
 
 
@@ -2319,19 +2321,23 @@ def test_counter_survives_reload(tmp_path):
 
 def test_list_counters_returns_500_without_root(tmp_path):
     inst, _ = _make_inst(tmp_path)
+    inst._apply_nft_script = MagicMock(side_effect=RuntimeError("nft stub"))
     inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
-    r = TestClient(app).get("/v1/firewall/counters")
+    with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="", stderr="Permission denied")):
+        r = TestClient(app).get("/v1/firewall/counters")
     assert r.status_code == 500
 
 
 def test_reset_counter_returns_500_without_root(tmp_path):
     inst, _ = _make_inst(tmp_path)
+    inst._apply_nft_script = MagicMock(side_effect=RuntimeError("nft stub"))
     inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
-    r = TestClient(app).post("/v1/firewall/counters/ssh_counter/reset")
+    with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="", stderr="No such counter")):
+        r = TestClient(app).post("/v1/firewall/counters/ssh_counter/reset")
     assert r.status_code == 500
 
 

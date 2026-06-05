@@ -46,6 +46,38 @@ Additional routes: `GET /status`, `GET /interfaces`, `GET /interfaces/{name}`, `
 
 `desired_state` holds what FF should enforce. `current_state` is committed only after a successful `POST /apply` or boot-time apply. `GET /status` reports `pending_changes: self._state_file.pending_changes`.
 
+## DHCP interfaces
+
+Set `dhcp4: true` and/or `dhcp6: true` on an interface to enable a DHCP client via the ifstate hook system:
+
+```http
+PUT /v1/networking/config/interfaces/eth0
+{"dhcp4": true, "link": {"state": "up"}}
+```
+
+Setting `dhcp4: false` removes the flag (equivalent to never having set it). The generated ifstate YAML gains a `parameters.hooks` section referencing shell scripts bundled in `plugins/networking/hooks/`, and each DHCP-enabled interface gets a `hooks` list:
+
+```yaml
+parameters:
+  hooks:
+    dhcp4:
+      script: /path/to/plugins/networking/hooks/dhcp4.sh
+interfaces:
+  eth0:
+    link:
+      state: up
+      kind: physical
+    hooks:
+      - name: dhcp4
+        timeout: 30
+```
+
+`hooks/dhcp4.sh` and `hooks/dhcp6.sh` manage `dhclient -4` / `dhclient -6` respectively, with PID tracking in the ifstate run directory. `_ensure_hooks_executable()` is called from `setup()` to guarantee execute bits are set after installs that strip them.
+
+The `$interface.<alias>.address` and `$interface.<alias>.net_addr` macros are empty for pure-DHCP interfaces (no static addresses in desired state), since DHCP-assigned addresses are not stored in desired state.
+
+Requires `isc-dhcp-client` (declared in `os_requirements`).
+
 ## Key methods
 
 **`_load_state()`** — calls `self._state_file.load_desired(default={})`, then reads `interfaces`, `routes`, `aliases` from the result into `self._interfaces`, `self._routes`, `self._aliases`. `current_snapshot` is restored automatically from the on-disk `current_state`.
