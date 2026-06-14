@@ -1,0 +1,47 @@
+name: Caddy Plugin
+id: caddy
+version: "1.0.0"
+description: >
+  Manages Caddy as an HTTPS reverse proxy. Writes Caddy JSON config to the
+  plugin data directory and copies it to /etc/caddy/caddy.json on apply.
+  Other plugins register upstreams by emitting app_proxy.register on the eventbus.
+  Routes mount at /v1/caddy/.
+author: hornetmadness@gmail.com
+
+enabled: true
+
+plugin_requirements: ["pkg_management", "host", "networking"]
+
+repos:
+  - name: caddy-stable
+    key_url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+    key_dest: /usr/share/keyrings/caddy-stable.gpg
+    repo_url: https://dl.cloudsmith.io/public/caddy/stable/deb/debian
+    filename: caddy-stable
+    src: "deb [signed-by=/usr/share/keyrings/caddy-stable.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main"
+
+os_requirements:
+  - caddy
+
+skip_host_os_port_check: true  # Caddy may already be running on 80/443
+
+service_ports:
+  app_proxy:
+    tcp: [80, 443]
+
+# Events listened to:
+#   app_proxy.register   – payload: {name, upstream, path_prefix?, description?}
+#   app_proxy.unregister – payload: {name}
+#
+# Events emitted:
+#   caddy.config.applied   – payload: {success: bool}
+#   caddy.config.discarded – payload: {}
+
+config:
+  state_file: caddy_state.json
+  config_file: caddy.json          # staging copy filename inside data/
+  system_conf_file: /etc/caddy/caddy.json
+  ignore_state_on_boot: false
+
+settings:
+  admin_port: 2018

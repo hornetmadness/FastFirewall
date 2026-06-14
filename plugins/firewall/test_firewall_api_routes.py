@@ -757,34 +757,33 @@ def _default_chains(mod):
 def test_macro_resolved_to_port_in_script():
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
-    macro_registry.set_service_ports({"dns": {"udp": [53]}})
+    macro_registry.register("$service_port.dns.udp", [53])
     try:
         rule = mod.FirewallRule(name="allow-dns", action="accept", protocol="udp", dst_port="$service_port.dns.udp")
         script = mod._compile_to_script([rule], "test", _default_chains(mod), logging.getLogger("test"))
         assert "udp dport 53" in script
     finally:
-        macro_registry.set_service_ports({})
+        macro_registry.unregister("$service_port")
 
 
 def test_macro_multi_port_all_appear_in_script():
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
-    macro_registry.set_service_ports({"smtp": {"tcp": [25, 587, 465]}})
+    macro_registry.register("$service_port.smtp.tcp", [25, 587, 465])
     try:
         rule = mod.FirewallRule(name="allow-smtp", action="accept", protocol="tcp", dst_port="$service_port.smtp.tcp")
         script = mod._compile_to_script([rule], "test", _default_chains(mod), logging.getLogger("test"))
-        # All three ports should appear as a set expression
         assert "25" in script
         assert "465" in script
         assert "587" in script
     finally:
-        macro_registry.set_service_ports({})
+        macro_registry.unregister("$service_port")
 
 
 def test_macro_rule_skipped_when_registry_empty():
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
-    macro_registry.set_service_ports({})
+    macro_registry.unregister("$service_port")
     # protocol="udp" required so port resolution is attempted; without protocol, ports are skipped
     rule = mod.FirewallRule(name="needs-dns", action="accept", protocol="udp", dst_port="$service_port.dns.udp")
     script = mod._compile_to_script([rule], "test", _default_chains(mod), logging.getLogger("test"))
@@ -795,7 +794,8 @@ def test_macro_rule_skipped_when_registry_empty():
 
 def test_status_includes_macros(tmp_path):
     from plugin_system.core.macros import macro_registry
-    macro_registry.set_service_ports({"dns": {"udp": [53]}, "dhcp": {"udp": [67]}})
+    macro_registry.register("$service_port.dns.udp", [53])
+    macro_registry.register("$service_port.dhcp.udp", [67])
     try:
         inst, _ = _make_inst(tmp_path)
         inst.setup()
@@ -804,7 +804,7 @@ def test_status_includes_macros(tmp_path):
         status = TestClient(app).get("/v1/firewall/status").json()
         assert "service_port" in status["macros"]
     finally:
-        macro_registry.set_service_ports({})
+        macro_registry.unregister("$service_port")
 
 
 def test_macro_rule_survives_reload(tmp_path):
@@ -833,8 +833,8 @@ def test_interface_macro_syntax_accepted(client):
 
 def test_status_includes_interface_macro_namespace(tmp_path):
     from plugin_system.core.macros import macro_registry
-    _aliases: dict[str, str] = {"LAN1": "eth0", "WAN": "eth1"}
-    macro_registry.register_namespace("interface", lambda *s: _aliases.get(s[0]) if s else None)
+    macro_registry.register("$interface.LAN1", "eth0")
+    macro_registry.register("$interface.WAN", "eth1")
     try:
         inst, _ = _make_inst(tmp_path)
         inst.setup()
@@ -843,25 +843,25 @@ def test_status_includes_interface_macro_namespace(tmp_path):
         status = TestClient(app).get("/v1/firewall/status").json()
         assert "interface" in status["macros"]
     finally:
-        macro_registry.unregister_namespace("interface")
+        macro_registry.unregister("$interface")
 
 
 def test_interface_macro_resolve_string():
     from plugin_system.core.macros import macro_registry
-    _aliases: dict[str, str] = {"LAN1": "eth0", "WAN": "eth1"}
-    macro_registry.register_namespace("interface", lambda *s: _aliases.get(s[0]) if s else None)
+    macro_registry.register("$interface.LAN1", "eth0")
+    macro_registry.register("$interface.WAN", "eth1")
     try:
-        assert macro_registry.resolve_string("$interface.LAN1") == "eth0"
-        assert macro_registry.resolve_string("$interface.WAN") == "eth1"
-        assert macro_registry.resolve_string("$interface.MISSING") is None
-        assert macro_registry.resolve_string("$service_port.dns.udp") is None
+        assert macro_registry.resolve("$interface.LAN1") == "eth0"
+        assert macro_registry.resolve("$interface.WAN") == "eth1"
+        assert macro_registry.resolve("$interface.MISSING") is None
+        assert macro_registry.resolve("$service_port.dns.udp") is None
     finally:
-        macro_registry.unregister_namespace("interface")
+        macro_registry.unregister("$interface")
 
 
 def test_interface_macro_unknown_namespace_returns_none():
     from plugin_system.core.macros import macro_registry
-    assert macro_registry.resolve_string("$unknown.FOO") is None
+    assert macro_registry.resolve("$unknown.FOO") is None
 
 
 # ---------------------------------------------------------------------------
@@ -3062,7 +3062,7 @@ def test_pending_changes_in_apply_response(tmp_path):
 
 def test_macro_snapshot_saved_after_apply(tmp_path):
     from plugin_system.core.macros import macro_registry
-    macro_registry.set_service_ports({"dns": {"udp": [53]}})
+    macro_registry.register("$service_port.dns.udp", [53])
     try:
         inst, mod = _make_inst(tmp_path)
         inst._apply_nft_script = MagicMock()
@@ -3079,12 +3079,12 @@ def test_macro_snapshot_saved_after_apply(tmp_path):
         assert "$service_port.dns.udp" in snapshot
         assert snapshot["$service_port.dns.udp"] == [53]
     finally:
-        macro_registry.set_service_ports({})
+        macro_registry.unregister("$service_port")
 
 
 def test_macro_snapshot_persists_across_reload(tmp_path):
     from plugin_system.core.macros import macro_registry
-    macro_registry.set_service_ports({"dns": {"udp": [53]}})
+    macro_registry.register("$service_port.dns.udp", [53])
     try:
         inst, mod = _make_inst(tmp_path)
         inst._apply_nft_script = MagicMock()
@@ -3105,14 +3105,14 @@ def test_macro_snapshot_persists_across_reload(tmp_path):
         assert snapshot is not None
         assert snapshot.get("$service_port.dns.udp") == [53]
     finally:
-        macro_registry.set_service_ports({})
+        macro_registry.unregister("$service_port")
 
 
 def test_plugins_all_loaded_reapplies_when_macro_changed(tmp_path):
     from plugin_system.core.macros import macro_registry
     # service_port macros are NOT populated during setup() — this mirrors real boot order,
     # where the loader sets service_ports only after all plugins finish loading.
-    macro_registry.set_service_ports({})
+    macro_registry.unregister("$service_port")
     try:
         (tmp_path / "data").mkdir()
         state = {
@@ -3127,23 +3127,23 @@ def test_plugins_all_loaded_reapplies_when_macro_changed(tmp_path):
         inst._apply_nft_script = MagicMock()
         with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
             inst.setup()
-        # After setup, snapshot stores [] — service_port not yet populated at this point
-        assert inst._state_file.get_macro_snapshot() == {"$service_port.dns.udp": []}
+        # After setup, snapshot stores None — service_port not yet populated at this point
+        assert inst._state_file.get_macro_snapshot() == {"$service_port.dns.udp": None}
         call_count_after_setup = inst._apply_nft_script.call_count
         # Now service_ports are populated — as plugins.all_loaded timing implies
-        macro_registry.set_service_ports({"dns": {"udp": [53]}})
+        macro_registry.register("$service_port.dns.udp", [53])
         with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
             inst._on_plugins_loaded(Event("plugins.all_loaded", payload={}))
         # Snapshot changed [] → [53] so a re-apply must have occurred
         assert inst._apply_nft_script.call_count > call_count_after_setup
     finally:
-        macro_registry.set_service_ports({})
+        macro_registry.unregister("$service_port")
 
 
 def test_plugins_all_loaded_skips_reapply_when_macro_unchanged(tmp_path):
     from plugin_system.core.macros import macro_registry
     # service_port macros populated before setup — snapshot saved as [53]
-    macro_registry.set_service_ports({"dns": {"udp": [53]}})
+    macro_registry.register("$service_port.dns.udp", [53])
     try:
         (tmp_path / "data").mkdir()
         state = {
@@ -3166,7 +3166,7 @@ def test_plugins_all_loaded_skips_reapply_when_macro_unchanged(tmp_path):
             inst._on_plugins_loaded(Event("plugins.all_loaded", payload={}))
         assert inst._apply_nft_script.call_count == call_count_after_setup
     finally:
-        macro_registry.set_service_ports({})
+        macro_registry.unregister("$service_port")
 
 
 # ---------------------------------------------------------------------------
@@ -3176,7 +3176,7 @@ def test_plugins_all_loaded_skips_reapply_when_macro_unchanged(tmp_path):
 def test_src_address_macro_resolves_to_ip_saddr():
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
-    macro_registry.register_namespace("interface", lambda *s: ["192.168.1.0/24"] if s == ("lan", "net_addr") else None)
+    macro_registry.register("$interface.lan.net_addr", ["192.168.1.0/24"])
     try:
         rule = mod.FirewallRule(name="lan-ssh", action="accept", protocol="tcp",
                                 src_address="$interface.lan.net_addr", dst_port=22)
@@ -3184,13 +3184,13 @@ def test_src_address_macro_resolves_to_ip_saddr():
         assert expr is not None
         assert "ip saddr 192.168.1.0/24" in expr
     finally:
-        macro_registry.unregister_namespace("interface")
+        macro_registry.unregister("$interface")
 
 
 def test_dst_address_macro_resolves_to_ip_daddr():
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
-    macro_registry.register_namespace("interface", lambda *s: ["10.0.0.0/8"] if s == ("wan", "net_addr") else None)
+    macro_registry.register("$interface.wan.net_addr", ["10.0.0.0/8"])
     try:
         rule = mod.FirewallRule(name="fwd-to-wan", action="accept",
                                 dst_address="$interface.wan.net_addr")
@@ -3198,13 +3198,13 @@ def test_dst_address_macro_resolves_to_ip_daddr():
         assert expr is not None
         assert "ip daddr 10.0.0.0/8" in expr
     finally:
-        macro_registry.unregister_namespace("interface")
+        macro_registry.unregister("$interface")
 
 
 def test_src_address_macro_multiple_addrs_produces_inline_set():
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
-    macro_registry.register_namespace("interface", lambda *s: ["192.168.1.0/24", "10.0.0.0/8"] if s == ("lan", "net_addr") else None)
+    macro_registry.register("$interface.lan.net_addr", ["192.168.1.0/24", "10.0.0.0/8"])
     try:
         rule = mod.FirewallRule(name="multi-lan", action="accept",
                                 src_address="$interface.lan.net_addr")
@@ -3212,20 +3212,18 @@ def test_src_address_macro_multiple_addrs_produces_inline_set():
         assert expr is not None
         assert "ip saddr { 192.168.1.0/24, 10.0.0.0/8 }" in expr
     finally:
-        macro_registry.unregister_namespace("interface")
+        macro_registry.unregister("$interface")
 
 
 def test_src_address_macro_unresolved_skips_rule():
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
-    macro_registry.register_namespace("interface", lambda *s: None)
-    try:
-        rule = mod.FirewallRule(name="missing-iface", action="accept",
-                                src_address="$interface.lan.net_addr")
-        expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
-        assert expr is None
-    finally:
-        macro_registry.unregister_namespace("interface")
+    # don't register $interface.lan.net_addr — it should resolve to None
+    macro_registry.unregister("$interface")
+    rule = mod.FirewallRule(name="missing-iface", action="accept",
+                            src_address="$interface.lan.net_addr")
+    expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
+    assert expr is None
 
 
 # ---------------------------------------------------------------------------

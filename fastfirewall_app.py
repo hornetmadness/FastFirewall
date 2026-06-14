@@ -196,7 +196,7 @@ if not data_dir:
     _scan_dirs = cfg.plugins_scan_dirs()
     data_dir = _scan_dirs[0] if _scan_dirs else plugins_dir
 loader.load_installed(only=only_plugins, skip_requirements=show_macros, data_dir=data_dir)
-macro_registry.register_service_port("fastfirewall-api", "tcp", [cfg.server.port])
+macro_registry.register("$service_port.fastfirewall-api.tcp", [cfg.server.port])
 loader.finished()
 
 if show_macros:

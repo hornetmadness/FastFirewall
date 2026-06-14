@@ -49,3 +49,4 @@ class Service(str, Enum):
     CRON = "cron"
     USERS = "users"
     GROUPS = "groups"
+    APP_PROXY = "app_proxy"

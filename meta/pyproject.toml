@@ -12,6 +12,7 @@ dependencies = [
     "fastfirewall-core",
     "fastfirewall-plugin-apt-cacher-ng",
     "fastfirewall-plugin-audit",
+    "fastfirewall-plugin-caddy",
     "fastfirewall-plugin-dns",
     "fastfirewall-plugin-firewall",
     "fastfirewall-plugin-host",
@@ -25,6 +26,7 @@ dependencies = [
 fastfirewall-core = { workspace = true }
 fastfirewall-plugin-apt-cacher-ng = { workspace = true }
 fastfirewall-plugin-audit = { workspace = true }
+fastfirewall-plugin-caddy = { workspace = true }
 fastfirewall-plugin-dns = { workspace = true }
 fastfirewall-plugin-firewall = { workspace = true }
 fastfirewall-plugin-host = { workspace = true }

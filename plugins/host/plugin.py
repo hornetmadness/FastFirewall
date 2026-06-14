@@ -131,13 +131,14 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             self._state = self._load_state()
             self._apply_state()
         self._register_routes()
-        self.add_macro_namespace("host", self._resolve_host_macro)
+        self._register_host_macros()
         init_cfg: dict[str, Any] = self.config.get("init") or {}
         if init_cfg.get("enable_init_script", False):
             self._run_init_script(init_cfg)
 
     def teardown(self) -> None:
         self._save_state()
+        self.unregister_macro("$host")
 
     # ── persistence ────────────────────────────────────────────────────────────
 
@@ -737,7 +738,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             "version": self.meta["version"],
             "hostname": socket.gethostname(),
             "domainname": self._state.get("domainname"),
-            "fqdn": self._resolve_host_macro("fqdn"),
+            "fqdn": f"{socket.gethostname()}.{self._state.get('domainname')}" if self._state.get("domainname") else socket.gethostname(),
             "managed": {
                 "sysctl":   len(self._state["sysctl"]),
                 "users":    len(self._state["users"]),
@@ -777,6 +778,14 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             return fqdn[len(hostname) + 1:]
         return None
 
+    def _register_host_macros(self) -> None:
+        hostname = socket.gethostname()
+        domain = self._state.get("domainname") or self._get_system_domain()
+        self.register_macro("$host.hostname", hostname)
+        self.register_macro("$host.fqdn", f"{hostname}.{domain}" if domain else hostname)
+        if domain:
+            self.register_macro("$host.domainname", domain)
+
     def macro_snapshot(self) -> dict[str, dict]:
         hostname = socket.gethostname()
         domain = self._state.get("domainname") or self._get_system_domain()
@@ -785,20 +794,6 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             entries["domainname"] = domain
         entries["fqdn"] = f"{hostname}.{domain}" if domain else hostname
         return {"host": entries}
-
-    def _resolve_host_macro(self, *segments: str):
-        if not segments:
-            return None
-        key = segments[0]
-        if key == "hostname":
-            return socket.gethostname()
-        if key == "domainname":
-            return self._state.get("domainname") or self._get_system_domain()
-        if key == "fqdn":
-            hostname = socket.gethostname()
-            domain = self._state.get("domainname") or self._get_system_domain()
-            return f"{hostname}.{domain}" if domain else hostname
-        return None
 
     def _get_domainname(self) -> dict:
         return {
