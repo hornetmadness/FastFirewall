@@ -613,6 +613,17 @@ self._state_file.save_and_commit(snapshot)
 
 The raw `load(default)` / `save(data)` methods are still available for backward compatibility but plugins should prefer the envelope API.
 
+**Every plugin must pass a complete, valid default to `load_desired`.** When the state file does not exist (fresh install), `load_desired` writes this default to disk immediately — it is the plugin's empty-slate config. The default must be a fully-formed dict that `_apply_state` can apply without error: all required keys present, all values valid. A missing or incomplete default means a fresh install fails on first boot.
+
+```python
+# Correct — complete default covers all keys the plugin reads
+_EMPTY_STATE: dict[str, Any] = {"apps": {}, "settings": dict(_DEFAULT_SETTINGS)}
+self._state = self._state_file.load_desired(default=_EMPTY_STATE)
+
+# Wrong — bare empty dict will KeyError on first boot when code reads state["settings"]
+self._state = self._state_file.load_desired(default={})
+```
+
 `from_config` resolves `plugin_dir / "data" / config.get(key, default_filename)`.
 
 **Backups** — when `state.backup.enabled` is `true` in `app_config.yaml`, `save()` snapshots the existing file to `state.backup.directory` (default `/var/tmp/ff-backups/states`) before overwriting. Backup filenames include a timestamp: `<stem>_<YYYYMMDD_HHMMSS>.json`. The backup path is global (not inside the plugin's own `data/` dir) so backups survive plugin removal.
@@ -627,6 +638,48 @@ state:
 `configure_state()` is called once at startup in `fastfirewall_app.py` to apply the `app_config.yaml` settings before any plugin `setup()` runs.
 
 **Testing** — in plugin tests, `state_manager._backup_enabled` is `False` by default (module default), so no backup directory is created. If a test exercises the backup path, patch `plugin_system.core.state_manager._backup_enabled` and `_backup_directory` directly.
+
+### Plugin boot-apply convention
+
+Every plugin that manages external state (services, config files, firewall rules, etc.) **must attempt to re-apply its state on `setup()`**. The required sequence is:
+
+1. **Try desired state** — attempt to apply `desired_state` (what the operator asked for). On success, call `commit()` so `current_state` reflects what is actually running.
+2. **Fall back to current state** — if the desired apply fails, log a warning and attempt to apply `current_state` (the last known-good snapshot). On success, log clearly that the system is running on the previous state.
+3. **Error out** — if both attempts fail, raise an exception from `setup()`. The loader treats any exception from `setup()` as a load failure and skips the plugin (and all plugins that depend on it), so the app continues running without a half-configured plugin.
+
+```python
+def setup(self) -> None:
+    self._state_file = PluginStateFile.from_config(...)
+    self._state = self._state_file.load_desired(default=_EMPTY_STATE)
+    self._register_routes()
+
+    if not self.config.get("ignore_state_on_boot", False):
+        self._apply_state()
+
+def _apply_state(self) -> None:
+    desired = self._desired_snapshot()
+    try:
+        self._do_apply(desired)
+        self._state_file.commit(desired)
+        return
+    except Exception:
+        self.logger.warning("Boot apply of desired state failed; trying current state", exc_info=True)
+
+    current = self._state_file.current_snapshot
+    if current is not None:
+        try:
+            self._do_apply(current)
+            self._state = current
+            self._state_file.commit(current)
+            self.logger.warning("Running on previous (current) state — desired state was not applied")
+            return
+        except Exception:
+            self.logger.error("Boot apply of current state also failed", exc_info=True)
+
+    raise RuntimeError(f"{self.plugin_id}: failed to apply state on boot; plugin will not load")
+```
+
+`ignore_state_on_boot` (a standard config key) skips `_apply_state()` entirely — useful in tests and for fresh installs where there is no state yet to apply.
 
 ### Plugin resource conventions
 

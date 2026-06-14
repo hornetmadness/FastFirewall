@@ -74,12 +74,13 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin,
                 name="networking.aliases_updated",
                 payload={"aliases": dict(self._aliases)},
             ))
-        self.add_macro_namespace("interface", self._resolve_interface_macro)
+        self._register_interface_macros()
         self._register_routes()
         self._sync_os_boot_service()
 
     def teardown(self) -> None:
         self._save_state()
+        self.unregister_macro("$interface")
         self.logger.info("Networking plugin shut down — state saved")
 
     # ── state persistence ──────────────────────────────────────────────
@@ -91,31 +92,28 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin,
         self._aliases = desired.get("aliases", {})
         self._ensure_default_aliases()
 
-    def _resolve_interface_macro(self, *segments: str) -> Any:
-        if len(segments) < 2:
-            return None
-        alias, field = segments[0], segments[1]
-        device = self._aliases.get(alias)
-        if device is None:
-            return None
-        if field == "name":
-            return device
-        addresses = self._interfaces.get(device, {}).get("addresses") or (
-            _LO_ADDRESSES if device == "lo" else []
-        )
-        if field == "address":
-            return [str(ipaddress.ip_interface(a).ip) for a in addresses]
-        if field == "net_addr":
-            return [str(ipaddress.ip_interface(a).network) for a in addresses]
-        return None
+    def _register_interface_macros(self) -> None:
+        for alias, device in self._aliases.items():
+            addresses = self._interfaces.get(device, {}).get("addresses") or (
+                _LO_ADDRESSES if device == "lo" else []
+            )
+            self.register_macro(f"$interface.{alias}.name", device)
+            self.register_macro(
+                f"$interface.{alias}.address",
+                [str(ipaddress.ip_interface(a).ip) for a in addresses],
+            )
+            self.register_macro(
+                f"$interface.{alias}.net_addr",
+                [str(ipaddress.ip_interface(a).network) for a in addresses],
+            )
 
     def macro_snapshot(self) -> dict[str, dict[str, Any]]:
         entries: dict[str, Any] = {}
         for alias, device in self._aliases.items():
-            entries[f"{alias}.name"] = device
             addresses = self._interfaces.get(device, {}).get("addresses") or (
                 _LO_ADDRESSES if device == "lo" else []
             )
+            entries[f"{alias}.name"] = device
             addrs = [str(ipaddress.ip_interface(a).ip) for a in addresses]
             if addrs:
                 entries[f"{alias}.address"] = addrs

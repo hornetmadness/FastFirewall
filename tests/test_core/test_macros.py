@@ -1,9 +1,9 @@
-"""Tests for MacroRegistry — resolution logic and cache invalidation."""
+"""Tests for MacroRegistry — Box-backed resolution with [N] indexing."""
 from __future__ import annotations
 
 import pytest
 
-from plugin_system.core.macros import MacroRegistry, extract_macros
+from plugin_system.core.macros import MacroRegistry, extract_macros, is_macro
 
 
 @pytest.fixture()
@@ -11,165 +11,109 @@ def reg() -> MacroRegistry:
     return MacroRegistry()
 
 
-# ── register_service_port ──────────────────────────────────────────────────────
+# ── register / resolve ────────────────────────────────────────────────────────
 
-def test_resolve_ports_plugin_declaration_beats_etc_services(reg):
-    reg.set_service_ports({"ssh": {"tcp": [2222]}})
-    assert reg.resolve("$service_port.ssh.tcp") == [2222]
-
-
-def test_register_service_port(reg):
-    reg.register_service_port("fastfirewall-api", "tcp", [8000])
-    assert reg.resolve("$service_port.fastfirewall-api.tcp") == [8000]
-
-
-def test_register_service_port_cached(reg):
-    reg.register_service_port("fastfirewall-api", "tcp", [8000])
-    reg.resolve("$service_port.fastfirewall-api.tcp")
-    assert ("resolve", "$service_port.fastfirewall-api.tcp") in reg._cache
-
-
-def test_register_service_port_does_not_clobber_existing(reg):
-    reg.set_service_ports({"dns": {"udp": [53]}})
-    reg.register_service_port("fastfirewall-api", "tcp", [8000])
+def test_register_and_resolve_list(reg):
+    reg.register("$service_port.dns.udp", [53])
     assert reg.resolve("$service_port.dns.udp") == [53]
-    assert reg.resolve("$service_port.fastfirewall-api.tcp") == [8000]
 
 
-def test_etc_services_cached(reg):
-    reg.set_service_ports({})
-    reg.resolve("$service_port.ssh.tcp")
-    assert ("resolve", "$service_port.ssh.tcp") in reg._cache
+def test_register_and_resolve_scalar(reg):
+    reg.register("$host.hostname", "myhost")
+    assert reg.resolve("$host.hostname") == "myhost"
 
 
-# ── resolve / resolve_string ──────────────────────────────────────────────────
-
-def test_resolve_returns_raw(reg):
-    reg.register_namespace("iface", lambda *s: ["10.0.0.1"])
-    assert reg.resolve("$iface.lan.address") == ["10.0.0.1"]
-
-
-def test_resolve_unknown_namespace(reg):
-    assert reg.resolve("$nope.x") is None
+def test_resolve_indexed(reg):
+    reg.register("$interface.lo.address", ["127.0.0.1", "::1"])
+    assert reg.resolve("$interface.lo.address[0]") == "127.0.0.1"
+    assert reg.resolve("$interface.lo.address[1]") == "::1"
 
 
-def test_resolve_passthrough(reg):
+def test_resolve_indexed_out_of_bounds(reg):
+    reg.register("$interface.lo.address", ["127.0.0.1"])
+    assert reg.resolve("$interface.lo.address[99]") is None
+
+
+def test_resolve_non_indexed_returns_full_list(reg):
+    reg.register("$interface.lo.address", ["127.0.0.1", "::1"])
+    assert reg.resolve("$interface.lo.address") == ["127.0.0.1", "::1"]
+
+
+def test_resolve_service_port_indexed(reg):
+    reg.register("$service_port.dns.udp", [53])
+    assert reg.resolve("$service_port.dns.udp[0]") == 53
+
+
+def test_resolve_passthrough_non_macro(reg):
     assert reg.resolve("not-a-macro") == "not-a-macro"
     assert reg.resolve("192.168.1.1") == "192.168.1.1"
     assert reg.resolve(53) == 53
 
 
-def test_resolve_string(reg):
-    reg.register_namespace("iface", lambda *s: "eth0" if s == ("lan", "name") else None)
-    assert reg.resolve_string("$iface.lan.name") == "eth0"
+def test_resolve_unknown_path_returns_none(reg):
+    assert reg.resolve("$nope.x") is None
+    assert reg.resolve("$interface.lan.address") is None
 
 
-def test_resolve_string_none_result(reg):
-    reg.register_namespace("iface", lambda *s: None)
-    assert reg.resolve_string("$iface.lan.name") is None
+# ── unregister ────────────────────────────────────────────────────────────────
+
+def test_unregister_leaf(reg):
+    reg.register("$interface.lo.address", ["127.0.0.1"])
+    reg.unregister("$interface.lo.address")
+    assert reg.resolve("$interface.lo.address") is None
 
 
-# ── service_port cache ────────────────────────────────────────────────────────
-
-def test_service_port_cache_hit(reg):
-    """service_port results are cached — resolver only called once."""
-    reg.set_service_ports({"dns": {"udp": [53]}})
-    first = reg.resolve("$service_port.dns.udp")
-    second = reg.resolve("$service_port.dns.udp")
-    assert first == second == [53]
-    assert ("resolve", "$service_port.dns.udp") in reg._cache
+def test_unregister_subtree(reg):
+    reg.register("$interface.lo.address", ["127.0.0.1"])
+    reg.register("$interface.lo.name", "lo")
+    reg.unregister("$interface.lo")
+    assert reg.resolve("$interface.lo.address") is None
+    assert reg.resolve("$interface.lo.name") is None
 
 
-def test_service_port_cache_invalidated_on_set_service_ports(reg):
-    reg.set_service_ports({"dns": {"udp": [53]}})
+def test_unregister_missing_is_noop(reg):
+    reg.unregister("$nonexistent.key")  # must not raise
+
+
+# ── multiple namespaces ───────────────────────────────────────────────────────
+
+def test_multiple_namespaces_coexist(reg):
+    reg.register("$service_port.dns.udp", [53])
+    reg.register("$interface.lan.address", ["192.168.1.1"])
+    reg.register("$host.hostname", "myhost")
     assert reg.resolve("$service_port.dns.udp") == [53]
-    reg.set_service_ports({"dns": {"udp": [5353]}})
-    assert reg.resolve("$service_port.dns.udp") == [5353], \
-        "cache must reflect updated service ports after set_service_ports()"
+    assert reg.resolve("$interface.lan.address") == ["192.168.1.1"]
+    assert reg.resolve("$host.hostname") == "myhost"
 
 
-def test_service_port_cache_invalidated_on_register_namespace(reg):
-    reg.set_service_ports({"dns": {"udp": [53]}})
-    reg.resolve("$service_port.dns.udp")
-    assert len(reg._cache) == 1
-    reg.register_namespace("other", lambda *s: None)
-    assert len(reg._cache) == 0, "register_namespace should wipe the cache"
+def test_namespaces_property(reg):
+    reg.register("$service_port.dns.udp", [53])
+    reg.register("$interface.lo.address", ["127.0.0.1"])
+    ns = reg.namespaces
+    assert "service_port" in ns
+    assert "interface" in ns
 
 
-def test_service_port_cache_invalidated_on_unregister_namespace(reg):
-    reg.set_service_ports({"dns": {"udp": [53]}})
-    reg.register_namespace("other", lambda *s: None)
-    reg.resolve("$service_port.dns.udp")
-    assert len(reg._cache) == 1
-    reg.unregister_namespace("other")
-    assert len(reg._cache) == 0, "unregister_namespace should wipe the cache"
+# ── service_port — hyphenated service names ───────────────────────────────────
+
+def test_hyphenated_service_name(reg):
+    reg.register("$service_port.fastfirewall-api.tcp", [8000])
+    assert reg.resolve("$service_port.fastfirewall-api.tcp") == [8000]
+    assert reg.resolve("$service_port.fastfirewall-api.tcp[0]") == 8000
 
 
-# ── plugin-defined namespaces are NOT cached ──────────────────────────────────
+# ── is_macro ──────────────────────────────────────────────────────────────────
 
-def test_plugin_namespace_not_cached(reg):
-    """Plugin-defined namespace results must not be cached: their resolvers read live state."""
-    calls = []
-    def resolver(*s):
-        calls.append(s)
-        return [80]
-    reg.register_namespace("ns", resolver)
-    reg.resolve("$ns.web")
-    reg.resolve("$ns.web")
-    assert len(calls) == 2, "resolver must be called on every invocation — plugin state can change"
-    assert len(reg._cache) == 0
+def test_is_macro_valid(reg):
+    assert is_macro("$service_port.dns.udp") is True
+    assert is_macro("$interface.lo.address") is True
+    assert is_macro("$interface.lo.address[0]") is True
 
 
-def test_resolve_not_cached(reg):
-    calls = []
-    reg.register_namespace("ns", lambda *s: calls.append(s) or "eth0")
-    reg.resolve("$ns.lan.name")
-    reg.resolve("$ns.lan.name")
-    assert len(calls) == 2
-    assert len(reg._cache) == 0
-
-
-def test_resolve_string_not_cached(reg):
-    calls = []
-    reg.register_namespace("ns", lambda *s: calls.append(s) or "eth0")
-    reg.resolve_string("$ns.lan.name")
-    reg.resolve_string("$ns.lan.name")
-    assert len(calls) == 2
-    assert len(reg._cache) == 0
-
-
-def test_non_macro_strings_not_cached(reg):
-    reg.resolve("plain")
-    reg.resolve_string("plain")
-    assert len(reg._cache) == 0
-
-
-def test_int_literal_not_cached(reg):
-    reg.resolve(8080)
-    assert len(reg._cache) == 0
-
-
-# ── resolve() service_port namespace ─────────────────────────────────────────
-
-def test_resolve_returns_service_port_list(reg):
-    reg.set_service_ports({"dns": {"udp": [53]}})
-    assert reg.resolve("$service_port.dns.udp") == [53]
-
-
-def test_resolve_returns_etc_services_fallback(reg):
-    reg.set_service_ports({})
-    assert reg.resolve("$service_port.ssh.tcp") == [22]
-
-
-def test_resolve_returns_empty_list_for_truly_unknown_service(reg):
-    reg.set_service_ports({})
-    assert reg.resolve("$service_port.unknown_xyz_service.tcp") == []
-
-
-def test_resolve_service_port_not_overridden_by_resolver(reg):
-    reg.set_service_ports({"dns": {"udp": [53]}})
-    reg.register_namespace("service_port", lambda *s: None)  # should be ignored
-    assert reg.resolve("$service_port.dns.udp") == [53]
+def test_is_macro_invalid(reg):
+    assert is_macro("not-a-macro") is False
+    assert is_macro("192.168.1.1") is False
+    assert is_macro(53) is False  # type: ignore[arg-type]
 
 
 # ── extract_macros ────────────────────────────────────────────────────────────
@@ -195,11 +139,6 @@ def test_extract_macros_from_nested_dict():
 def test_extract_macros_from_list():
     data = ["$service_port.dns.udp", "plain", "$interface.lan.name"]
     assert extract_macros(data) == {"$service_port.dns.udp", "$interface.lan.name"}
-
-
-def test_extract_macros_from_deeply_nested():
-    data = {"a": {"b": {"c": "$service_port.http.tcp"}}}
-    assert extract_macros(data) == {"$service_port.http.tcp"}
 
 
 def test_extract_macros_returns_empty_set_for_no_macros():

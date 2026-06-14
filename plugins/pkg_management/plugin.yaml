@@ -10,7 +10,8 @@ author: hornetmadness@gmail.com
 enabled: true
 
 plugin_requirements: ["smtp", "audit"]  # smtp recommended — handles smtp.send events from the upgrade endpoint
-os_requirements: []
+os_requirements:
+  - gnupg    # required for apt.key dearmoring when registering third-party repos
 
 service_ports:
   pkg_management:

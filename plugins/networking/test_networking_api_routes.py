@@ -1541,45 +1541,65 @@ def test_diff_pending_false_after_apply(plugin, client):
 # ── interface macro resolver ───────────────────────────────────────────────────
 
 def test_interface_macro_name_resolves_to_device(tmp_path):
+    from plugin_system.core.macros import macro_registry
     plugin = _make_plugin(tmp_path)
     plugin._aliases["lan"] = "eth0"
-    assert plugin._resolve_interface_macro("lan", "name") == "eth0"
+    plugin._register_interface_macros()
+    assert macro_registry.resolve("$interface.lan.name") == "eth0"
+    macro_registry.unregister("$interface")
 
 
 def test_interface_macro_address_resolves_to_ip_list(tmp_path):
+    from plugin_system.core.macros import macro_registry
     plugin = _make_plugin(tmp_path)
     plugin._aliases["lan"] = "eth0"
     plugin._interfaces["eth0"] = {"addresses": ["192.168.1.1/24"]}
-    assert plugin._resolve_interface_macro("lan", "address") == ["192.168.1.1"]
+    plugin._register_interface_macros()
+    assert macro_registry.resolve("$interface.lan.address") == ["192.168.1.1"]
+    macro_registry.unregister("$interface")
 
 
 def test_interface_macro_address_empty_when_no_addresses(tmp_path):
+    from plugin_system.core.macros import macro_registry
     plugin = _make_plugin(tmp_path)
     plugin._aliases["lan"] = "eth0"
     plugin._interfaces["eth0"] = {}
-    assert plugin._resolve_interface_macro("lan", "address") == []
+    plugin._register_interface_macros()
+    assert macro_registry.resolve("$interface.lan.address") == []
+    macro_registry.unregister("$interface")
 
 
 def test_interface_macro_unknown_alias_returns_none(tmp_path):
+    from plugin_system.core.macros import macro_registry
     plugin = _make_plugin(tmp_path)
-    assert plugin._resolve_interface_macro("missing", "name") is None
+    plugin._register_interface_macros()
+    assert macro_registry.resolve("$interface.missing.name") is None
+    macro_registry.unregister("$interface")
 
 
 def test_interface_macro_unknown_field_returns_none(tmp_path):
+    from plugin_system.core.macros import macro_registry
     plugin = _make_plugin(tmp_path)
     plugin._aliases["lan"] = "eth0"
-    assert plugin._resolve_interface_macro("lan", "other") is None
+    plugin._register_interface_macros()
+    assert macro_registry.resolve("$interface.lan.other") is None
+    macro_registry.unregister("$interface")
 
 
 def test_interface_macro_missing_field_returns_none(tmp_path):
+    from plugin_system.core.macros import macro_registry
     plugin = _make_plugin(tmp_path)
     plugin._aliases["lan"] = "eth0"
-    assert plugin._resolve_interface_macro("lan") is None
+    plugin._register_interface_macros()
+    # no field — resolves to the alias subtree Box, not a leaf
+    result = macro_registry.resolve("$interface.lan")
+    assert result is None or not isinstance(result, str)
+    macro_registry.unregister("$interface")
 
 
 def test_interface_macro_no_args_returns_none(tmp_path):
-    plugin = _make_plugin(tmp_path)
-    assert plugin._resolve_interface_macro() is None
+    from plugin_system.core.macros import macro_registry
+    assert macro_registry.resolve("$interface") is None
 
 
 def test_macro_snapshot_includes_name_and_address(tmp_path):

@@ -84,15 +84,19 @@ def get_macros(loader) -> dict:
     """
     from plugin_system.core.macros import macro_registry
     from plugin_system.core.macro_provider_plugin import MacroProviderPlugin
+    from box import Box
 
     result: dict = {}
 
-    sp = macro_registry._service_ports
-    sp_entries: dict[str, list[int]] = {}
-    for svc, proto_map in sp.items():
-        for proto, ports in proto_map.items():
-            sp_entries[f"$service_port.{svc}.{proto}"] = ports
-    result["service_port"] = {"kind": "built-in", "entries": sp_entries}
+    # service_port entries live in the Box under "service_port"
+    sp_box = macro_registry._box.get("service_port", {})
+    if isinstance(sp_box, Box):
+        sp_entries: dict = {}
+        for svc, proto_map in sp_box.items():
+            if isinstance(proto_map, Box):
+                for proto, ports in proto_map.items():
+                    sp_entries[f"$service_port.{svc}.{proto}"] = ports
+        result["service_port"] = {"kind": "built-in", "entries": sp_entries}
 
     for loaded in loader._plugins.values():
         if loaded.instance is not None and isinstance(loaded.instance, MacroProviderPlugin):
@@ -168,12 +172,36 @@ def print_cfg(cfg) -> None:
         print(f"plugins.data_dir:   (not set — state stored inside each plugin directory)")
 
 
+def _install_pkglist_prerequisites(pkglist: Path) -> None:
+    """Install system packages listed in pkglist.txt before any plugin repos are registered."""
+    if not pkglist.exists():
+        return
+    packages = [
+        line.split("#")[0].strip()
+        for line in pkglist.read_text().splitlines()
+        if line.split("#")[0].strip()
+    ]
+    if not packages:
+        return
+    print(f"Installing prerequisites: {', '.join(packages)}")
+    results = pyinfra_run_batch([
+        ("pyinfra.operations.apt", "packages", {"packages": packages, "update": True, "_sudo": True})
+    ])
+    success, err = results[0]
+    if not success:
+        print(f"Warning: prerequisite install failed: {err}", file=sys.stderr)
+    else:
+        print("Prerequisites installed.")
+
+
 def make_cfg(dest: Path, cfg) -> None:
     """Scaffold a production config directory tree at *dest*."""
     import importlib.util
     import secrets as _secrets
     from importlib.metadata import entry_points
     from app_config import _BUNDLED_PATH
+
+    _install_pkglist_prerequisites(_BUNDLED_PATH.parent / "pkglist.txt")
 
     created = []
     for d in [dest, dest / "plugins", dest / "backups"]:

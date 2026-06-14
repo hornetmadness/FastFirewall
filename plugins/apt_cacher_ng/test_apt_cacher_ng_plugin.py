@@ -156,13 +156,13 @@ def test_status_proxy_url_reflects_configured_port(tmp_path):
 
 
 def test_status_proxy_url_uses_lan_macro_when_registered(tmp_path):
-    macro_registry.register_namespace("interface", lambda *s: ["10.0.0.5"] if s == ("lan", "address") else None)
+    macro_registry.register("$interface.lan.address", ["10.0.0.5"])
     try:
         client, inst = _make_client(tmp_path)
         data = client.get("/v1/apt_cacher_ng/status").json()
         assert "10.0.0.5" in data["proxy_url"]
     finally:
-        macro_registry.unregister_namespace("interface")
+        macro_registry.unregister("$interface")
 
 
 def test_status_proxy_url_falls_back_to_fqdn_when_macro_absent(client):
@@ -172,14 +172,14 @@ def test_status_proxy_url_falls_back_to_fqdn_when_macro_absent(client):
 
 
 def test_status_proxy_url_falls_back_when_lan_alias_missing(tmp_path):
-    macro_registry.register_namespace("interface", lambda *s: None)
+    macro_registry.unregister("$interface")
     try:
         client, inst = _make_client(tmp_path)
         import socket
         data = client.get("/v1/apt_cacher_ng/status").json()
         assert socket.getfqdn() in data["proxy_url"]
     finally:
-        macro_registry.unregister_namespace("interface")
+        pass  # nothing to clean up — interface was cleared
 
 
 # ── proxy-url endpoints ───────────────────────────────────────────────────────────
@@ -218,7 +218,7 @@ def test_set_proxy_host_reflects_in_proxy_url(ctx):
 
 
 def test_set_proxy_host_overrides_macro(tmp_path):
-    macro_registry.register_namespace("interface", lambda *s: ["10.0.0.5"] if s == ("lan", "address") else None)
+    macro_registry.register("$interface.lan.address", ["10.0.0.5"])
     try:
         client, inst = _make_client(tmp_path)
         client.put("/v1/apt_cacher_ng/proxy-url", json={"host": "myproxy.local"})
@@ -226,7 +226,7 @@ def test_set_proxy_host_overrides_macro(tmp_path):
         assert data["host"] == "myproxy.local"
         assert data["host_source"] == "override"
     finally:
-        macro_registry.unregister_namespace("interface")
+        macro_registry.unregister("$interface")
 
 
 def test_set_proxy_host_empty_string_rejected(ctx):

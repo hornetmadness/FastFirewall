@@ -1,33 +1,34 @@
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any
+
+from .macros import macro_registry
 
 
 class MacroProviderPlugin:
     """
-    Optional mixin: plugin registers one or more macro namespaces.
+    Optional mixin: plugin registers macro keys directly into the shared registry.
 
     Usage::
 
         class NetworkingPlugin(PluginBase, MacroProviderPlugin):
 
             def setup(self):
-                self.add_macro_namespace("interface", self._resolve_interface)
-                self.add_macro_namespace("vlan", self._resolve_vlan)
+                for alias, device in self._aliases.items():
+                    self.register_macro(f"$interface.{alias}.name", device)
+                    self.register_macro(f"$interface.{alias}.address", [...])
 
-            def _resolve_interface(self, *segments: str) -> Any:
-                return self._aliases.get(segments[0]) if segments else None
+            def teardown(self):
+                self.unregister_macro("$interface")
 
-    Call ``add_macro_namespace(name, resolver)`` inside ``setup()`` for each
-    namespace the plugin owns — analogous to adding routes via ``self.router``.
-    The loader registers every declared namespace in the shared ``macro_registry``
-    after ``setup()`` completes, and unregisters them on plugin unload.
+    Call ``register_macro(key, value)`` inside ``setup()`` for each macro key
+    the plugin owns. Keys are stored in ``_macro_keys`` so the loader can
+    clean them up on plugin unload.
 
     Rules:
     - Must also inherit ``PluginBase``.
-    - Register namespaces inside ``setup()``, not at class definition time.
-    - A resolver is ``Callable[..., Any]`` — it receives the macro segments
-      after the namespace (e.g. ``$interface.LAN1`` → ``resolver("LAN1")``).
+    - Register macros inside ``setup()``, not at class definition time.
+    - Re-call ``register_macro`` whenever the underlying data changes.
     """
 
     def __init_subclass__(cls, **kwargs: object) -> None:
@@ -42,22 +43,24 @@ class MacroProviderPlugin:
 
     def __init__(self) -> None:
         super().__init__()
-        self._macro_namespaces: dict[str, Callable[..., Any]] = {}
+        self._macro_keys: list[str] = []
 
-    def add_macro_namespace(self, name: str, resolver: Callable[..., Any]) -> None:
-        """Register *name* as a macro namespace backed by *resolver*."""
-        self._macro_namespaces[name] = resolver
+    def register_macro(self, key: str, value: Any) -> None:
+        """Register *key* → *value* in the shared macro registry."""
+        macro_registry.register(key, value)
+        if key not in self._macro_keys:
+            self._macro_keys.append(key)
+
+    def unregister_macro(self, key: str) -> None:
+        """Remove *key* (and its subtree) from the shared macro registry."""
+        macro_registry.unregister(key)
+        prefix = key if key.startswith("$") else f"${key}"
+        self._macro_keys = [k for k in self._macro_keys if not k.startswith(prefix)]
 
     def macro_snapshot(self) -> dict[str, dict[str, Any]]:
         """
         Return a display snapshot of each namespace this plugin provides.
 
         Override to expose the current entries; used by ``--show-macros``.
-        Default returns each namespace name mapped to an empty dict.
-
-        Example override::
-
-            def macro_snapshot(self) -> dict[str, dict[str, Any]]:
-                return {"interface": dict(self._aliases)}
         """
-        return {name: {} for name in self._macro_namespaces}
+        return {}

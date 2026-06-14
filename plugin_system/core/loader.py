@@ -698,8 +698,7 @@ class PluginLoader:
             if disabled:
                 self.logger.info("  Disabled: %s", ", ".join(sorted(disabled)))
 
-        # Accumulate loaded ids and rebuild the full service_ports snapshot
-        # across every plugin loaded so far (both filesystem and installed).
+        # Accumulate loaded ids and register service_port macros for all loaded plugins.
         self._loaded.update(loaded)
         all_service_ports: dict[str, dict[str, list[int]]] = {}
         for lp in self._plugins.values():
@@ -710,9 +709,10 @@ class PluginLoader:
                         for proto, ports in proto_map.items()
                         if (real := [p for p in ports if p != -1])
                     }
+                    for proto, ports in filtered.items():
+                        macro_registry.register(f"$service_port.{svc_name}.{proto}", ports)
                     if filtered:
                         all_service_ports[svc_name] = filtered
-        macro_registry.set_service_ports(all_service_ports)
         self._all_service_ports = all_service_ports
         self._log_pending_changes()
 
@@ -974,8 +974,8 @@ class PluginLoader:
         self._bus.plugin_services.pop(plugin_id, None)
         self._release_ports(loaded.service_ports)
         if loaded.instance is not None and isinstance(loaded.instance, MacroProviderPlugin):
-            for name in loaded.instance._macro_namespaces:
-                macro_registry.unregister_namespace(name)
+            for key in loaded.instance._macro_keys:
+                macro_registry.unregister(key)
 
         # Unsubscribe all handlers
         for event_name, fn in loaded.handlers:
@@ -1185,12 +1185,14 @@ class PluginLoader:
         )
 
     def _register_macro_provider(self, instance: PluginBase, plugin_id: str) -> None:
-        """Register any macro namespaces a MacroProviderPlugin declared in setup()."""
+        """Log macro keys registered by a MacroProviderPlugin during setup()."""
         if not isinstance(instance, MacroProviderPlugin):
             return
-        for name, resolver in instance._macro_namespaces.items():
-            macro_registry.register_namespace(name, resolver)
-            self.logger.debug("Registered macro namespace %r from plugin %r", name, plugin_id)
+        if instance._macro_keys:
+            self.logger.debug(
+                "Plugin %r registered %d macro key(s): %s",
+                plugin_id, len(instance._macro_keys), ", ".join(instance._macro_keys),
+            )
 
     def _register_api_routes(self, instance: PluginBase, plugin_id: str) -> None:
         """Mount a ApiRouterPlugin's router on the FastAPI app at /v1/<plugin_id>/."""
