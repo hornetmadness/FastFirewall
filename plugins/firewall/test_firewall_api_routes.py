@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from ff_auth.auth import AuthUser, get_current_user
 
 from plugin_system.core.events import Event, bus as global_bus
 
@@ -58,6 +59,7 @@ def _make_app(tmp_path):
     inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     return app
 
 
@@ -122,6 +124,7 @@ def test_status_pending_changes_false_after_boot_apply(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     assert TestClient(app).get("/v1/firewall/status").json()["pending_changes"]["any"] is False
 
 
@@ -164,6 +167,7 @@ def test_list_rules_applied_true_after_apply(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     client = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         client.post("/v1/firewall/apply")
@@ -178,6 +182,7 @@ def test_list_rules_new_rule_applied_false_until_apply(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     client = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         client.post("/v1/firewall/apply")
@@ -331,6 +336,7 @@ def test_check_returns_success_true_on_valid_script(tmp_path):
     inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     r = TestClient(app).post("/v1/firewall/check")
     assert r.status_code == 200
     data = r.json()
@@ -345,6 +351,7 @@ def test_check_returns_success_false_on_validation_error(tmp_path):
     inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     r = TestClient(app).post("/v1/firewall/check")
     assert r.status_code == 200
     data = r.json()
@@ -363,6 +370,7 @@ def test_apply_calls_apply_nft_script(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     _create_rule(TestClient(app), name="allow-ssh")
     inst._apply_nft_script.reset_mock()
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
@@ -378,6 +386,7 @@ def test_apply_commits_state(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     client = TestClient(app)
     _create_rule(client, name="rule")
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
@@ -392,6 +401,7 @@ def test_apply_returns_rule_count(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     client = TestClient(app)
     _create_rule(client, name="r1", enabled=True)
     _create_rule(client, name="r2", enabled=False)
@@ -408,6 +418,7 @@ def test_apply_returns_500_on_nft_failure(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     _create_rule(TestClient(app), name="r")
     inst._apply_nft_script.side_effect = RuntimeError("nft failed")
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
@@ -422,6 +433,7 @@ def test_apply_emits_event(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     _create_rule(TestClient(app), name="r")
     received: list = []
     global_bus.subscribe("firewall.applied", received.append)
@@ -506,6 +518,7 @@ def test_discard_clears_pending_changes(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     client = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         client.post("/v1/firewall/apply")
@@ -801,6 +814,7 @@ def test_status_includes_macros(tmp_path):
         inst.setup()
         app = FastAPI()
         app.include_router(inst.router, prefix="/v1/firewall")
+        app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
         status = TestClient(app).get("/v1/firewall/status").json()
         assert "service_port" in status["macros"]
     finally:
@@ -840,6 +854,7 @@ def test_status_includes_interface_macro_namespace(tmp_path):
         inst.setup()
         app = FastAPI()
         app.include_router(inst.router, prefix="/v1/firewall")
+        app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
         status = TestClient(app).get("/v1/firewall/status").json()
         assert "interface" in status["macros"]
     finally:
@@ -1027,6 +1042,7 @@ def test_update_chain_applied_false_after_policy_change(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     client = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         client.post("/v1/firewall/apply")
@@ -1482,6 +1498,7 @@ def test_live_state_returns_500_when_nft_fails(tmp_path):
     inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     client = TestClient(app)
     with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="", stderr="Table not found")):
         r = client.get("/v1/firewall/live-state")
@@ -1681,6 +1698,7 @@ def test_discard_restores_sets(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     client = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         client.post("/v1/firewall/apply")
@@ -2068,6 +2086,7 @@ def test_discard_restores_ingress_rules(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     client = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         client.post("/v1/firewall/apply")
@@ -2237,6 +2256,7 @@ def test_discard_restores_custom_chains(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     client = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         client.post("/v1/firewall/apply")
@@ -2325,6 +2345,7 @@ def test_list_counters_returns_500_without_root(tmp_path):
     inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="", stderr="Permission denied")):
         r = TestClient(app).get("/v1/firewall/counters")
     assert r.status_code == 500
@@ -2336,6 +2357,7 @@ def test_reset_counter_returns_500_without_root(tmp_path):
     inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     with patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="", stderr="No such counter")):
         r = TestClient(app).post("/v1/firewall/counters/ssh_counter/reset")
     assert r.status_code == 500
@@ -2459,6 +2481,7 @@ def test_discard_restores_flowtables(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     client = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         client.post("/v1/firewall/apply")
@@ -2475,6 +2498,7 @@ def test_discard_restores_nat_rules(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     client = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         client.post("/v1/firewall/apply")
@@ -2615,6 +2639,7 @@ def test_verdict_map_survives_reload(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     c = TestClient(app)
     c.post("/v1/firewall/maps", json={
         "name": "dispatch", "key_type": "inet_service",
@@ -2627,6 +2652,7 @@ def test_verdict_map_survives_reload(tmp_path):
         inst2.setup()
     app2 = FastAPI()
     app2.include_router(inst2.router, prefix="/v1/firewall")
+    app2.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     c2 = TestClient(app2)
     r = c2.get("/v1/firewall/maps/dispatch")
     assert r.status_code == 200
@@ -2640,6 +2666,7 @@ def test_discard_restores_verdict_maps(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     c = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         c.post("/v1/firewall/apply")
@@ -2904,6 +2931,7 @@ def test_quota_survives_reload(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     c = TestClient(app)
     c.post("/v1/firewall/quotas", json={"name": "cap", "amount": 1, "unit": "gbytes"})
     inst2, mod2 = _make_inst(tmp_path)
@@ -2912,6 +2940,7 @@ def test_quota_survives_reload(tmp_path):
         inst2.setup()
     app2 = FastAPI()
     app2.include_router(inst2.router, prefix="/v1/firewall")
+    app2.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     r = TestClient(app2).get("/v1/firewall/quotas/cap")
     assert r.status_code == 200
     assert r.json()["unit"] == "gbytes"
@@ -2964,6 +2993,7 @@ def test_discard_restores_quotas(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     c = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         c.post("/v1/firewall/apply")
@@ -2997,6 +3027,7 @@ def test_pending_changes_any_false_when_all_false(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     c = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         c.post("/v1/firewall/apply")
@@ -3012,6 +3043,7 @@ def test_pending_changes_rules_true_after_rule_add(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     c = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         c.post("/v1/firewall/apply")
@@ -3031,6 +3063,7 @@ def test_pending_changes_nat_rules_true_after_nat_add(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     c = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         c.post("/v1/firewall/apply")
@@ -3048,6 +3081,7 @@ def test_pending_changes_in_apply_response(tmp_path):
         inst.setup()
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/firewall")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     c = TestClient(app)
     with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
         r = c.post("/v1/firewall/apply")
@@ -3070,6 +3104,7 @@ def test_macro_snapshot_saved_after_apply(tmp_path):
             inst.setup()
         app = FastAPI()
         app.include_router(inst.router, prefix="/v1/firewall")
+        app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
         c = TestClient(app)
         c.post("/v1/firewall/rules", json={"name": "allow-dns", "protocol": "udp", "dst_port": "$service_port.dns.udp", "action": "accept"})
         with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):
@@ -3092,6 +3127,7 @@ def test_macro_snapshot_persists_across_reload(tmp_path):
             inst.setup()
         app = FastAPI()
         app.include_router(inst.router, prefix="/v1/firewall")
+        app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
         c = TestClient(app)
         c.post("/v1/firewall/rules", json={"name": "allow-dns", "protocol": "udp", "dst_port": "$service_port.dns.udp", "action": "accept"})
         with patch.object(mod, "_compile_to_script", return_value=_CLEAN_SCRIPT):

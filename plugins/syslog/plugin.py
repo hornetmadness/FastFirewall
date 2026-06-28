@@ -19,7 +19,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import HTTPException, Query
+from fastapi import Depends, HTTPException, Query
+from ff_auth import require_role
 from pydantic import BaseModel, Field
 
 from pyinfra.operations import files as files_ops
@@ -267,19 +268,20 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
 
     def _register_routes(self) -> None:
         add = self.router.add_api_route
-        add("/status",          self._status,        methods=["GET"],   summary="Plugin status and service health")
-        add("/config",          self._get_config,    methods=["GET"],   summary="Get effective fluent-bit config settings")
-        add("/config",          self._update_config, methods=["PATCH"], summary="Update fluent-bit config settings and reload")
-        add("/config/reload",    self._reload,        methods=["POST"],  summary="Reload fluent-bit without changing config")
-        add("/config/raw",       self._get_raw,       methods=["GET"],   summary="Read raw fluent-bit config file from disk")
-        add("/config/diagnose",  self._diagnose,      methods=["GET"],   summary="Diagnose fluent-bit setup and journal access")
-        add("/config/logrotate", self._get_logrotate, methods=["GET"],   summary="Get logrotate settings")
-        add("/config/logrotate", self._update_logrotate, methods=["PATCH"], summary="Update logrotate settings")
-        add("/config/logrotate/run", self._run_logrotate, methods=["POST"],  summary="Manually trigger log rotation")
-        add("/files",           self._list_files,    methods=["GET"],   summary="List log files in log_dir")
-        add("/logs/{filename}", self._read_log,      methods=["GET"],   summary="Read last N lines of a log file")
-        add("/tail/{filename}", self._tail_log,      methods=["GET"],   summary="Tail a log file (alias for read with smaller default)")
-        add("/journal",         self._journal,       methods=["GET"],   summary="Read systemd journal entries")
+        _admin = [require_role("admin")]
+        add("/status",          self._status,        methods=["GET"],   summary="Plugin status and service health", dependencies=_admin)
+        add("/config",          self._get_config,    methods=["GET"],   summary="Get effective fluent-bit config settings", dependencies=_admin)
+        add("/config",          self._update_config, methods=["PATCH"], summary="Update fluent-bit config settings and reload", dependencies=_admin)
+        add("/config/reload",    self._reload,        methods=["POST"],  summary="Reload fluent-bit without changing config", dependencies=_admin)
+        add("/config/raw",       self._get_raw,       methods=["GET"],   summary="Read raw fluent-bit config file from disk", dependencies=_admin)
+        add("/config/diagnose",  self._diagnose,      methods=["GET"],   summary="Diagnose fluent-bit setup and journal access", dependencies=_admin)
+        add("/config/logrotate", self._get_logrotate, methods=["GET"],   summary="Get logrotate settings", dependencies=_admin)
+        add("/config/logrotate", self._update_logrotate, methods=["PATCH"], summary="Update logrotate settings", dependencies=_admin)
+        add("/config/logrotate/run", self._run_logrotate, methods=["POST"],  summary="Manually trigger log rotation", dependencies=_admin)
+        add("/files",           self._list_files,    methods=["GET"],   summary="List log files in log_dir", dependencies=_admin)
+        add("/logs/{filename}", self._read_log,      methods=["GET"],   summary="Read last N lines of a log file", dependencies=_admin)
+        add("/tail/{filename}", self._tail_log,      methods=["GET"],   summary="Tail a log file (alias for read with smaller default)", dependencies=_admin)
+        add("/journal",         self._journal,       methods=["GET"],   summary="Read systemd journal entries", dependencies=_admin)
 
     # ── status ─────────────────────────────────────────────────────────────────
 

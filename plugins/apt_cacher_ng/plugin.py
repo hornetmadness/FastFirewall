@@ -19,7 +19,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import HTTPException, Query
+from fastapi import Depends, HTTPException, Query
+from ff_auth import require_role
 from pydantic import BaseModel, Field
 
 from pyinfra.operations import files as files_ops
@@ -171,17 +172,18 @@ class AptCacherNgPlugin(PluginBase, ApiRouterPlugin):
 
     def _register_routes(self) -> None:
         add = self.router.add_api_route
-        add("/status",        self._status,        methods=["GET"],    summary="Plugin and service status")
-        add("/config",        self._get_config,    methods=["GET"],    summary="Get managed acng settings")
-        add("/config",        self._update_config, methods=["PATCH"],  summary="Update acng settings and reload")
-        add("/config/reload", self._reload,        methods=["POST"],   summary="Reload apt-cacher-ng without config change")
-        add("/config/raw",    self._get_raw_conf,  methods=["GET"],    summary="Read raw acng.conf from disk")
-        add("/proxy-url",     self._get_proxy_url, methods=["GET"],    summary="Get proxy URL and host resolution info")
-        add("/proxy-url",     self._set_proxy_host,methods=["PUT"],    summary="Set a static host override for the proxy URL")
-        add("/proxy-url",     self._clear_proxy_host, methods=["DELETE"], summary="Clear the static host override")
-        add("/cache",         self._cache_stats,   methods=["GET"],    summary="Cache disk usage and file count")
-        add("/cache",         self._flush_cache,   methods=["DELETE"], summary="Delete all cached packages")
-        add("/logs",          self._get_logs,      methods=["GET"],    summary="Recent apt-cacher-ng journal entries")
+        _admin = [require_role("admin")]
+        add("/status",        self._status,        methods=["GET"],    summary="Plugin and service status", dependencies=_admin)
+        add("/config",        self._get_config,    methods=["GET"],    summary="Get managed acng settings", dependencies=_admin)
+        add("/config",        self._update_config, methods=["PATCH"],  summary="Update acng settings and reload", dependencies=_admin)
+        add("/config/reload", self._reload,        methods=["POST"],   summary="Reload apt-cacher-ng without config change", dependencies=_admin)
+        add("/config/raw",    self._get_raw_conf,  methods=["GET"],    summary="Read raw acng.conf from disk", dependencies=_admin)
+        add("/proxy-url",     self._get_proxy_url, methods=["GET"],    summary="Get proxy URL and host resolution info", dependencies=_admin)
+        add("/proxy-url",     self._set_proxy_host,methods=["PUT"],    summary="Set a static host override for the proxy URL", dependencies=_admin)
+        add("/proxy-url",     self._clear_proxy_host, methods=["DELETE"], summary="Clear the static host override", dependencies=_admin)
+        add("/cache",         self._cache_stats,   methods=["GET"],    summary="Cache disk usage and file count", dependencies=_admin)
+        add("/cache",         self._flush_cache,   methods=["DELETE"], summary="Delete all cached packages", dependencies=_admin)
+        add("/logs",          self._get_logs,      methods=["GET"],    summary="Recent apt-cacher-ng journal entries", dependencies=_admin)
 
     # ── route handlers ────────────────────────────────────────────────────────────
 

@@ -799,7 +799,40 @@ uv run python -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gen
 ```
 Paste the `$2b$…` output as the `password` value — the loader detects the prefix and skips re-hashing.
 
-**Key module:** `ff_auth/auth.py` — `setup(cfg)`, `enforce_auth` (middleware), `get_current_user` (FastAPI dependency), `create_token`, `authenticate_for_token`, `is_rate_limited`, `record_login_failure`, `record_login_success`. The package `ff_auth/__init__.py` re-exports all public symbols so `fastfirewall_app.py` imports from `ff_auth` directly.
+**Role-based access control**
+
+`get_current_user` accepts a `SecurityScopes` parameter. When a route is protected via `Security(get_current_user, scopes=["admin"])`, FastAPI injects `security_scopes.scopes = ["admin"]` and `get_current_user` validates that the authenticated user holds at least one of the listed scopes ("any of" semantics). This applies to both Basic and Bearer auth — roles come from `app_config.yaml` for all users.
+
+Two factory helpers are exported from `ff_auth`:
+
+```python
+from ff_auth import require_role, require_any_role
+
+# Returns Security(get_current_user, scopes=[role])
+require_role("admin")
+
+# Returns Security(get_current_user, scopes=["admin", "readonly"])
+require_any_role("admin", "readonly")
+```
+
+Because the return value is already a `Security()` object (a FastAPI dependency), it is used directly — no `Depends()` wrapper:
+
+```python
+def _register_routes(self) -> None:
+    add = self.router.add_api_route
+    _admin = [require_role("admin")]                          # NOT Depends(require_role(...))
+    add("/status", self._status, methods=["GET"], dependencies=_admin)
+    add("/config", self._update_config, methods=["PATCH"], dependencies=_admin)
+```
+
+**OpenAPI / Swagger UI**
+
+Using `Security()` causes FastAPI to emit per-operation `security` fields in the OpenAPI schema with the required scopes for each route. The `_custom_openapi()` function in `fastfirewall_app.py` post-processes the schema to:
+
+1. Clear any scopes attached to `HTTPBasic` entries (scopes are an OAuth2 concept; BasicAuth has no scope mechanism in OpenAPI).
+2. Inject `**Allowed Roles:** <scopes>` into each operation's `description` so the requirement is visible directly on the operation card in Swagger UI — not just in the lock icon popup.
+
+**Key module:** `ff_auth/auth.py` — `setup(cfg)`, `enforce_auth` (middleware), `get_current_user` (FastAPI dependency), `require_role`, `require_any_role`, `create_token`, `authenticate_for_token`, `is_rate_limited`, `record_login_failure`, `record_login_success`. The package `ff_auth/__init__.py` re-exports all public symbols so `fastfirewall_app.py` imports from `ff_auth` directly.
 
 > Note: the directory on disk is `ff_auth` (underscore) — Python package names cannot contain hyphens.
 

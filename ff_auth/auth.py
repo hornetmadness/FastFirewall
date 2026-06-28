@@ -16,9 +16,9 @@ from typing import TYPE_CHECKING, Any
 
 import bcrypt as _bcrypt
 import jwt as _jwt
-from fastapi import Depends, HTTPException, Request, Response, status
+from fastapi import Depends, HTTPException, Request, Response, Security, status
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials, OAuth2PasswordBearer
+from fastapi.security import HTTPBasic, HTTPBasicCredentials, OAuth2PasswordBearer, SecurityScopes
 
 if TYPE_CHECKING:
     from app_config import AuthConfig
@@ -34,7 +34,11 @@ _DUMMY_HASH: str = _bcrypt.hashpw(b"__dummy__", _bcrypt.gensalt()).decode()
 
 # Security scheme objects — importing them triggers registration in OpenAPI.
 http_basic = HTTPBasic(auto_error=False)
-oauth2_bearer = OAuth2PasswordBearer(tokenUrl="/token", auto_error=False)
+oauth2_bearer = OAuth2PasswordBearer(
+    tokenUrl="/token",
+    scopes={"admin": "Full administrator access"},
+    auto_error=False,
+)
 
 
 @dataclass
@@ -225,13 +229,15 @@ def authenticate_for_token(username: str, password: str) -> AuthUser | None:
 
 
 async def get_current_user(
+    security_scopes: SecurityScopes,
     credentials: HTTPBasicCredentials | None = Depends(http_basic),
     token: str | None = Depends(oauth2_bearer),
 ) -> AuthUser:
     """FastAPI dependency — resolves caller via Basic or Bearer auth.
 
-    Declaring this dependency on a route causes both security schemes to appear
-    in the OpenAPI /docs "Authorize" dialog.
+    Declaring this dependency on a route (via Security()) causes both security
+    schemes and the required scopes to appear in the OpenAPI /docs per-operation
+    security section.
     """
     if not _st.enabled:
         return AuthUser(username="anonymous")
@@ -246,7 +252,42 @@ async def get_current_user(
             detail="Authentication required",
             headers={"WWW-Authenticate": 'Bearer realm="FastFirewall"'},
         )
+    if _st.enabled and security_scopes.scopes:
+        if not any(s in user.roles for s in security_scopes.scopes):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Role '{security_scopes.scope_str}' required",
+            )
     return user
+
+
+def require_role(role: str):
+    """Return a FastAPI Security dependency that requires a single role.
+
+    Usage:
+        self.router.add_api_route("/path", handler, methods=["GET"],
+            dependencies=[require_role("admin")])
+
+    The scope is surfaced in the OpenAPI per-operation security section so
+    Swagger UI shows "Scopes: <role>" on each protected route.
+    When auth is disabled the scope check is skipped.
+    """
+    return Security(get_current_user, scopes=[role])
+
+
+def require_any_role(*roles: str):
+    """Return a FastAPI Security dependency accepting any of the given roles.
+
+    Usage:
+        self.router.add_api_route("/path", handler, methods=["GET"],
+            dependencies=[require_any_role("admin", "readonly")])
+
+    Raises ValueError at definition time if called with no arguments.
+    When auth is disabled the scope check is skipped.
+    """
+    if not roles:
+        raise ValueError("require_any_role() requires at least one role")
+    return Security(get_current_user, scopes=list(roles))
 
 
 async def enforce_auth(request: Request, call_next) -> Response:

@@ -28,7 +28,8 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Any, List, Optional, Union
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
+from ff_auth import require_role
 from pydantic import BaseModel, Field, field_validator
 
 from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service, on
@@ -272,14 +273,15 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
 
     def _register_routes(self) -> None:
         add = self.router.add_api_route
-        add("/status",  self._status,        methods=["GET"],    summary="Plugin and Postfix service status")
-        add("/config",  self._get_config,    methods=["GET"],    summary="Get managed Postfix settings")
-        add("/config",  self._update_config, methods=["PUT"],    summary="Apply Postfix settings via postconf")
-        add("/queue",   self._get_queue,     methods=["GET"],    summary="Show the Postfix mail queue")
-        add("/queue",   self._flush_queue,   methods=["DELETE"], summary="Flush the mail queue (postqueue -f)")
-        add("/send",    self._send,          methods=["POST"],   summary="Send an email via Postfix",          status_code=202)
-        add("/test",    self._test_email,    methods=["POST"],   summary="Send a test email via local SMTP",   status_code=202)
-        add("/reload",  self._reload,        methods=["POST"],   summary="Reload Postfix configuration")
+        _admin = [require_role("admin")]
+        add("/status",  self._status,        methods=["GET"],    summary="Plugin and Postfix service status", dependencies=_admin)
+        add("/config",  self._get_config,    methods=["GET"],    summary="Get managed Postfix settings", dependencies=_admin)
+        add("/config",  self._update_config, methods=["PUT"],    summary="Apply Postfix settings via postconf", dependencies=_admin)
+        add("/queue",   self._get_queue,     methods=["GET"],    summary="Show the Postfix mail queue", dependencies=_admin)
+        add("/queue",   self._flush_queue,   methods=["DELETE"], summary="Flush the mail queue (postqueue -f)", dependencies=_admin)
+        add("/send",    self._send,          methods=["POST"],   summary="Send an email via Postfix",          status_code=202, dependencies=_admin)
+        add("/test",    self._test_email,    methods=["POST"],   summary="Send a test email via local SMTP",   status_code=202, dependencies=_admin)
+        add("/reload",  self._reload,        methods=["POST"],   summary="Reload Postfix configuration", dependencies=_admin)
 
     # ── route handlers ───────────────────────────────────────────────────────────
 

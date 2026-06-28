@@ -194,6 +194,23 @@ The interactive docs at `/docs` have an **Authorize** button that handles both m
 
 Default credentials are `admin` / `admin`. **Change these before exposing the API to a network.** See [Configuration reference](#configuration-reference) for how to set users and generate a strong JWT secret.
 
+### Role-based access control
+
+All plugin API routes require the `admin` role. Roles are assigned per-user in `app_config.yaml`:
+
+```yaml
+auth:
+  users:
+    - username: admin
+      password: "admin"
+      roles: [admin]
+    - username: readonly
+      password: "readonly"
+      roles: [readonly]   # can only reach routes that accept this role
+```
+
+In the interactive docs at `/docs`, each plugin operation shows the required role directly in its description — **Allowed Roles: admin** — so you can see at a glance what permission level an endpoint needs without clicking into the lock icon.
+
 ### Brute-force protection
 
 `POST /token` is rate-limited per client IP. After **5 failed attempts within a 5-minute sliding window**, the endpoint returns `429 Too Many Requests` with a `Retry-After: 300` header. The counter resets automatically when the window expires or when a login succeeds.

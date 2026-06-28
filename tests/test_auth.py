@@ -16,6 +16,8 @@ from ff_auth.auth import (
     create_token,
     enforce_auth,
     get_current_user,
+    require_any_role,
+    require_role,
     setup,
     _st,
 )
@@ -298,3 +300,121 @@ def test_middleware_mutate_passes_through_when_auth_disabled():
     client = _app_with_middleware(_cfg(enabled=False))
     r = client.post("/mutate")
     assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# require_role / require_any_role
+# ---------------------------------------------------------------------------
+
+def _cfg_with_users(**extra_users: list[str]) -> AuthConfig:
+    """Build an AuthConfig with admin plus any extra users keyed by username."""
+    users = [{"username": "admin", "password": "admin", "roles": ["admin"]}]
+    for username, roles in extra_users.items():
+        users.append({"username": username, "password": "pw", "roles": roles})
+    return _cfg(users=users)
+
+
+def _app_with_role_deps(cfg: AuthConfig) -> TestClient:
+    """Minimal app with per-route role dependencies, no middleware."""
+    setup(cfg)
+    app = FastAPI()
+
+    @app.get("/admin-only", dependencies=[require_role("admin")])
+    async def admin_only():
+        return {"ok": True}
+
+    @app.get("/readonly-only", dependencies=[require_role("readonly")])
+    async def readonly_only():
+        return {"ok": True}
+
+    @app.get("/either", dependencies=[require_any_role("admin", "readonly")])
+    async def either_role():
+        return {"ok": True}
+
+    @app.get("/return-user")
+    async def return_user(user: AuthUser = require_role("admin")):
+        return {"username": user.username, "roles": user.roles}
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+# require_role()
+
+def test_require_role_allows_user_with_role():
+    client = _app_with_role_deps(_cfg_with_users())
+    r = client.get("/admin-only", headers={"Authorization": _basic_header("admin", "admin")})
+    assert r.status_code == 200
+
+
+def test_require_role_denies_user_missing_role():
+    client = _app_with_role_deps(_cfg_with_users(reader=["readonly"]))
+    r = client.get("/admin-only", headers={"Authorization": _basic_header("reader", "pw")})
+    assert r.status_code == 403
+
+
+def test_require_role_denies_user_with_no_roles():
+    client = _app_with_role_deps(_cfg_with_users(nobody=[]))
+    r = client.get("/admin-only", headers={"Authorization": _basic_header("nobody", "pw")})
+    assert r.status_code == 403
+
+
+def test_require_role_403_detail_contains_role_name():
+    client = _app_with_role_deps(_cfg_with_users(reader=["readonly"]))
+    r = client.get("/admin-only", headers={"Authorization": _basic_header("reader", "pw")})
+    assert r.status_code == 403
+    assert "admin" in r.json()["detail"]
+
+
+def test_require_role_passes_when_auth_disabled():
+    client = _app_with_role_deps(_cfg(enabled=False))
+    r = client.get("/admin-only")
+    assert r.status_code == 200
+
+
+def test_require_role_returns_authuser_for_downstream_use():
+    client = _app_with_role_deps(_cfg_with_users())
+    r = client.get("/return-user", headers={"Authorization": _basic_header("admin", "admin")})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["username"] == "admin"
+    assert "admin" in body["roles"]
+
+
+# require_any_role()
+
+def test_require_any_role_allows_first_matching_role():
+    client = _app_with_role_deps(_cfg_with_users())
+    r = client.get("/either", headers={"Authorization": _basic_header("admin", "admin")})
+    assert r.status_code == 200
+
+
+def test_require_any_role_allows_second_matching_role():
+    client = _app_with_role_deps(_cfg_with_users(reader=["readonly"]))
+    r = client.get("/either", headers={"Authorization": _basic_header("reader", "pw")})
+    assert r.status_code == 200
+
+
+def test_require_any_role_denies_user_with_no_matching_role():
+    client = _app_with_role_deps(_cfg_with_users(viewer=["viewer"]))
+    r = client.get("/either", headers={"Authorization": _basic_header("viewer", "pw")})
+    assert r.status_code == 403
+
+
+def test_require_any_role_403_detail_lists_allowed_roles():
+    client = _app_with_role_deps(_cfg_with_users(viewer=["viewer"]))
+    r = client.get("/either", headers={"Authorization": _basic_header("viewer", "pw")})
+    assert r.status_code == 403
+    detail = r.json()["detail"]
+    assert "admin" in detail
+    assert "readonly" in detail
+
+
+def test_require_any_role_passes_when_auth_disabled():
+    client = _app_with_role_deps(_cfg(enabled=False))
+    r = client.get("/either")
+    assert r.status_code == 200
+
+
+def test_require_any_role_raises_valueerror_with_no_args():
+    with pytest.raises(ValueError, match="at least one role"):
+        require_any_role()
