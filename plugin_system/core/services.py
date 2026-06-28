@@ -50,3 +50,6 @@ class Service(str, Enum):
     USERS = "users"
     GROUPS = "groups"
     APP_PROXY = "app_proxy"
+    SSH = "ssh"
+    HTTP = "http"
+    HTTPS = "https"

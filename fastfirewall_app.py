@@ -177,6 +177,9 @@ only_plugins, ignore_plugins_states, show_macros = manager_cli.run(loader, cfg.p
 loader.ignore_state_on_boot = ignore_plugins_states
 data_dir = cfg.plugins_data_dir()
 
+# Register the API port before any plugin loads so firewall boot-time apply can resolve it.
+macro_registry.register("$service_port.fastfirewall-api.tcp", [cfg.server.port])
+
 # 1. Dev / cwd plugins directory (highest priority)
 plugins_dir = cfg.plugins_src_dir()
 if plugins_dir.is_dir():
@@ -196,7 +199,6 @@ if not data_dir:
     _scan_dirs = cfg.plugins_scan_dirs()
     data_dir = _scan_dirs[0] if _scan_dirs else plugins_dir
 loader.load_installed(only=only_plugins, skip_requirements=show_macros, data_dir=data_dir)
-macro_registry.register("$service_port.fastfirewall-api.tcp", [cfg.server.port])
 loader.finished()
 
 if show_macros:
