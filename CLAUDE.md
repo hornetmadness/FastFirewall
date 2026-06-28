@@ -349,11 +349,17 @@ raw: Any = macro_registry.resolve(8080)                      # → 8080
 # Unknown namespace or malformed macro → None
 raw: Any = macro_registry.resolve("$unknown.x")              # → None
 
+# $service_port with no plugin claim → falls back to /etc/services
+raw: Any = macro_registry.resolve("$service_port.ssh.tcp")   # → [22]
+raw: Any = macro_registry.resolve("$service_port.http.tcp")  # → [80]
+
 # All currently registered namespaces
 namespaces: list[str] = macro_registry.namespaces   # e.g. ["service_port", "interface", "host"]
 ```
 
 `resolve()` returns `None` for unknown namespaces and malformed macros — callers should treat this as "unresolvable". Non-macro values (plain strings, ints) pass through unchanged, so callers can call `resolve()` unconditionally without a prior `is_macro()` check.
+
+**`$service_port` fallback to `/etc/services`**: when a `$service_port.<name>.<proto>` macro is not declared by any loaded plugin, `resolve()` falls back to `/etc/services`. The file is parsed once and cached for the process lifetime. Plugin-declared ports always take precedence; the fallback only fires when no plugin has registered that service name. Returns `None` if the service is not in `/etc/services` either.
 
 `resolve()` caches results for the `service_port` namespace (the hot path in firewall rule compilation) and invalidates the cache on `register_namespace`, `unregister_namespace`, and `set_service_ports`. Plugin-defined namespace results (e.g. `$interface.*`, `$host.*`) are **not** cached because their resolvers read live plugin state that can change without a `register_namespace` call.
 

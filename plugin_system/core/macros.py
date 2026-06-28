@@ -17,9 +17,41 @@ service_port entries after all plugins load.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Union
 
 from box import Box, BoxKeyError
+
+_ETC_SERVICES = Path("/etc/services")
+
+_SERVICE_PORT_RE = re.compile(
+    r"^\$service_port\.([A-Za-z0-9_-]+)\.([a-z]+)(?:\[(\d+)\])?$"
+)
+
+
+@lru_cache(maxsize=1)
+def _parse_etc_services() -> dict[tuple[str, str], list[int]]:
+    """Parse /etc/services → {(service_name, proto): [port, ...]}. Returns {} on error."""
+    result: dict[tuple[str, str], list[int]] = {}
+    try:
+        for line in _ETC_SERVICES.read_text().splitlines():
+            line = line.split("#")[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 2 or "/" not in parts[1]:
+                continue
+            name = parts[0].lower()
+            port_str, proto = parts[1].split("/", 1)
+            try:
+                port = int(port_str)
+            except ValueError:
+                continue
+            result.setdefault((name, proto.lower()), []).append(port)
+    except OSError:
+        pass
+    return result
 
 
 # Validates the general macro shape: $namespace.seg1[.seg2...][\d+]
@@ -55,6 +87,20 @@ def validate_macro_syntax(value: str) -> str:
     return value
 
 
+def _etc_services_fallback(value: str) -> Any:
+    """Return ports from /etc/services for an unresolved $service_port.<name>.<proto>[N] macro."""
+    m = _SERVICE_PORT_RE.match(value)
+    if m is None:
+        return None
+    ports = _parse_etc_services().get((m.group(1).lower(), m.group(2)))
+    if not ports:
+        return None
+    if m.group(3) is not None:
+        idx = int(m.group(3))
+        return ports[idx] if idx < len(ports) else None
+    return ports
+
+
 class MacroRegistry:
     """
     Shared registry backed by a Box(box_dots=True, default_box=True).
@@ -82,7 +128,7 @@ class MacroRegistry:
         - non-macro str or int  → returned as-is
         - $macro[N]             → scalar element at index N
         - $macro                → raw value (list, str, int, …)
-        - unknown path          → None
+        - unknown path          → /etc/services fallback for $service_port.*, else None
         """
         if not isinstance(value, str) or not value.startswith("$"):
             return value
@@ -90,9 +136,12 @@ class MacroRegistry:
             result = self._box[value.removeprefix("$")]
             # An empty Box means the path didn't resolve to a real leaf value
             if isinstance(result, Box) and not result:
-                return None
+                return _etc_services_fallback(value)
             return result
-        except (KeyError, BoxKeyError, IndexError):
+        except (KeyError, BoxKeyError):
+            return _etc_services_fallback(value)
+        except IndexError:
+            # [N] index is out of bounds on a declared value — no fallback
             return None
 
     @property

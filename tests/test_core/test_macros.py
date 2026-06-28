@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from unittest.mock import patch
 
 from plugin_system.core.macros import MacroRegistry, extract_macros, is_macro
 
@@ -151,3 +152,61 @@ def test_extract_macros_integer_ignored():
 
 def test_extract_macros_none_ignored():
     assert extract_macros(None) == set()
+
+
+# ── /etc/services fallback ────────────────────────────────────────────────────
+
+_MOCK_ETC = {
+    ("ssh", "tcp"): [22],
+    ("http", "tcp"): [80],
+    ("https", "tcp"): [443],
+    ("domain", "tcp"): [53],
+    ("domain", "udp"): [53],
+}
+
+
+@pytest.fixture()
+def reg_with_etc(reg):
+    """Registry with no plugin-declared ports but a mocked /etc/services."""
+    with patch("plugin_system.core.macros._parse_etc_services", return_value=_MOCK_ETC):
+        yield reg
+
+
+def test_etc_services_fallback_resolves_ssh(reg_with_etc):
+    assert reg_with_etc.resolve("$service_port.ssh.tcp") == [22]
+
+
+def test_etc_services_fallback_resolves_http(reg_with_etc):
+    assert reg_with_etc.resolve("$service_port.http.tcp") == [80]
+
+
+def test_etc_services_fallback_resolves_https(reg_with_etc):
+    assert reg_with_etc.resolve("$service_port.https.tcp") == [443]
+
+
+def test_etc_services_fallback_indexed(reg_with_etc):
+    assert reg_with_etc.resolve("$service_port.ssh.tcp[0]") == 22
+
+
+def test_etc_services_fallback_index_out_of_bounds(reg_with_etc):
+    assert reg_with_etc.resolve("$service_port.ssh.tcp[99]") is None
+
+
+def test_etc_services_fallback_unknown_service_returns_none(reg_with_etc):
+    assert reg_with_etc.resolve("$service_port.telnet.tcp") is None
+
+
+def test_etc_services_fallback_non_service_port_macro_unaffected(reg_with_etc):
+    assert reg_with_etc.resolve("$interface.lan.address") is None
+
+
+def test_plugin_declared_port_takes_precedence_over_etc_services(reg):
+    """A plugin declaring ssh:tcp:[2222] must win over /etc/services port 22."""
+    reg.register("$service_port.ssh.tcp", [2222])
+    with patch("plugin_system.core.macros._parse_etc_services", return_value=_MOCK_ETC):
+        assert reg.resolve("$service_port.ssh.tcp") == [2222]
+
+
+def test_etc_services_missing_returns_none(reg):
+    with patch("plugin_system.core.macros._parse_etc_services", return_value={}):
+        assert reg.resolve("$service_port.ssh.tcp") is None
