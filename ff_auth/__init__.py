@@ -9,6 +9,8 @@ from .auth import (
     is_rate_limited,
     record_login_failure,
     record_login_success,
+    require_any_role,
+    require_role,
     setup,
 )
 
@@ -23,5 +25,7 @@ __all__ = [
     "is_rate_limited",
     "record_login_failure",
     "record_login_success",
+    "require_any_role",
+    "require_role",
     "setup",
 ]

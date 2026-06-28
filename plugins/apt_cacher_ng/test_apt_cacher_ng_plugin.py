@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, call
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from ff_auth.auth import AuthUser, get_current_user
 
 from plugin_system.core.events import Event, bus as global_bus
 from plugin_system.core.macros import macro_registry
@@ -87,6 +88,7 @@ def _make_client(
     inst = _make_inst(tmp_path, conf_content)
     app = FastAPI()
     app.include_router(inst.router, prefix="/v1/apt_cacher_ng")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     return TestClient(app, raise_server_exceptions=False), inst
 
 
@@ -257,6 +259,7 @@ def test_proxy_host_persists_across_restart(tmp_path):
     inst1 = _make_inst(tmp_path)
     app1 = FastAPI()
     app1.include_router(inst1.router, prefix="/v1/apt_cacher_ng")
+    app1.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     c1 = TestClient(app1, raise_server_exceptions=False)
     c1.put("/v1/apt_cacher_ng/proxy-url", json={"host": "10.1.2.3"})
 
@@ -526,6 +529,7 @@ def test_settings_persist_across_restart(tmp_path):
 
     app1 = FastAPI()
     app1.include_router(inst1.router, prefix="/v1/apt_cacher_ng")
+    app1.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     c1 = TestClient(app1, raise_server_exceptions=False)
     c1.patch("/v1/apt_cacher_ng/config", json={"port": 3150, "fetch_timeout": 120})
 

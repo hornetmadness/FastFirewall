@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from ff_auth.auth import AuthUser, get_current_user
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -59,6 +60,7 @@ def _make_plugin(tmp_path, config=None):
 def _make_client(plugin) -> TestClient:
     app = FastAPI()
     app.include_router(plugin.router, prefix="/v1/syslog")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     return TestClient(app)
 
 

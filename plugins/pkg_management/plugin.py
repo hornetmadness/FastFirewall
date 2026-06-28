@@ -34,7 +34,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import BackgroundTasks, Depends, HTTPException
+from ff_auth import require_role
 from pydantic import BaseModel, Field
 from pyinfra.operations import server as server_ops
 
@@ -250,27 +251,28 @@ class PkgManagementPlugin(PluginBase, ApiRouterPlugin):
 
     def _register_routes(self) -> None:
         add = self.router.add_api_route
+        _admin = [require_role("admin")]
 
-        add("/status",                         self._status,           methods=["GET"],    summary="Plugin status and managed-resource counts")
-        add("/tasks",                          self._list_bg_tasks,    methods=["GET"],    summary="List background tasks and their status")
+        add("/status",                         self._status,           methods=["GET"],    summary="Plugin status and managed-resource counts", dependencies=_admin)
+        add("/tasks",                          self._list_bg_tasks,    methods=["GET"],    summary="List background tasks and their status", dependencies=_admin)
 
-        add("/services",                       self._list_services,    methods=["GET"],    summary="List all services with ff_managed flag")
-        add("/services/{service}",             self._set_service,      methods=["PUT"],    summary="Start/stop/enable/disable a service")
-        add("/services/{service}",             self._delete_service,   methods=["DELETE"], summary="Stop managing a service")
-        add("/services/{service}/import",      self._import_service,   methods=["POST"],   summary="Import an existing system service into FF management", status_code=201)
+        add("/services",                       self._list_services,    methods=["GET"],    summary="List all services with ff_managed flag", dependencies=_admin)
+        add("/services/{service}",             self._set_service,      methods=["PUT"],    summary="Start/stop/enable/disable a service", dependencies=_admin)
+        add("/services/{service}",             self._delete_service,   methods=["DELETE"], summary="Stop managing a service", dependencies=_admin)
+        add("/services/{service}/import",      self._import_service,   methods=["POST"],   summary="Import an existing system service into FF management", status_code=201, dependencies=_admin)
 
-        add("/packages",                       self._list_packages,    methods=["GET"],    summary="List managed packages")
-        add("/packages/search",                self._search_packages,  methods=["GET"],    summary="Search available packages")
-        add("/packages/upgrade-system",        self._upgrade_system,   methods=["POST"],   summary="Run a full unattended system upgrade and email the output")
-        add("/packages/{name}",                self._install_package,  methods=["POST"],   summary="Install or ensure a package",           status_code=201)
-        add("/packages/{name}",                self._update_package,   methods=["PUT"],    summary="Update a package to latest")
-        add("/packages/{name}",                self._remove_package,   methods=["DELETE"], summary="Remove a package")
-        add("/packages/{name}/import",         self._import_package,   methods=["POST"],   summary="Import an installed package into FF management", status_code=201)
+        add("/packages",                       self._list_packages,    methods=["GET"],    summary="List managed packages", dependencies=_admin)
+        add("/packages/search",                self._search_packages,  methods=["GET"],    summary="Search available packages", dependencies=_admin)
+        add("/packages/upgrade-system",        self._upgrade_system,   methods=["POST"],   summary="Run a full unattended system upgrade and email the output", dependencies=_admin)
+        add("/packages/{name}",                self._install_package,  methods=["POST"],   summary="Install or ensure a package",           status_code=201, dependencies=_admin)
+        add("/packages/{name}",                self._update_package,   methods=["PUT"],    summary="Update a package to latest", dependencies=_admin)
+        add("/packages/{name}",                self._remove_package,   methods=["DELETE"], summary="Remove a package", dependencies=_admin)
+        add("/packages/{name}/import",         self._import_package,   methods=["POST"],   summary="Import an installed package into FF management", status_code=201, dependencies=_admin)
 
-        add("/repos",                          self._list_repos,       methods=["GET"],    summary="List all repos with ff_managed flag")
-        add("/repos/import",                   self._import_repo,      methods=["POST"],   summary="Import an existing system repo into FF management", status_code=201)
-        add("/repos/{name}",                   self._add_repo,         methods=["POST"],   summary="Add or update a package repository",    status_code=201)
-        add("/repos/{name}",                   self._remove_repo,      methods=["DELETE"], summary="Remove a package repository")
+        add("/repos",                          self._list_repos,       methods=["GET"],    summary="List all repos with ff_managed flag", dependencies=_admin)
+        add("/repos/import",                   self._import_repo,      methods=["POST"],   summary="Import an existing system repo into FF management", status_code=201, dependencies=_admin)
+        add("/repos/{name}",                   self._add_repo,         methods=["POST"],   summary="Add or update a package repository",    status_code=201, dependencies=_admin)
+        add("/repos/{name}",                   self._remove_repo,      methods=["DELETE"], summary="Remove a package repository", dependencies=_admin)
 
     # ── status ─────────────────────────────────────────────────────────────────
 

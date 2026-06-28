@@ -219,10 +219,23 @@ def _custom_openapi():
         description=app.description,
         routes=app.routes,
     )
-    # Apply both security schemes globally so Swagger UI sends credentials for
-    # plugin routes, which are protected by middleware but have no FastAPI
-    # security dependency.
     schema["security"] = [{"OAuth2PasswordBearer": []}, {"HTTPBasic": []}]
+    for path_item in schema.get("paths", {}).values():
+        for op in path_item.values():
+            if not isinstance(op, dict) or "security" not in op:
+                continue
+            # Collect required roles from OAuth2 scopes; clear HTTPBasic scopes
+            # (BasicAuth has no scope concept in OpenAPI — scopes only apply to OAuth2).
+            required_roles: set[str] = set()
+            for sec_req in op["security"]:
+                if "OAuth2PasswordBearer" in sec_req:
+                    required_roles.update(sec_req["OAuth2PasswordBearer"])
+                if "HTTPBasic" in sec_req:
+                    sec_req["HTTPBasic"] = []
+            if required_roles:
+                role_line = "**Allowed Roles:** " + ", ".join(sorted(required_roles))
+                existing = op.get("description", "")
+                op["description"] = (role_line + "\n\n" + existing).rstrip()
     app.openapi_schema = schema
     return app.openapi_schema
 

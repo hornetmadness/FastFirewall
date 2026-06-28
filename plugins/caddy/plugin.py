@@ -32,7 +32,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
+from ff_auth import require_role
 from pydantic import BaseModel, Field
 
 from pyinfra.operations import files as files_ops
@@ -144,17 +145,18 @@ class CaddyPlugin(PluginBase, ApiRouterPlugin):
 
     def _register_routes(self) -> None:
         add = self.router.add_api_route
-        add("/status",             self._status,          methods=["GET"],    summary="Plugin status and pending-changes flag")
-        add("/config/apps",        self._list_apps,       methods=["GET"],    summary="List registered proxy apps")
-        add("/config/apps",        self._add_app,         methods=["POST"],   summary="Register a proxy app", status_code=201)
-        add("/config/apps/{name}", self._get_app,         methods=["GET"],    summary="Get one proxy app")
-        add("/config/apps/{name}", self._update_app,      methods=["PUT"],    summary="Replace a proxy app")
-        add("/config/apps/{name}", self._delete_app,      methods=["DELETE"], summary="Remove a proxy app", status_code=204)
-        add("/config/settings",    self._get_settings,    methods=["GET"],    summary="Get global proxy settings")
-        add("/config/settings",    self._update_settings, methods=["PATCH"],  summary="Update global proxy settings")
-        add("/check",              self._check,           methods=["POST"],   summary="Preview generated Caddy config (dry-run)")
-        add("/apply",              self._apply,           methods=["POST"],   summary="Apply Caddy config")
-        add("/discard",            self._discard,         methods=["POST"],   summary="Discard pending changes")
+        _admin = [require_role("admin")]
+        add("/status",             self._status,          methods=["GET"],    summary="Plugin status and pending-changes flag", dependencies=_admin)
+        add("/config/apps",        self._list_apps,       methods=["GET"],    summary="List registered proxy apps", dependencies=_admin)
+        add("/config/apps",        self._add_app,         methods=["POST"],   summary="Register a proxy app", status_code=201, dependencies=_admin)
+        add("/config/apps/{name}", self._get_app,         methods=["GET"],    summary="Get one proxy app", dependencies=_admin)
+        add("/config/apps/{name}", self._update_app,      methods=["PUT"],    summary="Replace a proxy app", dependencies=_admin)
+        add("/config/apps/{name}", self._delete_app,      methods=["DELETE"], summary="Remove a proxy app", status_code=204, dependencies=_admin)
+        add("/config/settings",    self._get_settings,    methods=["GET"],    summary="Get global proxy settings", dependencies=_admin)
+        add("/config/settings",    self._update_settings, methods=["PATCH"],  summary="Update global proxy settings", dependencies=_admin)
+        add("/check",              self._check,           methods=["POST"],   summary="Preview generated Caddy config (dry-run)", dependencies=_admin)
+        add("/apply",              self._apply,           methods=["POST"],   summary="Apply Caddy config", dependencies=_admin)
+        add("/discard",            self._discard,         methods=["POST"],   summary="Discard pending changes", dependencies=_admin)
 
     # ── event handlers ───────────────────────────────────────────────────────
 

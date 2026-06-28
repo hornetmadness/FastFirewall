@@ -38,7 +38,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
+from ff_auth import require_role
 from pydantic import BaseModel, Field, field_validator
 from pyinfra.operations import files as files_ops
 from pyinfra.operations import server as server_ops
@@ -691,44 +692,45 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
 
     def _register_routes(self) -> None:
         add = self.router.add_api_route
+        _admin = [require_role("admin")]
 
-        add("/status",              self._status,           methods=["GET"],    summary="Plugin status and managed-resource counts")
+        add("/status",              self._status,           methods=["GET"],    summary="Plugin status and managed-resource counts", dependencies=_admin)
 
-        add("/hostname",            self._get_hostname,     methods=["GET"],    summary="Get current hostname")
-        add("/hostname",            self._set_hostname,     methods=["PUT"],    summary="Set system hostname")
+        add("/hostname",            self._get_hostname,     methods=["GET"],    summary="Get current hostname", dependencies=_admin)
+        add("/hostname",            self._set_hostname,     methods=["PUT"],    summary="Set system hostname", dependencies=_admin)
 
-        add("/domainname",          self._get_domainname,   methods=["GET"],    summary="Get managed domain name")
-        add("/domainname",          self._set_domainname,   methods=["PUT"],    summary="Set system domain name")
-        add("/domainname",          self._delete_domainname, methods=["DELETE"], summary="Remove managed domain name")
+        add("/domainname",          self._get_domainname,   methods=["GET"],    summary="Get managed domain name", dependencies=_admin)
+        add("/domainname",          self._set_domainname,   methods=["PUT"],    summary="Set system domain name", dependencies=_admin)
+        add("/domainname",          self._delete_domainname, methods=["DELETE"], summary="Remove managed domain name", dependencies=_admin)
 
-        add("/sysctl",                     self._list_sysctl,      methods=["GET"],    summary="List all sysctl parameters with ff_managed flag")
-        add("/sysctl-all",                 self._list_all_sysctl,  methods=["GET"],    summary="List all sysctl parameters")
-        add("/sysctl/{key}",               self._set_sysctl,       methods=["PUT"],    summary="Set a sysctl kernel parameter")
-        add("/sysctl/{key}",               self._delete_sysctl,    methods=["DELETE"], summary="Stop managing a sysctl parameter")
-        add("/sysctl/{key}/import",        self._import_sysctl,    methods=["POST"],   summary="Import an existing sysctl key into FF management", status_code=201)
+        add("/sysctl",                     self._list_sysctl,      methods=["GET"],    summary="List all sysctl parameters with ff_managed flag", dependencies=_admin)
+        add("/sysctl-all",                 self._list_all_sysctl,  methods=["GET"],    summary="List all sysctl parameters", dependencies=_admin)
+        add("/sysctl/{key}",               self._set_sysctl,       methods=["PUT"],    summary="Set a sysctl kernel parameter", dependencies=_admin)
+        add("/sysctl/{key}",               self._delete_sysctl,    methods=["DELETE"], summary="Stop managing a sysctl parameter", dependencies=_admin)
+        add("/sysctl/{key}/import",        self._import_sysctl,    methods=["POST"],   summary="Import an existing sysctl key into FF management", status_code=201, dependencies=_admin)
 
-        add("/users",                      self._list_users,       methods=["GET"],    summary="List all users with ff_managed flag")
-        add("/users/{name}",               self._set_user,         methods=["POST"],   summary="Create or reconfigure a system user",   status_code=201)
-        add("/users/{name}",               self._delete_user,      methods=["DELETE"], summary="Remove a system user")
-        add("/users/{name}/import",        self._import_user,      methods=["POST"],   summary="Import an existing system user into FF management", status_code=201)
+        add("/users",                      self._list_users,       methods=["GET"],    summary="List all users with ff_managed flag", dependencies=_admin)
+        add("/users/{name}",               self._set_user,         methods=["POST"],   summary="Create or reconfigure a system user",   status_code=201, dependencies=_admin)
+        add("/users/{name}",               self._delete_user,      methods=["DELETE"], summary="Remove a system user", dependencies=_admin)
+        add("/users/{name}/import",        self._import_user,      methods=["POST"],   summary="Import an existing system user into FF management", status_code=201, dependencies=_admin)
 
-        add("/groups",                     self._list_groups,        methods=["GET"],    summary="List all groups with ff_managed flag")
-        add("/groups/{name}",              self._set_group,          methods=["POST"],   summary="Create or reconfigure a system group",  status_code=201)
-        add("/groups/{name}",              self._delete_group,       methods=["DELETE"], summary="Remove a system group")
-        add("/groups/{name}/import",       self._import_group,       methods=["POST"],   summary="Import an existing system group into FF management", status_code=201)
-        add("/groups/{name}/members",      self._list_group_members, methods=["GET"],    summary="List group members with ff_managed flag")
-        add("/groups/{name}/members",      self._add_group_member,   methods=["POST"],   summary="Add a user to a group", status_code=201)
-        add("/groups/{name}/members/{username}", self._remove_group_member, methods=["DELETE"], summary="Remove a user from a group")
+        add("/groups",                     self._list_groups,        methods=["GET"],    summary="List all groups with ff_managed flag", dependencies=_admin)
+        add("/groups/{name}",              self._set_group,          methods=["POST"],   summary="Create or reconfigure a system group",  status_code=201, dependencies=_admin)
+        add("/groups/{name}",              self._delete_group,       methods=["DELETE"], summary="Remove a system group", dependencies=_admin)
+        add("/groups/{name}/import",       self._import_group,       methods=["POST"],   summary="Import an existing system group into FF management", status_code=201, dependencies=_admin)
+        add("/groups/{name}/members",      self._list_group_members, methods=["GET"],    summary="List group members with ff_managed flag", dependencies=_admin)
+        add("/groups/{name}/members",      self._add_group_member,   methods=["POST"],   summary="Add a user to a group", status_code=201, dependencies=_admin)
+        add("/groups/{name}/members/{username}", self._remove_group_member, methods=["DELETE"], summary="Remove a user from a group", dependencies=_admin)
 
-        add("/cron",                       self._list_cron,        methods=["GET"],    summary="List all cron entries with ff_managed flag")
-        add("/cron/{name}",                self._set_cron,         methods=["POST"],   summary="Create or update a cron entry",         status_code=201)
-        add("/cron/{name}",                self._delete_cron,      methods=["DELETE"], summary="Remove a cron entry")
-        add("/cron/{name}/import",         self._import_cron,      methods=["POST"],   summary="Import an existing system cron entry into FF management", status_code=201)
+        add("/cron",                       self._list_cron,        methods=["GET"],    summary="List all cron entries with ff_managed flag", dependencies=_admin)
+        add("/cron/{name}",                self._set_cron,         methods=["POST"],   summary="Create or update a cron entry",         status_code=201, dependencies=_admin)
+        add("/cron/{name}",                self._delete_cron,      methods=["DELETE"], summary="Remove a cron entry", dependencies=_admin)
+        add("/cron/{name}/import",         self._import_cron,      methods=["POST"],   summary="Import an existing system cron entry into FF management", status_code=201, dependencies=_admin)
 
-        add("/kernmod",                    self._list_kernmod,     methods=["GET"],    summary="List all kernel modules with ff_managed flag")
-        add("/kernmod/{name}",             self._set_kernmod,      methods=["PUT"],    summary="Load and manage a kernel module")
-        add("/kernmod/{name}",             self._delete_kernmod,   methods=["DELETE"], summary="Stop managing a kernel module")
-        add("/kernmod/{name}/import",      self._import_kernmod,   methods=["POST"],   summary="Import an already-loaded kernel module into FF management", status_code=201)
+        add("/kernmod",                    self._list_kernmod,     methods=["GET"],    summary="List all kernel modules with ff_managed flag", dependencies=_admin)
+        add("/kernmod/{name}",             self._set_kernmod,      methods=["PUT"],    summary="Load and manage a kernel module", dependencies=_admin)
+        add("/kernmod/{name}",             self._delete_kernmod,   methods=["DELETE"], summary="Stop managing a kernel module", dependencies=_admin)
+        add("/kernmod/{name}/import",      self._import_kernmod,   methods=["POST"],   summary="Import an already-loaded kernel module into FF management", status_code=201, dependencies=_admin)
 
     # ── status ─────────────────────────────────────────────────────────────────
 

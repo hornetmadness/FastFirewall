@@ -27,7 +27,8 @@ import json
 import subprocess
 from typing import Any
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
+from ff_auth import require_role
 
 from infra import pyinfra_run_batch
 from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, MacroProviderPlugin, Service
@@ -249,59 +250,60 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin,
 
     def _register_routes(self) -> None:
         add = self.router.add_api_route
+        _admin = [require_role("admin")]
 
-        add("/status",                   self._status,                 methods=["GET"],    summary="Plugin status and counts")
+        add("/status",                   self._status,                 methods=["GET"],    summary="Plugin status and counts", dependencies=_admin)
 
-        add("/interfaces",               self._show_interfaces,        methods=["GET"],    summary="Current interface state (ip -j addr show)")
-        add("/interfaces/{name}",        self._show_interface,         methods=["GET"],    summary="Single interface running state")
-        add("/identify",                 self._identify,               methods=["GET"],    summary="Identify physical interfaces via sysfs")
+        add("/interfaces",               self._show_interfaces,        methods=["GET"],    summary="Current interface state (ip -j addr show)", dependencies=_admin)
+        add("/interfaces/{name}",        self._show_interface,         methods=["GET"],    summary="Single interface running state", dependencies=_admin)
+        add("/identify",                 self._identify,               methods=["GET"],    summary="Identify physical interfaces via sysfs", dependencies=_admin)
 
-        add("/config/interfaces",        self._list_config_interfaces, methods=["GET"],    summary="List configured interfaces")
-        add("/config/interfaces/import", self._import_interfaces,      methods=["POST"],   summary="Import existing interfaces from running state")
-        add("/config/interfaces/{name}", self._get_config_interface,   methods=["GET"],    summary="Get one interface config")
-        add("/config/interfaces/{name}", self._set_interface,          methods=["PUT"],    summary="Configure an interface")
-        add("/config/interfaces/{name}", self._delete_interface,       methods=["DELETE"], summary="Remove interface from config")
+        add("/config/interfaces",        self._list_config_interfaces, methods=["GET"],    summary="List configured interfaces", dependencies=_admin)
+        add("/config/interfaces/import", self._import_interfaces,      methods=["POST"],   summary="Import existing interfaces from running state", dependencies=_admin)
+        add("/config/interfaces/{name}", self._get_config_interface,   methods=["GET"],    summary="Get one interface config", dependencies=_admin)
+        add("/config/interfaces/{name}", self._set_interface,          methods=["PUT"],    summary="Configure an interface", dependencies=_admin)
+        add("/config/interfaces/{name}", self._delete_interface,       methods=["DELETE"], summary="Remove interface from config", dependencies=_admin)
 
-        add("/config/interfaces/{name}/peers", self._list_wg_peers,    methods=["GET"],    summary="List WireGuard peers")
-        add("/config/interfaces/{name}/peers", self._add_wg_peer,      methods=["POST"],   summary="Add WireGuard peer", status_code=201)
-        add("/config/interfaces/{name}/peers/{peer_id}", self._get_wg_peer,    methods=["GET"],    summary="Get WireGuard peer")
-        add("/config/interfaces/{name}/peers/{peer_id}", self._update_wg_peer, methods=["PUT"],    summary="Update WireGuard peer")
-        add("/config/interfaces/{name}/peers/{peer_id}", self._delete_wg_peer, methods=["DELETE"], summary="Delete WireGuard peer")
+        add("/config/interfaces/{name}/peers", self._list_wg_peers,    methods=["GET"],    summary="List WireGuard peers", dependencies=_admin)
+        add("/config/interfaces/{name}/peers", self._add_wg_peer,      methods=["POST"],   summary="Add WireGuard peer", status_code=201, dependencies=_admin)
+        add("/config/interfaces/{name}/peers/{peer_id}", self._get_wg_peer,    methods=["GET"],    summary="Get WireGuard peer", dependencies=_admin)
+        add("/config/interfaces/{name}/peers/{peer_id}", self._update_wg_peer, methods=["PUT"],    summary="Update WireGuard peer", dependencies=_admin)
+        add("/config/interfaces/{name}/peers/{peer_id}", self._delete_wg_peer, methods=["DELETE"], summary="Delete WireGuard peer", dependencies=_admin)
 
-        add("/config/routes",            self._list_routes,            methods=["GET"],    summary="List configured routes")
-        add("/config/routes/import",     self._import_routes,          methods=["POST"],   summary="Import existing routes from running state")
-        add("/config/routes",            self._add_route,              methods=["POST"],   summary="Add a route", status_code=201)
-        add("/config/routes/{route_id}", self._delete_route,           methods=["DELETE"], summary="Remove a route")
+        add("/config/routes",            self._list_routes,            methods=["GET"],    summary="List configured routes", dependencies=_admin)
+        add("/config/routes/import",     self._import_routes,          methods=["POST"],   summary="Import existing routes from running state", dependencies=_admin)
+        add("/config/routes",            self._add_route,              methods=["POST"],   summary="Add a route", status_code=201, dependencies=_admin)
+        add("/config/routes/{route_id}", self._delete_route,           methods=["DELETE"], summary="Remove a route", dependencies=_admin)
 
-        add("/config/bonds",             self._list_bonds,             methods=["GET"],    summary="List configured bonds")
-        add("/config/bonds",             self._create_bond,            methods=["POST"],   summary="Create a bond interface", status_code=201)
-        add("/config/bonds/{name}",      self._get_bond,               methods=["GET"],    summary="Get bond config")
-        add("/config/bonds/{name}",      self._update_bond,            methods=["PUT"],    summary="Update bond config")
-        add("/config/bonds/{name}",      self._delete_bond,            methods=["DELETE"], summary="Delete bond interface")
-        add("/bonds/{name}/status",      self._get_bond_status,        methods=["GET"],    summary="Live bond status from /proc")
-        add("/config/bonds/{name}/members", self._add_bond_member,     methods=["POST"],   summary="Add bond member", status_code=201)
-        add("/config/bonds/{name}/members/{member}", self._delete_bond_member, methods=["DELETE"], summary="Remove bond member")
+        add("/config/bonds",             self._list_bonds,             methods=["GET"],    summary="List configured bonds", dependencies=_admin)
+        add("/config/bonds",             self._create_bond,            methods=["POST"],   summary="Create a bond interface", status_code=201, dependencies=_admin)
+        add("/config/bonds/{name}",      self._get_bond,               methods=["GET"],    summary="Get bond config", dependencies=_admin)
+        add("/config/bonds/{name}",      self._update_bond,            methods=["PUT"],    summary="Update bond config", dependencies=_admin)
+        add("/config/bonds/{name}",      self._delete_bond,            methods=["DELETE"], summary="Delete bond interface", dependencies=_admin)
+        add("/bonds/{name}/status",      self._get_bond_status,        methods=["GET"],    summary="Live bond status from /proc", dependencies=_admin)
+        add("/config/bonds/{name}/members", self._add_bond_member,     methods=["POST"],   summary="Add bond member", status_code=201, dependencies=_admin)
+        add("/config/bonds/{name}/members/{member}", self._delete_bond_member, methods=["DELETE"], summary="Remove bond member", dependencies=_admin)
 
-        add("/config/bridges",           self._list_bridges,           methods=["GET"],    summary="List configured bridges")
-        add("/config/bridges",           self._create_bridge,          methods=["POST"],   summary="Create a bridge", status_code=201)
-        add("/config/bridges/{name}",    self._get_bridge,             methods=["GET"],    summary="Get bridge config")
-        add("/config/bridges/{name}",    self._update_bridge,          methods=["PUT"],    summary="Update bridge config")
-        add("/config/bridges/{name}",    self._delete_bridge,          methods=["DELETE"], summary="Delete bridge interface")
-        add("/config/bridges/{name}/members", self._add_bridge_member,  methods=["POST"],   summary="Add bridge member", status_code=201)
-        add("/config/bridges/{name}/members/{member}", self._delete_bridge_member, methods=["DELETE"], summary="Remove bridge member")
+        add("/config/bridges",           self._list_bridges,           methods=["GET"],    summary="List configured bridges", dependencies=_admin)
+        add("/config/bridges",           self._create_bridge,          methods=["POST"],   summary="Create a bridge", status_code=201, dependencies=_admin)
+        add("/config/bridges/{name}",    self._get_bridge,             methods=["GET"],    summary="Get bridge config", dependencies=_admin)
+        add("/config/bridges/{name}",    self._update_bridge,          methods=["PUT"],    summary="Update bridge config", dependencies=_admin)
+        add("/config/bridges/{name}",    self._delete_bridge,          methods=["DELETE"], summary="Delete bridge interface", dependencies=_admin)
+        add("/config/bridges/{name}/members", self._add_bridge_member,  methods=["POST"],   summary="Add bridge member", status_code=201, dependencies=_admin)
+        add("/config/bridges/{name}/members/{member}", self._delete_bridge_member, methods=["DELETE"], summary="Remove bridge member", dependencies=_admin)
 
-        add("/config",                   self._get_config,             methods=["GET"],    summary="All systemd-networkd file contents")
-        add("/config/diff",              self._diff,                   methods=["GET"],    summary="Diff between current (applied) and desired state")
-        add("/apply",                    self._apply,                  methods=["POST"],   summary="Apply config via systemd-networkd")
-        add("/check",                    self._check,                  methods=["POST"],   summary="Preview networkd files (dry-run)")
-        add("/discard",                  self._discard,                methods=["POST"],   summary="Discard pending changes and restore last applied state")
+        add("/config",                   self._get_config,             methods=["GET"],    summary="All systemd-networkd file contents", dependencies=_admin)
+        add("/config/diff",              self._diff,                   methods=["GET"],    summary="Diff between current (applied) and desired state", dependencies=_admin)
+        add("/apply",                    self._apply,                  methods=["POST"],   summary="Apply config via systemd-networkd", dependencies=_admin)
+        add("/check",                    self._check,                  methods=["POST"],   summary="Preview networkd files (dry-run)", dependencies=_admin)
+        add("/discard",                  self._discard,                methods=["POST"],   summary="Discard pending changes and restore last applied state", dependencies=_admin)
 
-        add("/config/aliases",           self._list_aliases,           methods=["GET"],    summary="List interface aliases")
-        add("/config/aliases/{name}",    self._set_alias,              methods=["PUT"],    summary="Set an interface alias")
-        add("/config/aliases/{name}",    self._delete_alias,           methods=["DELETE"], summary="Delete an interface alias")
+        add("/config/aliases",           self._list_aliases,           methods=["GET"],    summary="List interface aliases", dependencies=_admin)
+        add("/config/aliases/{name}",    self._set_alias,              methods=["PUT"],    summary="Set an interface alias", dependencies=_admin)
+        add("/config/aliases/{name}",    self._delete_alias,           methods=["DELETE"], summary="Delete an interface alias", dependencies=_admin)
 
-        add("/ping",                     self._ping,                   methods=["POST"],   summary="Ping a host")
-        add("/mtr",                      self._mtr,                    methods=["POST"],   summary="Run mtr traceroute to a host")
+        add("/ping",                     self._ping,                   methods=["POST"],   summary="Ping a host", dependencies=_admin)
+        add("/mtr",                      self._mtr,                    methods=["POST"],   summary="Run mtr traceroute to a host", dependencies=_admin)
 
     # ── status ─────────────────────────────────────────────────────────
 

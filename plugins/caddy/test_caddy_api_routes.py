@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from ff_auth.auth import AuthUser, get_current_user
 
 from plugin_system.core.events import Event, bus as global_bus
 from plugin_system.core.macros import macro_registry
@@ -72,6 +73,7 @@ def _make_plugin(tmp_path: Path, config: dict | None = None) -> Any:
 def _make_client(plugin: Any) -> TestClient:
     app = FastAPI()
     app.include_router(plugin.router, prefix="/v1/caddy")
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     return TestClient(app, raise_server_exceptions=False)
 
 
