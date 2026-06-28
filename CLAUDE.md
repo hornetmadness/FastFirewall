@@ -589,6 +589,7 @@ from infra.state_manager import PluginStateFile
 self._state_file = PluginStateFile.from_config(
     self.plugin_dir, self.config, "state_file", "my_state.json", self.logger,
     mutation_model="immediate",   # or "deferred"
+    plugin_version=self.meta["version"],
 )
 desired = self._state_file.load_desired(default={"key": {}})
 # current_snapshot is automatically restored from disk — pending_changes is accurate immediately
@@ -624,7 +625,7 @@ self._state = self._state_file.load_desired(default=_EMPTY_STATE)
 self._state = self._state_file.load_desired(default={})
 ```
 
-`from_config` resolves `plugin_dir / "data" / config.get(key, default_filename)`.
+`from_config` resolves `plugin_dir / "data" / config.get(key, default_filename)`. `plugin_version` is a required keyword argument on both `__init__` and `from_config`; plugins pass `self.meta["version"]`.
 
 **Backups** — when `state.backup.enabled` is `true` in `app_config.yaml`, `save()` snapshots the existing file to `state.backup.directory` (default `/var/tmp/ff-backups/states`) before overwriting. Backup filenames include a timestamp: `<stem>_<YYYYMMDD_HHMMSS>.json`. The backup path is global (not inside the plugin's own `data/` dir) so backups survive plugin removal.
 
@@ -727,7 +728,7 @@ Key plugin-side helpers (see `plugins/host/plugin.py` for the canonical immediat
 - In `_apply_state()` (boot-time re-apply for deferred plugins), track per-resource success and call `self._state_file.commit(applied_snapshot)` at the end.
 - `pending_changes` in status: use `self._state_file.pending_changes` — no manual comparison needed.
 
-The state file on disk has two top-level keys — `desired_state` (the resource dicts) and `current_state` (the snapshot taken at the last successful apply):
+The state file on disk has four top-level keys — `desired_state` / `current_state` (plugin-owned resource dicts) and `desired_meta` / `current_meta` (envelope metadata written by `PluginStateFile`):
 
 ```json
 {
@@ -736,13 +737,25 @@ The state file on disk has two top-level keys — `desired_state` (the resource 
     "sysctl": { "vm.swappiness": { "value": "10", "persist": true } },
     "users": {}, "groups": {}, "cron": {}, "packages": {}, "repos": {}
   },
+  "desired_meta": {
+    "plugin_version": "1.0.0",
+    "version": 1751111696,
+    "updated_at": "2026-06-28T12:34:56Z"
+  },
   "current_state": {
     "services": {},
     "sysctl": { "vm.swappiness": { "value": "10", "persist": true } },
     "users": {}, "groups": {}, "cron": {}, "packages": {}, "repos": {}
+  },
+  "current_meta": {
+    "plugin_version": "1.0.0",
+    "version": 1751111411,
+    "applied_at": "2026-06-28T12:30:11Z"
   }
 }
 ```
+
+`desired_meta.version` / `current_meta.version` are Unix timestamps (integer seconds) set at write time — `version` advances on every `save_desired()` / `commit()` call. Legacy files without `desired_meta` / `current_meta` load cleanly; both default to `version: 0`. The meta blocks are written by `PluginStateFile` and must never be placed inside `desired_state` or `current_state`.
 
 When adding `current_state` to an existing state file, set it to a copy of `desired_state` so the plugin boots with `pending_changes: false`.
 
