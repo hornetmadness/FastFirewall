@@ -104,7 +104,7 @@ class CaddyPlugin(PluginBase, ApiRouterPlugin):
         )
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "state_file", "caddy_state.json", self.logger,
-            mutation_model="deferred", data_dir=self.data_dir,
+            mutation_model="deferred", data_dir=self.data_dir, plugin_version=self.meta["version"],
         )
         self._state: dict[str, Any] = self._state_file.load_desired(default=dict(_DEFAULT_STATE))
 

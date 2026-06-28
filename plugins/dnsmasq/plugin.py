@@ -82,7 +82,7 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin,
     def setup(self) -> None:
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "state_file", "dnsmasq_state.json", self.logger,
-            mutation_model="deferred", data_dir=self.data_dir,
+            mutation_model="deferred", data_dir=self.data_dir, plugin_version=self.meta["version"],
         )
         self._dns: dict[str, Any] = {}
         self._records: dict[str, dict[str, Any]] = {}

@@ -3,7 +3,8 @@ import logging
 import os
 import shutil
 import tempfile
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,15 +35,21 @@ class PluginStateFile:
         logger: logging.Logger | None = None,
         *,
         mutation_model: str = "deferred",
+        plugin_version: str,
     ) -> None:
         if mutation_model not in ("immediate", "deferred"):
             raise ValueError(f"mutation_model must be 'immediate' or 'deferred', got {mutation_model!r}")
         self._path = path
         self._log = logger or _log
         self._mutation_model = mutation_model
+        self._plugin_version = plugin_version
         self._desired: Any = None
         self._current: Any = None
         self._macro_snapshot: dict[str, Any] | None = None
+        self._desired_version: int = 0
+        self._desired_updated_at: str | None = None
+        self._current_version: int = 0
+        self._current_applied_at: str | None = None
 
     @classmethod
     def from_config(
@@ -55,6 +62,7 @@ class PluginStateFile:
         *,
         mutation_model: str = "deferred",
         data_dir: Path | None = None,
+        plugin_version: str,
     ) -> "PluginStateFile":
         """Resolve the state file path and return a PluginStateFile.
 
@@ -65,7 +73,7 @@ class PluginStateFile:
         base = data_dir if data_dir is not None else (plugin_dir / "data")
         path = base / config.get(key, default_filename)
         (logger or _log).debug("State file resolved to %s", path)
-        return cls(path, logger, mutation_model=mutation_model)
+        return cls(path, logger, mutation_model=mutation_model, plugin_version=plugin_version)
 
     @property
     def path(self) -> Path:
@@ -106,6 +114,12 @@ class PluginStateFile:
         raw = self.load(default={})
         self._current = raw.get("current_state")
         self._macro_snapshot = raw.get("macro_snapshot")
+        desired_meta = raw.get("desired_meta", {})
+        self._desired_version = desired_meta.get("version", 0)
+        self._desired_updated_at = desired_meta.get("updated_at")
+        current_meta = raw.get("current_meta", {})
+        self._current_version = current_meta.get("version", 0)
+        self._current_applied_at = current_meta.get("applied_at")
         desired = raw.get("desired_state", default)
         self._desired = desired
         return desired
@@ -118,8 +132,14 @@ class PluginStateFile:
         Returns True on success.
         """
         self._desired = snapshot
+        now = int(time.time())
+        ts = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._desired_version = now
+        self._desired_updated_at = ts
         if self._mutation_model == "immediate":
             self._current = snapshot
+            self._current_version = now
+            self._current_applied_at = ts
         return self._flush()
 
     def commit(self, snapshot: Any = None) -> bool:
@@ -129,6 +149,9 @@ class PluginStateFile:
         Returns True on success.
         """
         self._current = snapshot if snapshot is not None else self._desired
+        now = int(time.time())
+        self._current_version = now
+        self._current_applied_at = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         return self._flush()
 
     def save_and_commit(self, snapshot: Any) -> bool:
@@ -139,12 +162,34 @@ class PluginStateFile:
         """
         self._desired = snapshot
         self._current = snapshot
+        now = int(time.time())
+        ts = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._desired_version = now
+        self._desired_updated_at = ts
+        self._current_version = now
+        self._current_applied_at = ts
         return self._flush()
 
     def _flush(self) -> bool:
-        data: dict[str, Any] = {"desired_state": self._desired}
+        desired_meta: dict[str, Any] = {
+            "plugin_version": self._plugin_version,
+            "version": self._desired_version,
+        }
+        if self._desired_updated_at is not None:
+            desired_meta["updated_at"] = self._desired_updated_at
+        current_meta: dict[str, Any] = {
+            "plugin_version": self._plugin_version,
+            "version": self._current_version,
+        }
+        if self._current_applied_at is not None:
+            current_meta["applied_at"] = self._current_applied_at
+        data: dict[str, Any] = {
+            "desired_state": self._desired,
+            "desired_meta": desired_meta,
+        }
         if self._current is not None:
             data["current_state"] = self._current
+        data["current_meta"] = current_meta
         if self._macro_snapshot is not None:
             data["macro_snapshot"] = self._macro_snapshot
         return self.save(data)

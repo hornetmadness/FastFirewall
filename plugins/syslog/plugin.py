@@ -80,7 +80,7 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
         self._fluent_bit_main_conf = Path(self.config.get("fluent_bit_main_conf", "/etc/fluent-bit/fluent-bit.conf"))
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "overrides_file", "syslog_overrides.json", self.logger,
-            mutation_model="immediate", data_dir=self.data_dir,
+            mutation_model="immediate", data_dir=self.data_dir, plugin_version=self.meta["version"],
         )
 
         if self.config.get("ignore_state_on_boot", False):
