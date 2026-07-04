@@ -82,10 +82,12 @@ If you skip `--makecfg`, `fastfirewall-api` searches for an existing `app_config
 4. `~/.config/fastfirewall/app_config.yaml`
 5. The bundled default inside the installed package (last resort)
 
-**Before starting the server, edit the generated config:**
+`--makecfg` auto-generates a strong `auth.secret_key` (replacing any placeholder it finds, including on a config directory that already exists — safe to re-run as a repair). **Before starting the server, still edit the generated config:**
 
-- `~/.config/fastfirewall/app_config.yaml` — set a strong `secret_key` and change the default `admin` password under `auth.users`
+- `~/.config/fastfirewall/app_config.yaml` — change the default `admin` password under `auth.users`
 - `~/.config/fastfirewall/plugins/<plugin_id>/plugin.yaml` — enable or disable individual plugins and adjust per-plugin settings
+
+> **Scripting `fastfirewall-api` over SSH:** `ssh fastfirewall@host "fastfirewall-api ..."` runs a non-interactive shell, which does not source `~/.bashrc` — so the `PATH` addition from step 2 (`source ~/.venv/bin/activate` in `.bashrc`) won't be in effect. Use the absolute path instead: `~/.venv/bin/fastfirewall-api`.
 
 ---
 

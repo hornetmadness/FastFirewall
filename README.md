@@ -93,7 +93,9 @@ export PATH="$PATH:$HOME/.venv/bin"
 fastfirewall-api --makecfg ~/.config/fastfirewall
 ```
 
-`--makecfg` takes a **directory path** and creates it if needed, writing a starter `app_config.yaml` and a `plugins/` subdirectory into it. Edit the generated file to set a strong `secret_key` and update `auth.users` before starting the server.
+`--makecfg` takes a **directory path** and creates it if needed, writing a starter `app_config.yaml` and a `plugins/` subdirectory into it. It automatically generates a strong `auth.secret_key`, replacing any placeholder value it finds — re-running `--makecfg` against an existing config directory repairs a placeholder key in place if one is still there. Still update `auth.users` to change the default `admin` password before starting the server.
+
+> Running `--makecfg` (or any `fastfirewall-api` command) over `ssh host "command"` from a script? Non-interactive SSH sessions don't source `~/.bashrc`, so a `PATH` addition made there won't apply — invoke the binary by its absolute path (e.g. `~/.venv/bin/fastfirewall-api`) instead.
 
 See [BUILD.md](BUILD.md) for how to build and publish packages.
 
