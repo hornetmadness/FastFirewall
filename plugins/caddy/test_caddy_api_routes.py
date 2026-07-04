@@ -66,13 +66,15 @@ def _make_plugin(tmp_path: Path, config: dict | None = None) -> Any:
     plugin._OVERRIDE_PATH = tmp_path / "caddy_override.conf"
     plugin._pyinfra_run = MagicMock()
     plugin._caddy_admin_load = MagicMock()
+    plugin.configure()
+    plugin.api = mod.CaddyAPI(plugin)
     plugin.setup()
     return plugin
 
 
 def _make_client(plugin: Any) -> TestClient:
     app = FastAPI()
-    app.include_router(plugin.router, prefix="/v1/caddy")
+    app.include_router(plugin.api.router, prefix="/v1/caddy")
     app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     return TestClient(app, raise_server_exceptions=False)
 
@@ -646,16 +648,14 @@ def test_check_does_not_modify_state(plugin, client):
 # ── boot apply ───────────────────────────────────────────────────────────────
 
 def test_boot_applies_desired_state(tmp_path):
-    # Boot apply fires via plugins.all_loaded, not setup()
+    # Boot apply fires from setup(), which _make_plugin already calls.
     plugin = _make_plugin(tmp_path, config={"ignore_state_on_boot": False})
-    plugin._on_plugins_loaded(Event("plugins.all_loaded", payload={}))
     assert plugin._state_file.current_snapshot is not None
     assert "fastfirewall" in plugin._state_file.current_snapshot["apps"]
 
 
 def test_boot_ignore_state_skips_apply(tmp_path):
     plugin = _make_plugin(tmp_path, config={"ignore_state_on_boot": True})
-    plugin._on_plugins_loaded(Event("plugins.all_loaded", payload={}))
     assert plugin._state_file.current_snapshot is None
     plugin._pyinfra_run.assert_not_called()
 

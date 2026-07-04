@@ -2,35 +2,27 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from .plugin_aspect import PluginAspect
 
-class ApiRouterPlugin:
+
+class ApiRouterAspect(PluginAspect):
     """
-    Optional mixin that signals a plugin contributes FastAPI routes.
+    Aspect that gives a plugin a FastAPI router.
 
-    ``PluginBase`` is always required alongside this mixin::
+    Declare it as a class attribute on the plugin's ``PluginBase`` subclass::
 
-        class MyPlugin(PluginBase, ApiRouterPlugin):
-            services = [Service.DNS]
+        class FooAPI(ApiRouterAspect):
+            def __init__(self, core):
+                super().__init__(core)
+                self.router.add_api_route("/status", core._status, methods=["GET"])
 
-            def setup(self):
-                @self.router.get("/zones")
-                def list_zones():
-                    return {"zones": []}
+        class FooPlugin(PluginBase):
+            api = FooAPI
 
-    The loader mounts the router at /v1/<plugin_id>/.  ``self.router`` is
-    created automatically — add routes to it inside ``setup()``.
+    The loader instantiates ``FooAPI(instance)`` and mounts ``self.router``
+    at ``/v1/<plugin_id>/``.
     """
 
-    def __init_subclass__(cls, **kwargs: object) -> None:
-        super().__init_subclass__(**kwargs)
-        from .plugin_base import PluginBase  # local import avoids circular dep
-
-        if not issubclass(cls, PluginBase):
-            raise TypeError(
-                f"{cls.__name__} must also inherit from PluginBase: "
-                f"class {cls.__name__}(PluginBase, ApiRouterPlugin)"
-            )
-
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, core) -> None:
+        super().__init__(core)
         self.router: APIRouter = APIRouter()

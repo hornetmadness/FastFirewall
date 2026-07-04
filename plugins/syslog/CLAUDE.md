@@ -6,6 +6,8 @@ Installs and configures **fluent-bit** as a standalone syslog server. Listens on
 
 Unlike the host/smtp plugins, this plugin stores individual scalar fields (`_syslog_port`, `_syslog_mode`, etc.) rather than a single `_state` dict. `_save_overrides()` builds the snapshot dict inline and calls `save_desired()` directly.
 
+`SyslogPlugin` composes a `SyslogAPI(ApiRouterAspect)` aspect (`api = SyslogAPI`, taking over what was `_register_routes()`), instantiated by the loader after `configure()` runs. Path setup, state-file creation, and loading overrides into scalar fields all live in `configure()`; `setup()` only does the OS-mutating work — eagerly creating the log directory, calling `_configure_services()` (which applies the rendered fluent-bit/logrotate configs and starts the service), and emitting `syslog.ready`. The no-op `__init__` (previously kept only to document that the fluent-bit repo is registered by the loader) has been removed — that fact is now just documented here, not in code.
+
 ## Routes
 
 | Method | Path | Summary |
@@ -122,14 +124,16 @@ The fluent-bit apt repo is declared as a `repos:` entry in `plugin.yaml`. The lo
 
 Tests in `test_syslog_plugin.py`. pyinfra calls are mocked via `plugin._pyinfra_run = MagicMock()` before `setup()`. `subprocess.run` is patched with `unittest.mock.patch` for all tests that trigger systemctl, journalctl, or logrotate calls.
 
-The fluent-bit repo is now declared in `plugin.yaml` and registered by the loader — `__init__` has no side effects, so there is no bus interaction to worry about when constructing the plugin in tests.
+The fluent-bit repo is now declared in `plugin.yaml` and registered by the loader — the plugin has no custom `__init__`, so there is no bus interaction to worry about when constructing the plugin in tests.
 
 ```python
 plugin._pyinfra_run = MagicMock()
+plugin.configure()
+plugin.api = mod.SyslogAPI(plugin)
 with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
     plugin.setup()
 ```
 
-All tests use `_make_plugin(tmp_path, config=None)` + `_make_client(plugin)` — no shared session fixture. The `log_dir` fixture creates `tmp_path / "logs"` and is passed via `config={"log_dir": ...}`.
+All tests use `_make_plugin(tmp_path, config=None)` + `_make_client(plugin)` — no shared session fixture. `_make_client` mounts `plugin.api.router` (not `plugin.router`). The `log_dir` fixture creates `tmp_path / "logs"` and is passed via `config={"log_dir": ...}`.
 
 The raw state file test reads `envelope["desired_state"]` since the file uses the envelope format.

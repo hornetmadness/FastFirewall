@@ -4,6 +4,8 @@ Manages OS packages, repositories, and system services via pyinfra. Routes mount
 
 **Mutation model: immediate apply.** Every `POST`/`PUT`/`DELETE` mutation calls pyinfra inline and applies the change before returning. There is no `/apply` endpoint. Uses `PluginStateFile` with `mutation_model="immediate"`, so `save_desired()` automatically commits `current = desired` and `pending_changes` stays `False` after every mutation.
 
+`PkgManagementPlugin` composes a `PkgManagementAPI(ApiRouterAspect)` aspect (`api = PkgManagementAPI`, taking over what was `_register_routes()`), instantiated by the loader after `configure()` runs. `configure()` builds the state file, `_bg_tasks`, and `_pkg_mgr`, and loads `_state` (or resets it to empty when `ignore_state_on_boot`). `setup()` only runs `_apply_state()` (when not `ignore_state_on_boot`) and subscribes the `pkg_management.add.*` event handlers; `teardown()` unsubscribes them and saves state, unchanged from before.
+
 ## Resources
 
 Three managed resource types, each following the same three-endpoint pattern:
@@ -130,6 +132,8 @@ Tests in `test_pkg_management_api_routes.py`. Two fixture tiers:
 
 Each `_make_plugin` call uses a unique logger (`logging.getLogger(f"test.pkg_management.{id(plugin)}")`) so `patch.object(plugin.logger, "error")` doesn't bleed across tests when multiple plugin instances remain subscribed to the global bus.
 
-Boot-state tests write a `_BOOT_STATE` dict via `_write_boot_state(tmp_path)`, then call `_make_inst(tmp_path)` to get a plugin that hasn't called `setup()` yet. Since `_apply_state` batches service ops into one `_pyinfra_run_many` call, boot-time assertions inspect `_pyinfra_run_many.call_args[0][0]` (the batch list) for services, and `_pyinfra_run.call_args_list` for packages/repos.
+`_make_plugin` calls `plugin.configure()`, sets `plugin.api = mod.PkgManagementAPI(plugin)`, then `plugin.setup()` — mirroring `PluginLoader._instantiate_aspects`. `_make_client` mounts `plugin.api.router` (not `plugin.router`).
+
+Boot-state tests write a `_BOOT_STATE` dict via `_write_boot_state(tmp_path)`, then call `_make_inst(tmp_path)` to get a plugin that hasn't called `configure()`/`setup()` yet — tests call `plugin.configure()` then `plugin.setup()` explicitly. Since `_apply_state` batches service ops into one `_pyinfra_run_many` call, boot-time assertions inspect `_pyinfra_run_many.call_args[0][0]` (the batch list) for services, and `_pyinfra_run.call_args_list` for packages/repos.
 
 Event-handler tests call `plugin.teardown()` in a `finally` block to unsubscribe from the global bus and prevent cross-test leakage.

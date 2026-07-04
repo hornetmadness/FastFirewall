@@ -117,6 +117,8 @@ Rule IDs are a 16-character SHA-256 prefix of the rule's field dict (`sort_keys=
 
 If two enabled rules would produce an identical nft expression (same chain + same match/action), the compiler emits only the first (by priority order) and logs a warning for the skipped duplicate. The state file is unchanged — deduplication is compile-time only.
 
+`FirewallPlugin` composes a `FirewallAPI(ApiRouterAspect)` aspect (`api = FirewallAPI`, taking over what was `_register_routes()`), instantiated by the loader after `configure()` runs. State loading (all rule/chain/set/NAT/flowtable/custom-chain/ingress/verdict-map/quota dicts) lives in `configure()`; `setup()` only runs `_apply_state()` (when not `ignore_state_on_boot`), logs the loaded rule count, and calls `_sync_os_boot_service()`. Because every plugin's `setup()` is now deferred until all plugins are configured, `setup()` always sees fully-registered macros on its first (and only) apply — the old `@on("plugins.all_loaded") _on_plugins_loaded` re-apply-if-macros-changed workaround (and its supporting `_collect_macro_snapshot()`) has been removed.
+
 ## Fresh-install defaults
 
 On first boot (when the state file does not yet exist), the plugin seeds two default rules: `allow-ssh` (TCP/22) and `allow-fastfirewall-api` (TCP/8000), both targeting the `input` chain. These prevent lockout. They are only seeded once; if you delete them, they do not return.
@@ -224,8 +226,8 @@ The wrapper path defaults to `plugin_dir / "nft_cmd"` and can be overridden with
 
 Tests in `test_firewall_api_routes.py`. The plugin is loaded directly (not via `PluginLoader`) using the pattern described in `CLAUDE.md` at the repo root. Key fixtures:
 
-- **`client(tmp_path)`** — fresh plugin instance per test via `_make_app`. Fast; default rules seeded automatically.
-- **`_make_inst(tmp_path, config=None)`** — bare instance without `setup()` called. Use for boot-apply tests where you need to mock `_apply_nft_script` before setup runs.
+- **`client(tmp_path)`** — fresh plugin instance per test via `_make_app`, which calls `inst.configure()`, then `inst.api = mod.FirewallAPI(inst)`, then `inst.setup()` — mirroring what the loader does. Fast; default rules seeded automatically. Mounts `inst.api.router` (not `inst.router`).
+- **`_make_inst(tmp_path, config=None)`** — returns `(inst, mod)` with `inst.configure()` and `inst.api = mod.FirewallAPI(inst)` already done, but `setup()` **not** called. Use for boot-apply tests where you need to mock `_apply_nft_script` before `setup()` runs.
 
 Boot-apply tests mock two things:
 ```python

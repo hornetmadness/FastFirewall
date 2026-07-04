@@ -49,13 +49,16 @@ def _make_plugin(tmp_path, config=None):
     plugin.logger = logging.getLogger("test.host")
     plugin._pyinfra_run = MagicMock()
     plugin._pyinfra_run_many = MagicMock(side_effect=lambda ops: [(True, None)] * len(ops))
+    plugin.configure()
+    plugin.api = mod.HostAPI(plugin)
+    plugin.macros = mod.HostMacros(plugin)
     plugin.setup()
     return plugin
 
 
 def _make_client(plugin) -> TestClient:
     app = FastAPI()
-    app.include_router(plugin.router, prefix="/v1/host")
+    app.include_router(plugin.api.router, prefix="/v1/host")
     app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     return TestClient(app)
 
@@ -647,6 +650,7 @@ def _init_plugin(tmp_path, init_cfg: dict, *, side_effect=None):
     plugin.plugin_dir = tmp_path
     plugin.logger = logging.getLogger("test.host")
     plugin._pyinfra_run = MagicMock(side_effect=side_effect)
+    plugin.configure()
     return plugin, mod
 
 
@@ -1091,6 +1095,7 @@ def _make_inst(tmp_path, config=None):
     plugin.logger = logging.getLogger("test.host")
     plugin._pyinfra_run = MagicMock()
     plugin._pyinfra_run_many = MagicMock(side_effect=lambda ops: [(True, None)] * len(ops))
+    plugin.configure()
     return plugin, mod
 
 

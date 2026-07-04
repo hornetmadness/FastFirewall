@@ -63,8 +63,23 @@ class PluginBase:
         elif module.startswith("plugins."):
             self.plugin_id = module.split(".")[1]
 
+    def configure(self) -> None:
+        """
+        Called once after the loader injects plugin_id/meta/config/plugin_dir/
+        logger/data_dir, but before this plugin's aspects (declared as class
+        attributes, e.g. ``api = FooAPI``) are instantiated, and before
+        setup(). Load state and any config-derived attributes here — aspects
+        and setup() may depend on them. Override to initialise resources.
+        """
+
     def setup(self) -> None:
-        """Called once after the plugin is loaded. Override to initialise resources."""
+        """
+        Called once every plugin has been configured (state loaded, aspects
+        instantiated, routes/macros registered) — see PluginLoader.finished().
+        Override to apply state to the OS (pyinfra pushes, service restarts,
+        etc.). Do not register routes or macros here; do that via aspects
+        during configure()/aspect __init__ instead.
+        """
 
     def teardown(self) -> None:
         """Called when the plugin is unloaded. Override to clean up resources."""

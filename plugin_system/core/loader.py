@@ -77,8 +77,9 @@ from infra import pyinfra_run_batch
 from .decorators import _HANDLER_EVENTS_ATTR, _WILDCARD_ATTR
 from .events import Event, EventBus, bus as default_bus
 from .plugin_base import PluginBase
-from .api_router_plugin import ApiRouterPlugin
-from .macro_provider_plugin import MacroProviderPlugin
+from .plugin_aspect import PluginAspect
+from .api_router_plugin import ApiRouterAspect
+from .macro_provider_plugin import MacroProviderAspect
 from .macros import macro_registry
 from .services import Service
 
@@ -117,6 +118,7 @@ class LoadedPlugin:
         services: list[Service] | None = None,
         plugin_dir: Path | None = None,
         service_ports: int | dict[str, dict[str, list[int]]] = -1,
+        aspects: list[tuple[str, PluginAspect]] | None = None,
     ) -> None:
         self.plugin_id = plugin_id
         self.meta = meta
@@ -126,6 +128,7 @@ class LoadedPlugin:
         self.services: list[Service] = services or []
         self.plugin_dir: Path | None = plugin_dir
         self.service_ports: int | dict[str, dict[str, list[int]]] = service_ports
+        self.aspects: list[tuple[str, PluginAspect]] = aspects or []
 
     def __repr__(self) -> str:
         return f"<LoadedPlugin {self.plugin_id!r} v{self.meta.get('version', '?')}>"
@@ -152,7 +155,7 @@ class PluginLoader:
         logger: logging.Logger | None = None,
     ) -> None:
         self._bus = bus or default_bus
-        self._app = app  # FastAPI app; optional — only needed for ApiRouterPlugin support
+        self._app = app  # FastAPI app; optional — only needed for ApiRouterAspect support
         self.logger = logger or logging.getLogger(__name__)
         self._plugins: dict[str, LoadedPlugin] = {}
         self._service_registry: dict[Service, str] = {}  # service → plugin_id
@@ -162,6 +165,8 @@ class PluginLoader:
         self._all_service_ports: dict[str, dict[str, list[int]]] = {}
         self.ignore_state_on_boot: bool = False
         self._pkg_manager: str | None = None  # cached OS package manager name
+        self._deferred_setups: list[tuple[str, PluginBase]] = []
+        self._booted: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -714,13 +719,31 @@ class PluginLoader:
                     if filtered:
                         all_service_ports[svc_name] = filtered
         self._all_service_ports = all_service_ports
-        self._log_pending_changes()
 
         return loaded
 
     def finished(self) -> None:
-        """Emit ``plugins.all_loaded`` after any post-load setup (e.g. registering
-        additional macro namespaces or service ports) has been applied."""
+        """
+        Run every deferred plugin setup() (in dependency order), mark the
+        loader as booted, then emit ``plugins.all_loaded``.
+
+        setup() is deferred until this point for every plugin loaded during
+        initial boot, so each plugin's apply-state step can assume every
+        other plugin's routes/macros are already registered. Kept as an
+        event for future extensibility even though no plugin subscribes to
+        it after this design — plugins loaded after boot (self._booted is
+        True) have their setup() run immediately in load_plugin() instead of
+        being deferred here, since there's no barrier left to wait for.
+        """
+        for plugin_id, instance in self._deferred_setups:
+            try:
+                instance.setup()
+            except Exception:
+                self.logger.exception("setup() failed for plugin %r", plugin_id)
+        self._deferred_setups.clear()
+        self._booted = True
+        self._log_pending_changes()
+
         loaded = sorted(self._loaded)
         all_service_ports = self._all_service_ports
         self._bus.emit(Event(
@@ -935,7 +958,7 @@ class PluginLoader:
                     self._bus.subscribe_all(method)
                     handlers.append((None, method))
 
-        # --- store & setup --------------------------------------------
+        # --- store, configure, instantiate aspects, then setup ---------
         loaded = LoadedPlugin(plugin_id, meta, config, instance, handlers, services, path.resolve(), service_ports)
         self._plugins[plugin_id] = loaded
         for svc in services:
@@ -944,9 +967,17 @@ class PluginLoader:
         self._register_ports(plugin_id, service_ports)
 
         if instance is not None:
-            instance.setup()
-            self._register_api_routes(instance, plugin_id)
-            self._register_macro_provider(instance, plugin_id)
+            instance.configure()
+            aspects = self._instantiate_aspects(instance)
+            self._mount_aspect_routers(aspects, plugin_id)
+            loaded.aspects = aspects
+            if self._booted:
+                # Loaded after initial boot (e.g. via reload_plugin) — no
+                # "wait for everyone" barrier left to observe, so setup()
+                # runs immediately instead of being deferred forever.
+                instance.setup()
+            else:
+                self._deferred_setups.append((plugin_id, instance))
 
         svc_values = [s.value for s in services]
         self._bus.emit(Event(
@@ -973,9 +1004,10 @@ class PluginLoader:
             self._service_registry.pop(svc, None)
         self._bus.plugin_services.pop(plugin_id, None)
         self._release_ports(loaded.service_ports)
-        if loaded.instance is not None and isinstance(loaded.instance, MacroProviderPlugin):
-            for key in loaded.instance._macro_keys:
-                macro_registry.unregister(key)
+        for _name, aspect in loaded.aspects:
+            if isinstance(aspect, MacroProviderAspect):
+                for key in aspect._macro_keys:
+                    macro_registry.unregister(key)
 
         # Unsubscribe all handlers
         for event_name, fn in loaded.handlers:
@@ -1184,34 +1216,46 @@ class PluginLoader:
             f"Packages required: {packages}"
         )
 
-    def _register_macro_provider(self, instance: PluginBase, plugin_id: str) -> None:
-        """Log macro keys registered by a MacroProviderPlugin during setup()."""
-        if not isinstance(instance, MacroProviderPlugin):
-            return
-        if instance._macro_keys:
-            self.logger.debug(
-                "Plugin %r registered %d macro key(s): %s",
-                plugin_id, len(instance._macro_keys), ", ".join(instance._macro_keys),
-            )
+    def _instantiate_aspects(self, instance: PluginBase) -> list[tuple[str, PluginAspect]]:
+        """
+        Instantiate every PluginAspect subclass declared as a class attribute
+        on *instance*'s class (e.g. ``api = FooAPI``), wiring each to
+        *instance*, and shadow the class attribute with the instance so
+        ``instance.api`` becomes the ``FooAPI`` object.
 
-    def _register_api_routes(self, instance: PluginBase, plugin_id: str) -> None:
-        """Mount a ApiRouterPlugin's router on the FastAPI app at /v1/<plugin_id>/."""
-        if not isinstance(instance, ApiRouterPlugin):
-            return
-        if self._app is None:
-            self.logger.warning(
-                "Plugin %r is a ApiRouterPlugin but no FastAPI app was supplied to PluginLoader "
-                "— routes will not be registered",
-                plugin_id,
-            )
-            return
-        prefix = f"/v1/{plugin_id}"
-        self._app.include_router(instance.router, prefix=prefix, tags=[plugin_id])
-        self.logger.info(
-            "Mounted %r routes at %s",
-            plugin_id,
-            prefix,
-        )
+        Called after ``instance.configure()`` so aspects (particularly macro
+        aspects) can read already-loaded state.
+        """
+        aspects: list[tuple[str, PluginAspect]] = []
+        for name, attr in inspect.getmembers(
+            type(instance),
+            lambda v: isinstance(v, type) and issubclass(v, PluginAspect),
+        ):
+            aspect = attr(instance)
+            setattr(instance, name, aspect)
+            aspects.append((name, aspect))
+            if isinstance(aspect, MacroProviderAspect) and aspect._macro_keys:
+                self.logger.debug(
+                    "Plugin %r aspect %r registered %d macro key(s): %s",
+                    instance.plugin_id, name, len(aspect._macro_keys), ", ".join(aspect._macro_keys),
+                )
+        return aspects
+
+    def _mount_aspect_routers(self, aspects: list[tuple[str, PluginAspect]], plugin_id: str) -> None:
+        """Mount every ApiRouterAspect's router on the FastAPI app at /v1/<plugin_id>/."""
+        for _name, aspect in aspects:
+            if not isinstance(aspect, ApiRouterAspect):
+                continue
+            if self._app is None:
+                self.logger.warning(
+                    "Plugin %r has an ApiRouterAspect but no FastAPI app was supplied to "
+                    "PluginLoader — routes will not be registered",
+                    plugin_id,
+                )
+                continue
+            prefix = f"/v1/{plugin_id}"
+            self._app.include_router(aspect.router, prefix=prefix, tags=[plugin_id])
+            self.logger.info("Mounted %r routes at %s", plugin_id, prefix)
 
     def _import_module(self, plugin_id: str, module_path: Path):
         _ensure_system_dist_packages()

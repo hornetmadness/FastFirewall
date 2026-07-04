@@ -32,7 +32,7 @@ from fastapi import Depends, HTTPException
 from ff_auth import require_role
 from pydantic import BaseModel, Field, field_validator
 
-from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service, on
+from plugin_system.core import PluginBase, PluginStateFile, ApiRouterAspect, Service, on
 from plugin_system.core.events import Event, bus
 from plugin_system.core.macros import macro_registry
 
@@ -119,12 +119,30 @@ class TestEmailRequest(BaseModel):
     body: Optional[str] = Field(default=None, max_length=65536)
 
 
+# ── API aspect ──────────────────────────────────────────────────────────────────
+
+class SmtpAPI(ApiRouterAspect):
+    def __init__(self, core: "SmtpPlugin") -> None:
+        super().__init__(core)
+        add = self.router.add_api_route
+        _admin = [require_role("admin")]
+        add("/status",  core._status,        methods=["GET"],    summary="Plugin and Postfix service status", dependencies=_admin)
+        add("/config",  core._get_config,    methods=["GET"],    summary="Get managed Postfix settings", dependencies=_admin)
+        add("/config",  core._update_config, methods=["PUT"],    summary="Apply Postfix settings via postconf", dependencies=_admin)
+        add("/queue",   core._get_queue,     methods=["GET"],    summary="Show the Postfix mail queue", dependencies=_admin)
+        add("/queue",   core._flush_queue,   methods=["DELETE"], summary="Flush the mail queue (postqueue -f)", dependencies=_admin)
+        add("/send",    core._send,          methods=["POST"],   summary="Send an email via Postfix",          status_code=202, dependencies=_admin)
+        add("/test",    core._test_email,    methods=["POST"],   summary="Send a test email via local SMTP",   status_code=202, dependencies=_admin)
+        add("/reload",  core._reload,        methods=["POST"],   summary="Reload Postfix configuration", dependencies=_admin)
+
+
 # ── Plugin ──────────────────────────────────────────────────────────────────────
 
-class SmtpPlugin(PluginBase, ApiRouterPlugin):
+class SmtpPlugin(PluginBase):
     services = [Service.SMTP]
+    api = SmtpAPI
 
-    def setup(self) -> None:
+    def configure(self) -> None:
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "state_file", "smtp_state.json", self.logger,
             mutation_model="immediate", data_dir=self.data_dir, plugin_version=self.meta["version"],
@@ -133,9 +151,10 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
         self._smtp_port: int = int(self.config.get("smtp_port", 25))
         self._default_from: str = self.config.get("default_from", "fastfirewall@localhost")
         self._state: dict[str, Any] = self._state_file.load_desired(default={"postfix_settings": {}})
+
+    def setup(self) -> None:
         if not self.config.get("ignore_state_on_boot", False):
             self._apply_state()
-        self._register_routes()
         self.logger.info("SMTP plugin loaded (postfix at %s:%d)", self._smtp_host, self._smtp_port)
 
     def teardown(self) -> None:
@@ -268,20 +287,6 @@ class SmtpPlugin(PluginBase, ApiRouterPlugin):
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "html" if html else "plain"))
         return msg.as_string()
-
-    # ── route registration ───────────────────────────────────────────────────────
-
-    def _register_routes(self) -> None:
-        add = self.router.add_api_route
-        _admin = [require_role("admin")]
-        add("/status",  self._status,        methods=["GET"],    summary="Plugin and Postfix service status", dependencies=_admin)
-        add("/config",  self._get_config,    methods=["GET"],    summary="Get managed Postfix settings", dependencies=_admin)
-        add("/config",  self._update_config, methods=["PUT"],    summary="Apply Postfix settings via postconf", dependencies=_admin)
-        add("/queue",   self._get_queue,     methods=["GET"],    summary="Show the Postfix mail queue", dependencies=_admin)
-        add("/queue",   self._flush_queue,   methods=["DELETE"], summary="Flush the mail queue (postqueue -f)", dependencies=_admin)
-        add("/send",    self._send,          methods=["POST"],   summary="Send an email via Postfix",          status_code=202, dependencies=_admin)
-        add("/test",    self._test_email,    methods=["POST"],   summary="Send a test email via local SMTP",   status_code=202, dependencies=_admin)
-        add("/reload",  self._reload,        methods=["POST"],   summary="Reload Postfix configuration", dependencies=_admin)
 
     # ── route handlers ───────────────────────────────────────────────────────────
 

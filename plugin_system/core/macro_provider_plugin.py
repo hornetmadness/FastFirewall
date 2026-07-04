@@ -3,46 +3,36 @@ from __future__ import annotations
 from typing import Any
 
 from .macros import macro_registry
+from .plugin_aspect import PluginAspect
 
 
-class MacroProviderPlugin:
+class MacroProviderAspect(PluginAspect):
     """
-    Optional mixin: plugin registers macro keys directly into the shared registry.
+    Aspect that lets a plugin register macro keys into the shared registry.
 
-    Usage::
+    Declare it as a class attribute on the plugin's ``PluginBase`` subclass,
+    and register macros in its ``__init__`` (which runs after the core's
+    ``configure()``, so state/config is already loaded)::
 
-        class NetworkingPlugin(PluginBase, MacroProviderPlugin):
-
-            def setup(self):
-                for alias, device in self._aliases.items():
+        class FooMacros(MacroProviderAspect):
+            def __init__(self, core):
+                super().__init__(core)
+                for alias, device in core._aliases.items():
                     self.register_macro(f"$interface.{alias}.name", device)
-                    self.register_macro(f"$interface.{alias}.address", [...])
 
-            def teardown(self):
-                self.unregister_macro("$interface")
+            def macro_snapshot(self):
+                return {"interface": {...}}
 
-    Call ``register_macro(key, value)`` inside ``setup()`` for each macro key
-    the plugin owns. Keys are stored in ``_macro_keys`` so the loader can
-    clean them up on plugin unload.
+        class FooPlugin(PluginBase):
+            macros = FooMacros
 
-    Rules:
-    - Must also inherit ``PluginBase``.
-    - Register macros inside ``setup()``, not at class definition time.
-    - Re-call ``register_macro`` whenever the underlying data changes.
+    Keys are stored in ``_macro_keys`` so the loader can clean them up on
+    plugin unload. Re-instantiate/re-register whenever the underlying data
+    changes.
     """
 
-    def __init_subclass__(cls, **kwargs: object) -> None:
-        super().__init_subclass__(**kwargs)
-        from .plugin_base import PluginBase  # local import avoids circular dep
-
-        if not issubclass(cls, PluginBase):
-            raise TypeError(
-                f"{cls.__name__} must also inherit from PluginBase: "
-                f"class {cls.__name__}(PluginBase, MacroProviderPlugin)"
-            )
-
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, core) -> None:
+        super().__init__(core)
         self._macro_keys: list[str] = []
 
     def register_macro(self, key: str, value: Any) -> None:
@@ -59,7 +49,7 @@ class MacroProviderPlugin:
 
     def macro_snapshot(self) -> dict[str, dict[str, Any]]:
         """
-        Return a display snapshot of each namespace this plugin provides.
+        Return a display snapshot of each namespace this aspect provides.
 
         Override to expose the current entries; used by ``--show-macros``.
         """

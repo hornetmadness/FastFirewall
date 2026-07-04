@@ -77,6 +77,8 @@ def _make_plugin(tmp_path, config=None, system_repos=None):
     plugin.logger = logging.getLogger(f"test.pkg_management.{id(plugin)}")
     plugin._pyinfra_run = MagicMock()
     plugin._pyinfra_run_many = MagicMock(side_effect=lambda ops: [(True, None)] * len(ops))
+    plugin.configure()
+    plugin.api = mod.PkgManagementAPI(plugin)
     plugin.setup()
     plugin._pkg_mgr.list_system_repos = MagicMock(return_value=system_repos or {})
     plugin._pkg_mgr.list_system_packages = MagicMock(return_value={})
@@ -86,7 +88,7 @@ def _make_plugin(tmp_path, config=None, system_repos=None):
 
 def _make_client(plugin) -> TestClient:
     app = FastAPI()
-    app.include_router(plugin.router, prefix="/v1/pkg_management")
+    app.include_router(plugin.api.router, prefix="/v1/pkg_management")
     app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     return TestClient(app)
 
@@ -1038,6 +1040,7 @@ def test_state_reapplied_on_boot_calls_pyinfra(tmp_path):
     from pyinfra.operations import server as server_ops
     _write_boot_state(tmp_path)
     plugin, _ = _make_inst(tmp_path)
+    plugin.configure()
     plugin.setup()
     assert plugin._pyinfra_run_many.call_count == 1
     batch = plugin._pyinfra_run_many.call_args[0][0]
@@ -1048,6 +1051,7 @@ def test_state_reapplied_on_boot_calls_pyinfra(tmp_path):
 def test_ignore_state_on_boot_skips_apply(tmp_path):
     _write_boot_state(tmp_path)
     plugin, _ = _make_inst(tmp_path, config={"ignore_state_on_boot": True})
+    plugin.configure()
     plugin.setup()
     plugin._pyinfra_run_many.assert_not_called()
     assert plugin._state == {k: {} for k in plugin._EMPTY_STATE}
@@ -1056,6 +1060,7 @@ def test_ignore_state_on_boot_skips_apply(tmp_path):
 def test_apply_state_does_not_crash_on_pyinfra_failure(tmp_path):
     _write_boot_state(tmp_path)
     plugin, _ = _make_inst(tmp_path)
+    plugin.configure()
     plugin._pyinfra_run_many = MagicMock(side_effect=lambda ops: [(False, "pyinfra failed")] * len(ops))
     plugin.setup()  # must not raise
     assert "nginx" in plugin._state["services"]
@@ -1063,6 +1068,7 @@ def test_apply_state_does_not_crash_on_pyinfra_failure(tmp_path):
 
 def test_empty_state_skips_apply_calls(tmp_path):
     plugin, _ = _make_inst(tmp_path)
+    plugin.configure()
     plugin.setup()  # no state file — all categories empty
     plugin._pyinfra_run_many.assert_not_called()
 

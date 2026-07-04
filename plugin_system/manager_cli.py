@@ -83,7 +83,7 @@ def get_macros(loader) -> dict:
         }
     """
     from plugin_system.core.macros import macro_registry
-    from plugin_system.core.macro_provider_plugin import MacroProviderPlugin
+    from plugin_system.core.macro_provider_plugin import MacroProviderAspect
     from box import Box
 
     result: dict = {}
@@ -99,8 +99,10 @@ def get_macros(loader) -> dict:
         result["service_port"] = {"kind": "built-in", "entries": sp_entries}
 
     for loaded in loader._plugins.values():
-        if loaded.instance is not None and isinstance(loaded.instance, MacroProviderPlugin):
-            for ns, entries_dict in loaded.instance.macro_snapshot().items():
+        for _name, aspect in loaded.aspects:
+            if not isinstance(aspect, MacroProviderAspect):
+                continue
+            for ns, entries_dict in aspect.macro_snapshot().items():
                 result[ns] = {
                     "kind": "plugin",
                     "plugin": loaded.plugin_id,

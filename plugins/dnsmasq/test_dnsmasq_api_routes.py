@@ -75,13 +75,15 @@ def _make_plugin(tmp_path: Path, config: dict[str, Any] | None = None):
         "ignore_state_on_boot": True,
         **(config or {}),
     }
+    inst.configure()
+    inst.api = mod.DnsmasqAPI(inst)
     inst.setup()
     return inst
 
 
 def _make_client(plugin) -> TestClient:
     app = FastAPI()
-    app.include_router(plugin.router, prefix="/v1/dnsmasq")
+    app.include_router(plugin.api.router, prefix="/v1/dnsmasq")
     app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     return TestClient(app)
 

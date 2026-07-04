@@ -81,6 +81,8 @@ Ten dicts/lists are kept in memory, populated from the state file by `_load_stat
 
 ## Key methods
 
+`DnsmasqPlugin` composes a `DnsmasqAPI(ApiRouterAspect)` aspect (`api = DnsmasqAPI`, taking over what was `_register_routes()`), instantiated by the loader after `configure()` runs. State loading lives in `configure()`; `setup()` only runs `_apply_state()` (when not `ignore_state_on_boot`) and `_sync_os_boot_service()`.
+
 **`_load_state()`** — calls `self._state_file.load_desired(default={})`, merges with per-subsystem defaults (`_default_dns()`, etc.), then calls `_save_state()` if no prior state exists on disk so that `_desired` is immediately accurate.
 
 **`_apply_state()`** — called on every boot (unless `ignore_state_on_boot` is true). Reads the on-disk config files via `_read_on_disk()` and compares them to the generated desired config. If both files match exactly, logs and returns without touching the system. If either differs (or is missing), validates with `dnsmasq --test`, writes both config files via `_write_file_sudo`, then restarts dnsmasq via `_restart_dnsmasq()`. Calls `commit()` on success; logs a warning and returns on any failure (does not raise).
@@ -221,7 +223,7 @@ In tests, replace `_run_dnsmasq_test`, `_write_file_sudo`, and `_restart_dnsmasq
 
 Tests in `test_dnsmasq_api_routes.py`. Subprocess calls are mocked via `MagicMock` — no real system changes are made.
 
-**`_make_plugin(tmp_path, config=None)` / `_make_client(plugin)`** — creates a fresh isolated instance per test. All tests use this pattern via the `plugin` / `client` fixtures.
+**`_make_plugin(tmp_path, config=None)` / `_make_client(plugin)`** — creates a fresh isolated instance per test. `_make_plugin` calls `inst.configure()`, then `inst.api = mod.DnsmasqAPI(inst)`, then `inst.setup()` — mirroring what the loader does. `_make_client` mounts `plugin.api.router` (not `plugin.router`). All tests use this pattern via the `plugin` / `client` fixtures.
 
 **`_ok(returncode, stdout, stderr)`** — helper that returns a `MagicMock` with the appropriate `CompletedProcess` attributes. Pass `returncode=1` to simulate failures.
 

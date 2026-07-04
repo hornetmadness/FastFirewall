@@ -77,6 +77,8 @@ def _make_inst(tmp_path: Path, conf_content: str | None = None) -> Any:
     inst._pyinfra_run = MagicMock()
     inst._run_cmd = MagicMock(return_value=_proc(0))
     inst._reload_service = MagicMock()
+    inst.configure()
+    inst.api = mod.AptCacherNgAPI(inst)
     inst.setup()
     return inst
 
@@ -87,7 +89,7 @@ def _make_client(
 ) -> tuple[TestClient, Any]:
     inst = _make_inst(tmp_path, conf_content)
     app = FastAPI()
-    app.include_router(inst.router, prefix="/v1/apt_cacher_ng")
+    app.include_router(inst.api.router, prefix="/v1/apt_cacher_ng")
     app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     return TestClient(app, raise_server_exceptions=False), inst
 
@@ -258,7 +260,7 @@ def test_clear_proxy_host_falls_back_to_fqdn(ctx):
 def test_proxy_host_persists_across_restart(tmp_path):
     inst1 = _make_inst(tmp_path)
     app1 = FastAPI()
-    app1.include_router(inst1.router, prefix="/v1/apt_cacher_ng")
+    app1.include_router(inst1.api.router, prefix="/v1/apt_cacher_ng")
     app1.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     c1 = TestClient(app1, raise_server_exceptions=False)
     c1.put("/v1/apt_cacher_ng/proxy-url", json={"host": "10.1.2.3"})
@@ -528,7 +530,7 @@ def test_settings_persist_across_restart(tmp_path):
     inst1._run_cmd.return_value = _proc(0)
 
     app1 = FastAPI()
-    app1.include_router(inst1.router, prefix="/v1/apt_cacher_ng")
+    app1.include_router(inst1.api.router, prefix="/v1/apt_cacher_ng")
     app1.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     c1 = TestClient(app1, raise_server_exceptions=False)
     c1.patch("/v1/apt_cacher_ng/config", json={"port": 3150, "fetch_timeout": 120})
@@ -642,6 +644,8 @@ def _make_inst_boot(tmp_path: Path, enable_os_boot: bool) -> Any:
     inst._pyinfra_run = MagicMock()
     inst._run_cmd = MagicMock(return_value=_proc(0))
     inst._reload_service = MagicMock()
+    inst.configure()
+    inst.api = mod.AptCacherNgAPI(inst)
     inst.setup()
     return inst
 

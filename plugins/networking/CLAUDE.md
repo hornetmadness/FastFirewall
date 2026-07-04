@@ -90,7 +90,7 @@ Set `link.kind = "wifi"` and provide a `wifi: {ssid, psk}` body. At apply time:
 
 **`_apply_state()`** — re-applies desired state on boot by calling `_build_all_networkd_configs()`, writing files, running `networkctl reload` + per-interface `networkctl reconfigure`, then `_save_state()` + `commit()` on success.
 
-**`_import_state_from_system()`** — called at boot when the state file is empty; seeds `_interfaces` from `ip -j addr show` and `_routes` from `ip -j route show` (skipping loopback and kernel/redirect routes), then calls `save_and_commit()`.
+**`_import_state_from_system()`** — read-only OS query called from `configure()` (not `setup()`) when the state file is empty; seeds `_interfaces` from `ip -j addr show` and `_routes` from `ip -j route show` (skipping loopback and kernel/redirect routes), then calls `save_and_commit()`.
 
 **`_build_networkd_file(name, iface, routes)`** — generates an INI string for a `.network` file: `[Match]`, `[Network]` (addresses, DHCP, IgnoreCarrierLoss for WiFi), `[Link]` (MTU, ActivationPolicy), `[Route]` (one stanza per route). `"default"` destination is normalized to `0.0.0.0/0`.
 
@@ -110,7 +110,7 @@ Set `link.kind = "wifi"` and provide a `wifi: {ssid, psk}` body. At apply time:
 
 **`_sync_os_boot_service()`** — when `use_systemd_networkd=true`: disables competing managers, emits `initsys.service.start` for `systemd-networkd.service`. When false: emits `initsys.service.remove` for `fastfirewall-networking` (cleans up old custom unit).
 
-**`_resolve_interface_macro(*segments)`** — resolver for the `interface` macro namespace. Same API as before.
+`NetworkingPlugin` composes a `NetworkingAPI(ApiRouterAspect)` aspect (`api = NetworkingAPI`, taking over what was `_register_routes()`) and a `NetworkingMacros(MacroProviderAspect)` aspect (`macros = NetworkingMacros`, taking over `_register_interface_macros()` and `macro_snapshot()`) — both instantiated by the loader after `configure()` runs, so they read already-loaded state. State loading (and the first-boot `_import_state_from_system()` call) lives in `configure()`; `setup()` only runs `_apply_state()` (when needed) and `_sync_os_boot_service()`.
 
 ## `GET /config/diff`
 

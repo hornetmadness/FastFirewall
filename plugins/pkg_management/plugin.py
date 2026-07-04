@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field
 from pyinfra.operations import server as server_ops
 
 from infra import pyinfra_run_batch
-from plugin_system.core import ApiRouterPlugin, PluginBase, PluginStateFile, Service
+from plugin_system.core import ApiRouterAspect, PluginBase, PluginStateFile, Service
 from plugin_system.core.events import Event, bus
 from ._pkg_manager import (
     PackageBody,
@@ -65,10 +65,41 @@ class RepoImportBody(BaseModel):
     alias: str = Field(max_length=100)
 
 
+# ── API ────────────────────────────────────────────────────────────────────────
+
+class PkgManagementAPI(ApiRouterAspect):
+    def __init__(self, core: "PkgManagementPlugin") -> None:
+        super().__init__(core)
+        add = self.router.add_api_route
+        _admin = [require_role("admin")]
+
+        add("/status",                         core._status,           methods=["GET"],    summary="Plugin status and managed-resource counts", dependencies=_admin)
+        add("/tasks",                          core._list_bg_tasks,    methods=["GET"],    summary="List background tasks and their status", dependencies=_admin)
+
+        add("/services",                       core._list_services,    methods=["GET"],    summary="List all services with ff_managed flag", dependencies=_admin)
+        add("/services/{service}",             core._set_service,      methods=["PUT"],    summary="Start/stop/enable/disable a service", dependencies=_admin)
+        add("/services/{service}",             core._delete_service,   methods=["DELETE"], summary="Stop managing a service", dependencies=_admin)
+        add("/services/{service}/import",      core._import_service,   methods=["POST"],   summary="Import an existing system service into FF management", status_code=201, dependencies=_admin)
+
+        add("/packages",                       core._list_packages,    methods=["GET"],    summary="List managed packages", dependencies=_admin)
+        add("/packages/search",                core._search_packages,  methods=["GET"],    summary="Search available packages", dependencies=_admin)
+        add("/packages/upgrade-system",        core._upgrade_system,   methods=["POST"],   summary="Run a full unattended system upgrade and email the output", dependencies=_admin)
+        add("/packages/{name}",                core._install_package,  methods=["POST"],   summary="Install or ensure a package",           status_code=201, dependencies=_admin)
+        add("/packages/{name}",                core._update_package,   methods=["PUT"],    summary="Update a package to latest", dependencies=_admin)
+        add("/packages/{name}",                core._remove_package,   methods=["DELETE"], summary="Remove a package", dependencies=_admin)
+        add("/packages/{name}/import",         core._import_package,   methods=["POST"],   summary="Import an installed package into FF management", status_code=201, dependencies=_admin)
+
+        add("/repos",                          core._list_repos,       methods=["GET"],    summary="List all repos with ff_managed flag", dependencies=_admin)
+        add("/repos/import",                   core._import_repo,      methods=["POST"],   summary="Import an existing system repo into FF management", status_code=201, dependencies=_admin)
+        add("/repos/{name}",                   core._add_repo,         methods=["POST"],   summary="Add or update a package repository",    status_code=201, dependencies=_admin)
+        add("/repos/{name}",                   core._remove_repo,      methods=["DELETE"], summary="Remove a package repository", dependencies=_admin)
+
+
 # ── Plugin ─────────────────────────────────────────────────────────────────────
 
-class PkgManagementPlugin(PluginBase, ApiRouterPlugin):
+class PkgManagementPlugin(PluginBase):
     services = [Service.PKG_MANAGEMENT]
+    api = PkgManagementAPI
 
     _EMPTY_STATE: dict[str, Any] = {
         "services": {},
@@ -78,7 +109,7 @@ class PkgManagementPlugin(PluginBase, ApiRouterPlugin):
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
-    def setup(self) -> None:
+    def configure(self) -> None:
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "state_file", "pkg_management_state.json", self.logger,
             mutation_model="immediate", data_dir=self.data_dir, plugin_version=self.meta["version"],
@@ -93,8 +124,10 @@ class PkgManagementPlugin(PluginBase, ApiRouterPlugin):
             self._state: dict[str, Any] = {k: {} for k in self._EMPTY_STATE}
         else:
             self._state = self._load_state()
+
+    def setup(self) -> None:
+        if not self.config.get("ignore_state_on_boot", False):
             self._apply_state()
-        self._register_routes()
         self._handler_add_package = self._on_add_package
         self._handler_add_repo    = self._on_add_repo
         self._handler_add_service = self._on_add_service
@@ -246,33 +279,6 @@ class PkgManagementPlugin(PluginBase, ApiRouterPlugin):
         if os.path.isdir("/etc/init.d"):
             return "sysvinit"
         return "unknown"
-
-    # ── route registration ─────────────────────────────────────────────────────
-
-    def _register_routes(self) -> None:
-        add = self.router.add_api_route
-        _admin = [require_role("admin")]
-
-        add("/status",                         self._status,           methods=["GET"],    summary="Plugin status and managed-resource counts", dependencies=_admin)
-        add("/tasks",                          self._list_bg_tasks,    methods=["GET"],    summary="List background tasks and their status", dependencies=_admin)
-
-        add("/services",                       self._list_services,    methods=["GET"],    summary="List all services with ff_managed flag", dependencies=_admin)
-        add("/services/{service}",             self._set_service,      methods=["PUT"],    summary="Start/stop/enable/disable a service", dependencies=_admin)
-        add("/services/{service}",             self._delete_service,   methods=["DELETE"], summary="Stop managing a service", dependencies=_admin)
-        add("/services/{service}/import",      self._import_service,   methods=["POST"],   summary="Import an existing system service into FF management", status_code=201, dependencies=_admin)
-
-        add("/packages",                       self._list_packages,    methods=["GET"],    summary="List managed packages", dependencies=_admin)
-        add("/packages/search",                self._search_packages,  methods=["GET"],    summary="Search available packages", dependencies=_admin)
-        add("/packages/upgrade-system",        self._upgrade_system,   methods=["POST"],   summary="Run a full unattended system upgrade and email the output", dependencies=_admin)
-        add("/packages/{name}",                self._install_package,  methods=["POST"],   summary="Install or ensure a package",           status_code=201, dependencies=_admin)
-        add("/packages/{name}",                self._update_package,   methods=["PUT"],    summary="Update a package to latest", dependencies=_admin)
-        add("/packages/{name}",                self._remove_package,   methods=["DELETE"], summary="Remove a package", dependencies=_admin)
-        add("/packages/{name}/import",         self._import_package,   methods=["POST"],   summary="Import an installed package into FF management", status_code=201, dependencies=_admin)
-
-        add("/repos",                          self._list_repos,       methods=["GET"],    summary="List all repos with ff_managed flag", dependencies=_admin)
-        add("/repos/import",                   self._import_repo,      methods=["POST"],   summary="Import an existing system repo into FF management", status_code=201, dependencies=_admin)
-        add("/repos/{name}",                   self._add_repo,         methods=["POST"],   summary="Add or update a package repository",    status_code=201, dependencies=_admin)
-        add("/repos/{name}",                   self._remove_repo,      methods=["DELETE"], summary="Remove a package repository", dependencies=_admin)
 
     # ── status ─────────────────────────────────────────────────────────────────
 
