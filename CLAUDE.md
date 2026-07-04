@@ -136,7 +136,7 @@ uv run pytest plugins/firewall/test_firewall_api_routes.py
 uv run --with pyright pyright
 
 # Install dependencies (uses uv.lock)
-# --all-packages ensures plugin transitive deps (e.g. ifstate) are included
+# --all-packages ensures plugin transitive deps (e.g. pyroute2) are included
 uv sync --all-packages
 
 # Install with dev extras

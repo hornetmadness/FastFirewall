@@ -35,7 +35,7 @@ Built on FastAPI and driven entirely by plugins. Every feature is a plugin; the 
 
 - Python 3.12+
 - `pipx` and `uv` (see install steps below)
-- Root or sudo access (plugins call `nftables`, `systemctl`, `ifstate`, etc.)
+- Root or sudo access (plugins call `nftables`, `systemctl`, `networkctl`, etc.)
 - Linux (Debian/Ubuntu tested; most plugins work on any systemd-based distro)
 
 ## Installation
@@ -278,13 +278,14 @@ Supported plugins and their registered services:
 | Plugin | Service name | What it applies |
 |---|---|---|
 | `firewall` | `fastfirewall-nft` | Compiled `.nft` ruleset via `nft -f` |
-| `networking` | `fastfirewall-networking` | Interface config via `ifstate apply` — see warning below |
 | `dnsmasq` | `dnsmasq` | Ensures dnsmasq is enabled for boot |
 | `apt_cacher_ng` | `apt-cacher-ng` | Ensures apt-cacher-ng is enabled for boot |
 
 The registration or removal happens automatically each time FastFirewall starts — setting the flag and restarting FastFirewall is all that's needed.
 
-> **Warning — non-reversible change for the networking plugin:** When `enable_os_boot: true` is set, the networking plugin stops and disables every service listed in `disable_os_managers` in `plugins/networking/plugin.yaml` (by default: `NetworkManager`, `networking`, `systemd-networkd`). This lets ifstate fully own interface bring-up at boot. **FastFirewall will not re-enable those services if you later set `enable_os_boot` back to `false`.** To restore a previous network manager run `sudo systemctl enable --now <service>` manually. Review `disable_os_managers` and remove any entries that should remain running before enabling this flag.
+The networking plugin uses a different mechanism: setting `use_systemd_networkd: true` in `plugins/networking/plugin.yaml` (instead of `enable_os_boot`) — see warning below.
+
+> **Warning — non-reversible change for the networking plugin:** When `use_systemd_networkd: true` is set, the networking plugin stops and disables every service listed in `disable_os_managers` in `plugins/networking/plugin.yaml` (by default: `NetworkManager`, `networking`) and starts `systemd-networkd.service`. This lets systemd-networkd fully own interface bring-up at boot. **FastFirewall will not re-enable those services if you later set `use_systemd_networkd` back to `false`.** To restore a previous network manager run `sudo systemctl enable --now <service>` manually. Review `disable_os_managers` and remove any entries that should remain running before enabling this flag.
 
 ### API error responses
 
@@ -534,7 +535,7 @@ curl -su admin:admin -X POST http://localhost:8000/v1/firewall/apply
 **Routes:** `/v1/networking/`  
 **Depends on:** host plugin
 
-Manages network interfaces and static routes via [ifstate](https://github.com/ipinfra/ifstate). Desired state is stored in a JSON file; nothing is applied to the kernel until `POST /apply`. Sysctl parameters are managed by the host plugin (`PUT /v1/host/sysctl/{key}`).
+Manages network interfaces and static routes declaratively via **systemd-networkd**. Desired state is stored in a JSON file; nothing is applied to the kernel until `POST /apply`, which writes INI-format `.network`/`.netdev` files to `/etc/systemd/network/` and reloads with `networkctl`. Sysctl parameters are managed by the host plugin (`PUT /v1/host/sysctl/{key}`).
 
 **Deferred apply model:** mutations (PUT/POST/DELETE) only update the state file. `GET /status` will show `pending_changes: true` until you apply.
 
@@ -548,9 +549,9 @@ Manages network interfaces and static routes via [ifstate](https://github.com/ip
 | `/config/routes/{id}` | DELETE | Remove a route |
 | `/config/diff` | GET | Diff between last applied and desired state |
 | `/config` | GET | Full desired state (YAML or JSON) |
-| `/interfaces` | GET | Live interface state from `ifstatecli show` |
-| `/check` | POST | Dry-run via `ifstatecli check` |
-| `/apply` | POST | Apply via `ifstatecli apply` |
+| `/interfaces` | GET | Live interface state from `ip -j addr show` |
+| `/check` | POST | Dry-run preview of generated `.network`/`.netdev` files |
+| `/apply` | POST | Write `.network`/`.netdev` files and apply via `networkctl reload`/`reconfigure` |
 | `/discard` | POST | Revert pending changes to last applied state |
 | `/ping` | POST | Run ping from the gateway |
 | `/mtr` | POST | Run mtr and return hop table |

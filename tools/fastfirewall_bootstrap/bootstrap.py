@@ -555,7 +555,7 @@ def run_gateway(client: FFClient, cfg: dict[str, Any]) -> None:
     # 6. Check then apply networking
     _check_before_apply(client, "/v1/networking/check", "success", "networking")
     _print_step("Applying networking configuration")
-    result = client.post("/v1/networking/apply", description="Apply networking config via ifstatecli")
+    result = client.post("/v1/networking/apply", description="Apply networking config via networkctl")
     if result.get("success"):
         _print_ok("Networking applied")
     else:

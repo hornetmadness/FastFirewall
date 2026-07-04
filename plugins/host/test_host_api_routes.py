@@ -1020,7 +1020,7 @@ def test_service_add_event_forwards_ordering_fields(tmp_path):
          patch.object(mod.HostPlugin, "_get_service_status", _mock_status(False, None, exists=False)):
         event = Event("initsys.service.add", payload={
             "service_name": "ff-networking",
-            "command": "sudo python -m ifstate.ifstate apply",
+            "command": "sudo networkctl reload",
             "service_type": "oneshot",
             "after": "network-pre.target",
             "before": "network-online.target",
