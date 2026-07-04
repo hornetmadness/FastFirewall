@@ -190,3 +190,41 @@ def test_uninstall_service_exits_nonzero_on_failure():
         with pytest.raises(SystemExit) as exc_info:
             manager_cli.uninstall_service()
     assert exc_info.value.code == 1
+
+
+# ── make_cfg ───────────────────────────────────────────────────────────────────
+
+def test_make_cfg_creates_config_with_generated_secret(tmp_path):
+    dest = tmp_path / "cfg"
+    with patch("plugin_system.manager_cli.pyinfra_run_batch", return_value=[(True, None)]):
+        manager_cli.make_cfg(dest, cfg=None)
+
+    text = (dest / "app_config.yaml").read_text()
+    assert '"CHANGE-ME"' not in text
+    assert '"111"' not in text
+
+
+def test_make_cfg_repairs_existing_placeholder_secret(tmp_path):
+    dest = tmp_path / "cfg"
+    dest.mkdir()
+    (dest / "app_config.yaml").write_text('auth:\n  secret_key: "111"\n')
+
+    with patch("plugin_system.manager_cli.pyinfra_run_batch", return_value=[(True, None)]):
+        manager_cli.make_cfg(dest, cfg=None)
+
+    text = (dest / "app_config.yaml").read_text()
+    assert '"111"' not in text
+    assert len(text.splitlines()[1].split('"')[1]) >= 32
+
+
+def test_make_cfg_leaves_existing_strong_secret_untouched(tmp_path):
+    dest = tmp_path / "cfg"
+    dest.mkdir()
+    strong_key = "a" * 64
+    (dest / "app_config.yaml").write_text(f'auth:\n  secret_key: "{strong_key}"\n')
+
+    with patch("plugin_system.manager_cli.pyinfra_run_batch", return_value=[(True, None)]):
+        manager_cli.make_cfg(dest, cfg=None)
+
+    text = (dest / "app_config.yaml").read_text()
+    assert f'"{strong_key}"' in text

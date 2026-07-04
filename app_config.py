@@ -42,11 +42,21 @@ def _find_config() -> Path:
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     format: str = "%(levelname)s %(name)s: %(message)s"
+    # Per-logger level overrides (e.g. to quiet noisy third-party libraries
+    # like pyroute2 without lowering the app's own log level).
+    overrides: dict[str, str] = Field(default_factory=lambda: {"pyroute2": "WARNING"})
 
     @field_validator("level", mode="before")
     @classmethod
     def _uppercase_level(cls, v: Any) -> str:
         return str(v).upper()
+
+    @field_validator("overrides", mode="before")
+    @classmethod
+    def _uppercase_override_levels(cls, v: Any) -> Any:
+        if not isinstance(v, dict):
+            return v
+        return {k: str(val).upper() for k, val in v.items()}
 
 
 class PluginsConfig(BaseModel):
@@ -151,6 +161,8 @@ class AppConfig(BaseModel):
         }
 
         logging.basicConfig(level=cfg.logging.level, format=cfg.logging.format)
+        for logger_name, level in cfg.logging.overrides.items():
+            logging.getLogger(logger_name).setLevel(level)
         install_filter()
         return cfg
 

@@ -61,6 +61,25 @@ def test_load_logging_format(tmp_path):
     assert cfg.logging.format == fmt
 
 
+def test_load_logging_overrides_default_quiets_pyroute2(tmp_path):
+    p = write_config(tmp_path, "")
+    cfg = AppConfig.load(p)
+    assert cfg.logging.overrides == {"pyroute2": "WARNING"}
+
+
+def test_load_logging_overrides_custom(tmp_path):
+    p = write_config(tmp_path, "logging:\n  overrides:\n    pyroute2: error\n    foo.bar: debug\n")
+    cfg = AppConfig.load(p)
+    assert cfg.logging.overrides == {"pyroute2": "ERROR", "foo.bar": "DEBUG"}
+
+
+def test_load_applies_logging_overrides_to_actual_loggers(tmp_path):
+    import logging
+    p = write_config(tmp_path, "logging:\n  overrides:\n    pyroute2: ERROR\n")
+    AppConfig.load(p)
+    assert logging.getLogger("pyroute2").level == logging.ERROR
+
+
 # ---------------------------------------------------------------------------
 # Plugins section
 # ---------------------------------------------------------------------------
