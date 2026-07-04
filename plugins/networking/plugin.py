@@ -31,7 +31,7 @@ from fastapi import Depends, HTTPException
 from ff_auth import require_role
 
 from infra import pyinfra_run_batch
-from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, MacroProviderPlugin, Service
+from plugin_system.core import PluginBase, PluginStateFile, ApiRouterAspect, MacroProviderAspect, Service
 from plugin_system.core.events import Event, bus
 
 from .libs.models import (
@@ -46,56 +46,72 @@ from .libs.bridges import BridgesMixin
 from .libs.wireguard import WireguardMixin
 
 
-class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin,
-                       LiveMixin, BuilderMixin, BondsMixin, BridgesMixin, WireguardMixin):
-    services = [Service.NETWORKING]
+class NetworkingAPI(ApiRouterAspect):
+    def __init__(self, core: "NetworkingPlugin") -> None:
+        super().__init__(core)
+        add = self.router.add_api_route
+        _admin = [require_role("admin")]
 
-    # ── lifecycle ──────────────────────────────────────────────────────
+        add("/status",                   core._status,                 methods=["GET"],    summary="Plugin status and counts", dependencies=_admin)
 
-    def setup(self) -> None:
-        self._state_file = PluginStateFile.from_config(
-            self.plugin_dir, self.config, "state_file", "networking_state.json", self.logger,
-            mutation_model="deferred", data_dir=self.data_dir, plugin_version=self.meta["version"],
-        )
-        self._interfaces: dict[str, dict[str, Any]] = {}
-        self._routes: dict[str, dict[str, Any]] = {}
-        self._aliases: dict[str, str] = {}
-        if not self.config.get("ignore_state_on_boot", False):
-            self._load_state()
-            if not any([self._interfaces, self._routes]):
-                self._import_state_from_system()
-            else:
-                self._apply_state()
-        self.logger.info(
-            "Networking plugin loaded: %d interface(s), %d route(s), %d alias(es)",
-            len(self._interfaces), len(self._routes), len(self._aliases),
-        )
-        if self._aliases:
-            bus.emit(Event(
-                name="networking.aliases_updated",
-                payload={"aliases": dict(self._aliases)},
-            ))
-        self._register_interface_macros()
-        self._register_routes()
-        self._sync_os_boot_service()
+        add("/interfaces",               core._show_interfaces,        methods=["GET"],    summary="Current interface state (ip -j addr show)", dependencies=_admin)
+        add("/interfaces/{name}",        core._show_interface,         methods=["GET"],    summary="Single interface running state", dependencies=_admin)
+        add("/identify",                 core._identify,               methods=["GET"],    summary="Identify physical interfaces via sysfs", dependencies=_admin)
 
-    def teardown(self) -> None:
-        self._save_state()
-        self.unregister_macro("$interface")
-        self.logger.info("Networking plugin shut down — state saved")
+        add("/config/interfaces",        core._list_config_interfaces, methods=["GET"],    summary="List configured interfaces", dependencies=_admin)
+        add("/config/interfaces/import", core._import_interfaces,      methods=["POST"],   summary="Import existing interfaces from running state", dependencies=_admin)
+        add("/config/interfaces/{name}", core._get_config_interface,   methods=["GET"],    summary="Get one interface config", dependencies=_admin)
+        add("/config/interfaces/{name}", core._set_interface,          methods=["PUT"],    summary="Configure an interface", dependencies=_admin)
+        add("/config/interfaces/{name}", core._delete_interface,       methods=["DELETE"], summary="Remove interface from config", dependencies=_admin)
 
-    # ── state persistence ──────────────────────────────────────────────
+        add("/config/interfaces/{name}/peers", core._list_wg_peers,    methods=["GET"],    summary="List WireGuard peers", dependencies=_admin)
+        add("/config/interfaces/{name}/peers", core._add_wg_peer,      methods=["POST"],   summary="Add WireGuard peer", status_code=201, dependencies=_admin)
+        add("/config/interfaces/{name}/peers/{peer_id}", core._get_wg_peer,    methods=["GET"],    summary="Get WireGuard peer", dependencies=_admin)
+        add("/config/interfaces/{name}/peers/{peer_id}", core._update_wg_peer, methods=["PUT"],    summary="Update WireGuard peer", dependencies=_admin)
+        add("/config/interfaces/{name}/peers/{peer_id}", core._delete_wg_peer, methods=["DELETE"], summary="Delete WireGuard peer", dependencies=_admin)
 
-    def _load_state(self) -> None:
-        desired = self._state_file.load_desired(default={})
-        self._interfaces = desired.get("interfaces", {})
-        self._routes = desired.get("routes", {})
-        self._aliases = desired.get("aliases", {})
-        self._ensure_default_aliases()
+        add("/config/routes",            core._list_routes,            methods=["GET"],    summary="List configured routes", dependencies=_admin)
+        add("/config/routes/import",     core._import_routes,          methods=["POST"],   summary="Import existing routes from running state", dependencies=_admin)
+        add("/config/routes",            core._add_route,              methods=["POST"],   summary="Add a route", status_code=201, dependencies=_admin)
+        add("/config/routes/{route_id}", core._delete_route,           methods=["DELETE"], summary="Remove a route", dependencies=_admin)
 
-    def _register_interface_macros(self) -> None:
-        for alias, device in self._aliases.items():
-            addresses = self._interfaces.get(device, {}).get("addresses") or (
+        add("/config/bonds",             core._list_bonds,             methods=["GET"],    summary="List configured bonds", dependencies=_admin)
+        add("/config/bonds",             core._create_bond,            methods=["POST"],   summary="Create a bond interface", status_code=201, dependencies=_admin)
+        add("/config/bonds/{name}",      core._get_bond,               methods=["GET"],    summary="Get bond config", dependencies=_admin)
+        add("/config/bonds/{name}",      core._update_bond,            methods=["PUT"],    summary="Update bond config", dependencies=_admin)
+        add("/config/bonds/{name}",      core._delete_bond,            methods=["DELETE"], summary="Delete bond interface", dependencies=_admin)
+        add("/bonds/{name}/status",      core._get_bond_status,        methods=["GET"],    summary="Live bond status from /proc", dependencies=_admin)
+        add("/config/bonds/{name}/members", core._add_bond_member,     methods=["POST"],   summary="Add bond member", status_code=201, dependencies=_admin)
+        add("/config/bonds/{name}/members/{member}", core._delete_bond_member, methods=["DELETE"], summary="Remove bond member", dependencies=_admin)
+
+        add("/config/bridges",           core._list_bridges,           methods=["GET"],    summary="List configured bridges", dependencies=_admin)
+        add("/config/bridges",           core._create_bridge,          methods=["POST"],   summary="Create a bridge", status_code=201, dependencies=_admin)
+        add("/config/bridges/{name}",    core._get_bridge,             methods=["GET"],    summary="Get bridge config", dependencies=_admin)
+        add("/config/bridges/{name}",    core._update_bridge,          methods=["PUT"],    summary="Update bridge config", dependencies=_admin)
+        add("/config/bridges/{name}",    core._delete_bridge,          methods=["DELETE"], summary="Delete bridge interface", dependencies=_admin)
+        add("/config/bridges/{name}/members", core._add_bridge_member,  methods=["POST"],   summary="Add bridge member", status_code=201, dependencies=_admin)
+        add("/config/bridges/{name}/members/{member}", core._delete_bridge_member, methods=["DELETE"], summary="Remove bridge member", dependencies=_admin)
+
+        add("/config",                   core._get_config,             methods=["GET"],    summary="All systemd-networkd file contents", dependencies=_admin)
+        add("/config/diff",              core._diff,                   methods=["GET"],    summary="Diff between current (applied) and desired state", dependencies=_admin)
+        add("/apply",                    core._apply,                  methods=["POST"],   summary="Apply config via systemd-networkd", dependencies=_admin)
+        add("/check",                    core._check,                  methods=["POST"],   summary="Preview networkd files (dry-run)", dependencies=_admin)
+        add("/discard",                  core._discard,                methods=["POST"],   summary="Discard pending changes and restore last applied state", dependencies=_admin)
+
+        add("/config/aliases",           core._list_aliases,           methods=["GET"],    summary="List interface aliases", dependencies=_admin)
+        add("/config/aliases/{name}",    core._set_alias,              methods=["PUT"],    summary="Set an interface alias", dependencies=_admin)
+        add("/config/aliases/{name}",    core._delete_alias,           methods=["DELETE"], summary="Delete an interface alias", dependencies=_admin)
+
+        add("/ping",                     core._ping,                   methods=["POST"],   summary="Ping a host", dependencies=_admin)
+        add("/mtr",                      core._mtr,                    methods=["POST"],   summary="Run mtr traceroute to a host", dependencies=_admin)
+
+
+class NetworkingMacros(MacroProviderAspect):
+    def __init__(self, core: "NetworkingPlugin") -> None:
+        super().__init__(core)
+        self.core: "NetworkingPlugin" = core
+        for alias, device in core._aliases.items():
+            addresses = core._interfaces.get(device, {}).get("addresses") or (
                 _LO_ADDRESSES if device == "lo" else []
             )
             self.register_macro(f"$interface.{alias}.name", device)
@@ -110,8 +126,8 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin,
 
     def macro_snapshot(self) -> dict[str, dict[str, Any]]:
         entries: dict[str, Any] = {}
-        for alias, device in self._aliases.items():
-            addresses = self._interfaces.get(device, {}).get("addresses") or (
+        for alias, device in self.core._aliases.items():
+            addresses = self.core._interfaces.get(device, {}).get("addresses") or (
                 _LO_ADDRESSES if device == "lo" else []
             )
             entries[f"{alias}.name"] = device
@@ -122,6 +138,57 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin,
             if nets:
                 entries[f"{alias}.net_addr"] = nets
         return {"interface": entries}
+
+
+class NetworkingPlugin(PluginBase, LiveMixin, BuilderMixin, BondsMixin, BridgesMixin, WireguardMixin):
+    services = [Service.NETWORKING]
+    api = NetworkingAPI
+    macros = NetworkingMacros
+
+    # ── lifecycle ──────────────────────────────────────────────────────
+
+    def configure(self) -> None:
+        self._state_file = PluginStateFile.from_config(
+            self.plugin_dir, self.config, "state_file", "networking_state.json", self.logger,
+            mutation_model="deferred", data_dir=self.data_dir, plugin_version=self.meta["version"],
+        )
+        self._interfaces: dict[str, dict[str, Any]] = {}
+        self._routes: dict[str, dict[str, Any]] = {}
+        self._aliases: dict[str, str] = {}
+        self._needs_apply = False
+        if not self.config.get("ignore_state_on_boot", False):
+            self._load_state()
+            if not any([self._interfaces, self._routes]):
+                self._import_state_from_system()
+            else:
+                self._needs_apply = True
+
+    def setup(self) -> None:
+        if self._needs_apply:
+            self._apply_state()
+        self.logger.info(
+            "Networking plugin loaded: %d interface(s), %d route(s), %d alias(es)",
+            len(self._interfaces), len(self._routes), len(self._aliases),
+        )
+        if self._aliases:
+            bus.emit(Event(
+                name="networking.aliases_updated",
+                payload={"aliases": dict(self._aliases)},
+            ))
+        self._sync_os_boot_service()
+
+    def teardown(self) -> None:
+        self._save_state()
+        self.logger.info("Networking plugin shut down — state saved")
+
+    # ── state persistence ──────────────────────────────────────────────
+
+    def _load_state(self) -> None:
+        desired = self._state_file.load_desired(default={})
+        self._interfaces = desired.get("interfaces", {})
+        self._routes = desired.get("routes", {})
+        self._aliases = desired.get("aliases", {})
+        self._ensure_default_aliases()
 
     def _ensure_default_aliases(self) -> None:
         for name in self._interfaces:
@@ -245,65 +312,6 @@ class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin,
                 "Boot-time import: %d interface(s), %d route(s), %d alias(es)",
                 len(self._interfaces), len(self._routes), len(self._aliases),
             )
-
-    # ── route registration ─────────────────────────────────────────────
-
-    def _register_routes(self) -> None:
-        add = self.router.add_api_route
-        _admin = [require_role("admin")]
-
-        add("/status",                   self._status,                 methods=["GET"],    summary="Plugin status and counts", dependencies=_admin)
-
-        add("/interfaces",               self._show_interfaces,        methods=["GET"],    summary="Current interface state (ip -j addr show)", dependencies=_admin)
-        add("/interfaces/{name}",        self._show_interface,         methods=["GET"],    summary="Single interface running state", dependencies=_admin)
-        add("/identify",                 self._identify,               methods=["GET"],    summary="Identify physical interfaces via sysfs", dependencies=_admin)
-
-        add("/config/interfaces",        self._list_config_interfaces, methods=["GET"],    summary="List configured interfaces", dependencies=_admin)
-        add("/config/interfaces/import", self._import_interfaces,      methods=["POST"],   summary="Import existing interfaces from running state", dependencies=_admin)
-        add("/config/interfaces/{name}", self._get_config_interface,   methods=["GET"],    summary="Get one interface config", dependencies=_admin)
-        add("/config/interfaces/{name}", self._set_interface,          methods=["PUT"],    summary="Configure an interface", dependencies=_admin)
-        add("/config/interfaces/{name}", self._delete_interface,       methods=["DELETE"], summary="Remove interface from config", dependencies=_admin)
-
-        add("/config/interfaces/{name}/peers", self._list_wg_peers,    methods=["GET"],    summary="List WireGuard peers", dependencies=_admin)
-        add("/config/interfaces/{name}/peers", self._add_wg_peer,      methods=["POST"],   summary="Add WireGuard peer", status_code=201, dependencies=_admin)
-        add("/config/interfaces/{name}/peers/{peer_id}", self._get_wg_peer,    methods=["GET"],    summary="Get WireGuard peer", dependencies=_admin)
-        add("/config/interfaces/{name}/peers/{peer_id}", self._update_wg_peer, methods=["PUT"],    summary="Update WireGuard peer", dependencies=_admin)
-        add("/config/interfaces/{name}/peers/{peer_id}", self._delete_wg_peer, methods=["DELETE"], summary="Delete WireGuard peer", dependencies=_admin)
-
-        add("/config/routes",            self._list_routes,            methods=["GET"],    summary="List configured routes", dependencies=_admin)
-        add("/config/routes/import",     self._import_routes,          methods=["POST"],   summary="Import existing routes from running state", dependencies=_admin)
-        add("/config/routes",            self._add_route,              methods=["POST"],   summary="Add a route", status_code=201, dependencies=_admin)
-        add("/config/routes/{route_id}", self._delete_route,           methods=["DELETE"], summary="Remove a route", dependencies=_admin)
-
-        add("/config/bonds",             self._list_bonds,             methods=["GET"],    summary="List configured bonds", dependencies=_admin)
-        add("/config/bonds",             self._create_bond,            methods=["POST"],   summary="Create a bond interface", status_code=201, dependencies=_admin)
-        add("/config/bonds/{name}",      self._get_bond,               methods=["GET"],    summary="Get bond config", dependencies=_admin)
-        add("/config/bonds/{name}",      self._update_bond,            methods=["PUT"],    summary="Update bond config", dependencies=_admin)
-        add("/config/bonds/{name}",      self._delete_bond,            methods=["DELETE"], summary="Delete bond interface", dependencies=_admin)
-        add("/bonds/{name}/status",      self._get_bond_status,        methods=["GET"],    summary="Live bond status from /proc", dependencies=_admin)
-        add("/config/bonds/{name}/members", self._add_bond_member,     methods=["POST"],   summary="Add bond member", status_code=201, dependencies=_admin)
-        add("/config/bonds/{name}/members/{member}", self._delete_bond_member, methods=["DELETE"], summary="Remove bond member", dependencies=_admin)
-
-        add("/config/bridges",           self._list_bridges,           methods=["GET"],    summary="List configured bridges", dependencies=_admin)
-        add("/config/bridges",           self._create_bridge,          methods=["POST"],   summary="Create a bridge", status_code=201, dependencies=_admin)
-        add("/config/bridges/{name}",    self._get_bridge,             methods=["GET"],    summary="Get bridge config", dependencies=_admin)
-        add("/config/bridges/{name}",    self._update_bridge,          methods=["PUT"],    summary="Update bridge config", dependencies=_admin)
-        add("/config/bridges/{name}",    self._delete_bridge,          methods=["DELETE"], summary="Delete bridge interface", dependencies=_admin)
-        add("/config/bridges/{name}/members", self._add_bridge_member,  methods=["POST"],   summary="Add bridge member", status_code=201, dependencies=_admin)
-        add("/config/bridges/{name}/members/{member}", self._delete_bridge_member, methods=["DELETE"], summary="Remove bridge member", dependencies=_admin)
-
-        add("/config",                   self._get_config,             methods=["GET"],    summary="All systemd-networkd file contents", dependencies=_admin)
-        add("/config/diff",              self._diff,                   methods=["GET"],    summary="Diff between current (applied) and desired state", dependencies=_admin)
-        add("/apply",                    self._apply,                  methods=["POST"],   summary="Apply config via systemd-networkd", dependencies=_admin)
-        add("/check",                    self._check,                  methods=["POST"],   summary="Preview networkd files (dry-run)", dependencies=_admin)
-        add("/discard",                  self._discard,                methods=["POST"],   summary="Discard pending changes and restore last applied state", dependencies=_admin)
-
-        add("/config/aliases",           self._list_aliases,           methods=["GET"],    summary="List interface aliases", dependencies=_admin)
-        add("/config/aliases/{name}",    self._set_alias,              methods=["PUT"],    summary="Set an interface alias", dependencies=_admin)
-        add("/config/aliases/{name}",    self._delete_alias,           methods=["DELETE"], summary="Delete an interface alias", dependencies=_admin)
-
-        add("/ping",                     self._ping,                   methods=["POST"],   summary="Ping a host", dependencies=_admin)
-        add("/mtr",                      self._mtr,                    methods=["POST"],   summary="Run mtr traceroute to a host", dependencies=_admin)
 
     # ── status ─────────────────────────────────────────────────────────
 

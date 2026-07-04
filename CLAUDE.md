@@ -169,10 +169,10 @@ This is a **FastAPI application driven entirely by plugins**. The app itself (`f
 1. `AppConfig.load()` reads `app_config.yaml` into typed dataclasses. `configure_state()` is called immediately after to apply backup settings before any plugin runs.
 2. `manager_cli.run(loader, plugins_dir)` parses CLI args; exits early for management commands, otherwise returns an optional plugin allow-list.
 3. `PluginLoader.load_directory()` scans the configured `plugins/` directory and derives load order via topological sort of `plugin_requirements` (dependencies before dependents; alphabetical tiebreaker). Pass `only=[...]` to restrict which plugins are loaded; transitive dependencies are included automatically. If a plugin fails to load, all plugins that depend on it (directly or transitively) are skipped rather than erroring out.
-4. Before loading any plugin, `load_directory` runs a batch pre-install phase: (a) registers any `repos:` declared in `plugin.yaml` files (apt key + source list entry via `pyinfra_run_batch`), (b) installs all `os_requirements` across all active plugins in one `apt-get install` call, (c) runs `uv sync --no-dev --frozen` once to install all Python dependencies. Only then does the per-plugin loop begin. For each plugin directory with a `plugin.yaml` + `plugin.py`: the loader imports the module, instantiates any `PluginBase` subclass, wires up event handlers, calls `setup()`, then mounts FastAPI routes if the plugin is an `ApiRouterPlugin` and registers macro namespaces if the plugin is a `MacroProviderPlugin`.
-5. After all plugins are loaded, the loader populates `macro_registry` with the aggregated `service_port` data (ports with `-1`-only entries are omitted). `load_directory()` then returns — it does **not** emit `plugins.all_loaded` itself.
-6. `fastfirewall_app.py` performs any post-load setup (e.g. `macro_registry.register_service_port("fastfirewall-api", ...)`) and then calls `loader.finished()`, which emits `plugins.all_loaded` on the bus. This ordering guarantees that all macro namespaces are fully populated when handlers fire.
-7. A `plugin.loaded` event is emitted on the bus after each individual plugin loads.
+4. Before loading any plugin, `load_directory` runs a batch pre-install phase: (a) registers any `repos:` declared in `plugin.yaml` files (apt key + source list entry via `pyinfra_run_batch`), (b) installs all `os_requirements` across all active plugins in one `apt-get install` call, (c) runs `uv sync --no-dev --frozen` once to install all Python dependencies. Only then does the per-plugin loop begin. For each plugin directory with a `plugin.yaml` + `plugin.py`: the loader imports the module, instantiates any `PluginBase` subclass, wires up event handlers, calls `configure()` (load state and config-derived attributes), instantiates every declared aspect (`api = FooAPI`, `macros = FooMacros`, …) — which mounts FastAPI routes for any `ApiRouterAspect` and registers macro keys for any `MacroProviderAspect` — and defers `setup()` (the boot-time "apply state to the OS" step) rather than calling it immediately.
+5. After all plugins are loaded, the loader populates `macro_registry` with the aggregated `service_port` data (ports with `-1`-only entries are omitted). `load_directory()` then returns — it does **not** run deferred `setup()` calls or emit `plugins.all_loaded` itself.
+6. `fastfirewall_app.py` performs any post-load setup (e.g. `macro_registry.register_service_port("fastfirewall-api", ...)`) and then calls `loader.finished()`, which runs every deferred plugin's `setup()` (in load order), then emits `plugins.all_loaded` on the bus. This ordering guarantees that every plugin's routes and macros are already registered — not just macro namespaces — when any plugin's `setup()` runs, so a plugin's boot-time apply step can safely depend on another plugin's macros regardless of load order. Plugins loaded after this initial boot barrier (e.g. via `reload_plugin`) get `setup()` called immediately instead, since there's no barrier left to wait for.
+7. A `plugin.loaded` event is emitted on the bus after each individual plugin loads (configure + aspects — not deferred setup()).
 
 ### Plugin anatomy
 
@@ -204,7 +204,8 @@ Every plugin is a directory under `plugins/` with two required files:
 from .libs.blocklist import BlocklistMixin
 from .libs.dhcp import DhcpMixin
 
-class DnsmasqPlugin(PluginBase, ApiRouterPlugin, DhcpMixin, BlocklistMixin):
+class DnsmasqPlugin(PluginBase, DhcpMixin, BlocklistMixin):
+    api = DnsmasqAPI   # ApiRouterAspect subclass — see "Plugin base classes"
     ...
 ```
 
@@ -213,59 +214,54 @@ Each `libs/<name>/` directory needs an `__init__.py`. The mixin classes inherit 
 ### Plugin base classes
 
 `PluginBase` (`plugin_system/core/plugin_base.py`) — inherit to get lifecycle hooks:
-- `setup()` — called once after loading; use it to read config, register routes, open resources
+- `configure()` — called once after the loader injects `plugin_id`/`meta`/`config`/`plugin_dir`/`logger`/`data_dir`, but before this plugin's aspects are instantiated and before `setup()`. Load state and any config-derived attributes here — aspects and `setup()` may depend on them.
+- `setup()` — called once **every** plugin has been configured and had its aspects instantiated (see `PluginLoader.finished()` in the Boot sequence above), so it's safe to assume every other plugin's routes/macros already exist. Use it for the boot-time "apply state to the OS" step (pyinfra pushes, service restarts, etc.) — not for registering routes or macros.
 - `teardown()` — called on unload; persist state, close connections
-- Instance attributes set by the loader before `setup()`: `self.config`, `self.meta`, `self.plugin_id`, `self.plugin_dir`, `self.logger`
+- Instance attributes set by the loader before `configure()`: `self.config`, `self.meta`, `self.plugin_id`, `self.plugin_dir`, `self.logger`, `self.data_dir`
 
-`ApiRouterPlugin` (`plugin_system/core/api_router_plugin.py`) — mixin for plugins that contribute API routes. Must also inherit `PluginBase`:
+Composition is via **aspects** — small `PluginAspect` (`plugin_system/core/plugin_aspect.py`) subclasses declared as class attributes, instantiated by the loader as `AspectClass(instance)` right after `configure()` runs (so aspects can read already-loaded state), with the class attribute then shadowed by the instance (`self.api` becomes the `FooAPI` object). This replaces multiple inheritance — a plugin needing both API routes and macros no longer inherits two mixins, it just declares `api = FooAPI` and `macros = FooMacros`.
+
+`ApiRouterAspect` (`plugin_system/core/api_router_plugin.py`) — gives a plugin a FastAPI router:
 ```python
-class MyPlugin(PluginBase, ApiRouterPlugin):
+class MyAPI(ApiRouterAspect):
+    def __init__(self, core: "MyPlugin") -> None:
+        super().__init__(core)
+        self.router.add_api_route("/status", core._status, methods=["GET"])
+
+class MyPlugin(PluginBase):
     services = [Service.DNS]     # exclusive ownership claim
+    api = MyAPI
 ```
-The loader mounts `self.router` at `/v1/<plugin_id>/`. Add routes to `self.router` inside `setup()`.
+The loader mounts `self.router` at `/v1/<plugin_id>/`.
 
-`MacroProviderPlugin` (`plugin_system/core/macro_provider_plugin.py`) — mixin for plugins that expose one or more macro namespaces. Must also inherit `PluginBase`. Call `self.add_macro_namespace(name, resolver)` inside `setup()` for each namespace the plugin owns — analogous to adding routes to `self.router`:
+`MacroProviderAspect` (`plugin_system/core/macro_provider_plugin.py`) — lets a plugin register macro keys into the shared registry. Call `self.register_macro(key, value)` in the aspect's `__init__` (which runs after the core's `configure()`, so state/config is already loaded) — one call per full macro key, not a namespace + segment resolver:
 ```python
-class NetworkingPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
-    services = [Service.NETWORKING]
-
-    def setup(self):
-        self.add_macro_namespace("interface", self._resolve_interface_macro)
-        # a plugin can register multiple namespaces
-
-    def _resolve_interface_macro(self, *segments: str) -> Any:
-        # segments[0] = alias name, segments[1] = "name" | "address" | "net_addr"
-        if len(segments) < 2:
-            return None
-        device = self._aliases.get(segments[0])
-        if device is None:
-            return None
-        if segments[1] == "name":
-            return device
-        if segments[1] == "address":
-            return [str(ipaddress.ip_interface(a).ip)
-                    for a in self._interfaces.get(device, {}).get("addresses", [])]
-        if segments[1] == "net_addr":
-            return [str(ipaddress.ip_interface(a).network)
-                    for a in self._interfaces.get(device, {}).get("addresses", [])]
-        return None
+class NetworkingMacros(MacroProviderAspect):
+    def __init__(self, core: "NetworkingPlugin") -> None:
+        super().__init__(core)
+        self.core = core
+        for alias, device in core._aliases.items():
+            addresses = core._interfaces.get(device, {}).get("addresses", [])
+            self.register_macro(f"$interface.{alias}.name", device)
+            self.register_macro(
+                f"$interface.{alias}.address",
+                [str(ipaddress.ip_interface(a).ip) for a in addresses],
+            )
 
     def macro_snapshot(self) -> dict[str, dict[str, Any]]:
         # optional — override to expose current entries for --show-macros / GET /v1/macros
         entries: dict[str, Any] = {}
-        for alias, device in self._aliases.items():
+        for alias, device in self.core._aliases.items():
             entries[f"{alias}.name"] = device
-            addrs = [str(ipaddress.ip_interface(a).ip)
-                     for a in self._interfaces.get(device, {}).get("addresses", [])]
-            if addrs:
-                entries[f"{alias}.address"] = addrs
-            nets = [str(ipaddress.ip_interface(a).network)
-                    for a in self._interfaces.get(device, {}).get("addresses", [])]
-            if nets:
-                entries[f"{alias}.net_addr"] = nets
         return {"interface": entries}
+
+class NetworkingPlugin(PluginBase):
+    services = [Service.NETWORKING]
+    macros = NetworkingMacros
 ```
-After `setup()` the loader calls `macro_registry.register_namespace(name, resolver)` for every namespace the plugin declared. On unload each namespace is unregistered. Both `ApiRouterPlugin` and `MacroProviderPlugin` use cooperative `__init__` (`super().__init__()`), so multiple mixins compose correctly.
+Keys registered this way are tracked in the aspect's `_macro_keys` so the loader can unregister them (`macro_registry.unregister(key)`) on plugin unload. Re-instantiate the aspect (or call `register_macro` again) whenever the underlying data changes — there is no live "resolver callback"; `macro_registry` stores plain key → value entries (see Macro system below).
+
+A plugin can declare any number of aspects (`api`, `macros`, or custom `PluginAspect` subclasses) — the loader discovers them all via a class-attribute scan, no explicit registration list needed.
 
 ### Service exclusivity
 
@@ -318,15 +314,15 @@ The bus auto-populates three fields on every event before dispatching to handler
 
 ### Macro system
 
-`macro_registry` (`plugin_system/core/macros.py`) is the module-level singleton that stores all macro namespaces. Plugins and rules reference macros with `$namespace.segment[.segment...]` syntax (e.g. `$service_port.dns.udp`, `$interface.lan.name`, `$interface.lan.address`, `$interface.lan.net_addr`).
+`macro_registry` (`plugin_system/core/macros.py`) is the module-level singleton that stores every macro value. It is backed by a `Box(box_dots=True, default_box=True)`, so registered keys form a live dotted tree rather than a set of per-namespace resolver callbacks. Plugins and rules reference macros with `$namespace.segment[.segment...][N]` syntax (e.g. `$service_port.dns.udp`, `$service_port.dns.udp[0]`, `$interface.lan.address`, `$interface.lan.address[0]`).
 
 **Built-in namespace — `service_port`**
 
-Populated by the loader after all plugins finish loading. Keys come from each plugin's `service_ports` in `plugin.yaml`; protocols with all-`-1` port values are omitted. Example: `$service_port.dns.udp` → `[53]`.
+Populated by the loader after all plugins finish loading (`PluginLoader._load_discovered`, after the topological load loop): for every loaded plugin's `service_ports` in `plugin.yaml`, protocols with all-`-1` port values are dropped, and the loader calls `macro_registry.register(f"$service_port.{svc_name}.{proto}", ports)` directly. Example: `$service_port.dns.udp` → `[53]`.
 
-**Plugin-defined namespaces**
+**Plugin-defined macros**
 
-Populated by `MacroProviderPlugin` subclasses (see Plugin base classes above). The loader calls `macro_registry.register_namespace(name, resolver)` after `setup()` for each namespace the plugin declared. On unload, each namespace is unregistered.
+Plugins register macros through the `MacroProviderAspect` (see Plugin base classes above) rather than a namespace + resolver callback. The aspect's `__init__` runs after `configure()`, so plugin state is already loaded; it calls `self.register_macro(key, value)` per entry, which forwards to `macro_registry.register()` and tracks the key in `self._macro_keys`. On plugin unload, the loader iterates each aspect's `_macro_keys` and calls `macro_registry.unregister(key)` for each.
 
 **Resolution API**
 
@@ -335,62 +331,58 @@ Populated by `MacroProviderPlugin` subclasses (see Plugin base classes above). T
 ```python
 from plugin_system.core.macros import macro_registry
 
-# Macro → raw value from the resolver (list, string, int, …)
-raw: Any = macro_registry.resolve("$service_port.dns.udp")   # → [53]
-raw: Any = macro_registry.resolve("$interface.lan.address")  # → ["192.168.0.1"]
-raw: Any = macro_registry.resolve("$host.fqdn")              # → "myhost.example.com"
+# Macro → raw registered value (list, string, int, …)
+raw: Any = macro_registry.resolve("$service_port.dns.udp")      # → [53]
+raw: Any = macro_registry.resolve("$service_port.dns.udp[0]")   # → 53
+raw: Any = macro_registry.resolve("$interface.lan.address")     # → ["192.168.0.1"]
+raw: Any = macro_registry.resolve("$interface.lan.address[0]")  # → "192.168.0.1"
 
 # Non-macro string → returned as-is (passthrough)
-raw: Any = macro_registry.resolve("192.168.1.1")             # → "192.168.1.1"
+raw: Any = macro_registry.resolve("192.168.1.1")                # → "192.168.1.1"
 
 # Non-string (int, etc.) → returned as-is
-raw: Any = macro_registry.resolve(8080)                      # → 8080
+raw: Any = macro_registry.resolve(8080)                         # → 8080
 
-# Unknown namespace or malformed macro → None
-raw: Any = macro_registry.resolve("$unknown.x")              # → None
+# Unknown path or malformed macro → None
+raw: Any = macro_registry.resolve("$unknown.x")                 # → None
 
 # $service_port with no plugin claim → falls back to /etc/services
-raw: Any = macro_registry.resolve("$service_port.ssh.tcp")   # → [22]
-raw: Any = macro_registry.resolve("$service_port.http.tcp")  # → [80]
+raw: Any = macro_registry.resolve("$service_port.ssh.tcp")      # → [22]
+raw: Any = macro_registry.resolve("$service_port.http.tcp")     # → [80]
 
-# All currently registered namespaces
+# Top-level namespace names currently holding a registered value
 namespaces: list[str] = macro_registry.namespaces   # e.g. ["service_port", "interface", "host"]
 ```
 
-`resolve()` returns `None` for unknown namespaces and malformed macros — callers should treat this as "unresolvable". Non-macro values (plain strings, ints) pass through unchanged, so callers can call `resolve()` unconditionally without a prior `is_macro()` check.
+`resolve()` returns `None` for unknown paths and for an out-of-bounds `[N]` index. Non-macro values (plain strings, ints) pass through unchanged, so callers can call `resolve()` unconditionally without a prior `is_macro()` check.
 
-**`$service_port` fallback to `/etc/services`**: when a `$service_port.<name>.<proto>` macro is not declared by any loaded plugin, `resolve()` falls back to `/etc/services`. The file is parsed once and cached for the process lifetime. Plugin-declared ports always take precedence; the fallback only fires when no plugin has registered that service name. Returns `None` if the service is not in `/etc/services` either.
-
-`resolve()` caches results for the `service_port` namespace (the hot path in firewall rule compilation) and invalidates the cache on `register_namespace`, `unregister_namespace`, and `set_service_ports`. Plugin-defined namespace results (e.g. `$interface.*`, `$host.*`) are **not** cached because their resolvers read live plugin state that can change without a `register_namespace` call.
+**`$service_port` fallback to `/etc/services`**: when a `$service_port.<name>.<proto>` macro was not registered by any loaded plugin, `resolve()` falls back to `/etc/services` via `_etc_services_fallback()`. The file is parsed once per process via `@lru_cache` on `_parse_etc_services()`. Plugin-registered ports always take precedence; the fallback only fires when no plugin has registered that service/proto pair. Returns `None` if the service is not in `/etc/services` either.
 
 Macro segment syntax allows hyphens: `$service_port.fastfirewall-api.tcp` is valid.
 
 **Testing with macros**
 
-Tests that exercise port-based rules must seed the registry before the call and clean up after:
+Tests that exercise port-based rules register and clean up directly, since there is no separate service-port setter:
 
 ```python
 from plugin_system.core.macros import macro_registry
 
-macro_registry.set_service_ports({"dns": {"udp": [53]}})
+macro_registry.register("$service_port.dns.udp", [53])
 try:
     # ... test code
 finally:
-    macro_registry.set_service_ports({})
+    macro_registry.unregister("$service_port.dns")
 ```
 
-For plugin-defined namespaces, use `register_namespace` / `unregister_namespace`:
+Plugin-defined macros follow the same `register` / `unregister` calls — there is no resolver-callback registration:
 
 ```python
-macro_registry.register_namespace(
-    "interface",
-    lambda *s: "enp0s25" if s == ("lan", "name") else
-               ["192.168.0.1"] if s == ("lan", "address") else None,
-)
+macro_registry.register("$interface.lan.name", "enp0s25")
+macro_registry.register("$interface.lan.address", ["192.168.0.1"])
 try:
     # ... test code
 finally:
-    macro_registry.unregister_namespace("interface")
+    macro_registry.unregister("$interface.lan")
 ```
 
 ### PluginLoader management API
@@ -648,16 +640,18 @@ state:
 
 ### Plugin boot-apply convention
 
-Every plugin that manages external state (services, config files, firewall rules, etc.) **must attempt to re-apply its state on `setup()`**. The required sequence is:
+Every plugin that manages external state (services, config files, firewall rules, etc.) **must attempt to re-apply its state on `setup()`**. State loading itself belongs in `configure()` (see Plugin base classes above) since aspects — which may read that state in their own `__init__` — are instantiated right after `configure()` returns and before `setup()` runs. The required sequence for `setup()`/`_apply_state()` is:
 
 1. **Try desired state** — attempt to apply `desired_state` (what the operator asked for). On success, call `commit()` so `current_state` reflects what is actually running.
 2. **Fall back to current state** — if the desired apply fails, log a warning and attempt to apply `current_state` (the last known-good snapshot). On success, log clearly that the system is running on the previous state.
-3. **Error out** — if both attempts fail, raise an exception from `setup()`. The loader treats any exception from `setup()` as a load failure and skips the plugin (and all plugins that depend on it), so the app continues running without a half-configured plugin.
+3. **Error out** — if both attempts fail, raise an exception from `setup()`. The loader catches an exception from a deferred `setup()` call, logs it, and skips that plugin — it does not abort the other plugins' deferred `setup()` calls or crash the boot sequence.
 
 ```python
-def setup(self) -> None:
+def configure(self) -> None:
     self._state_file = PluginStateFile.from_config(...)
     self._state = self._state_file.load_desired(default=_EMPTY_STATE)
+
+def setup(self) -> None:
     self._register_routes()
 
     if not self.config.get("ignore_state_on_boot", False):

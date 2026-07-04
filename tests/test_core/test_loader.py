@@ -66,6 +66,7 @@ def test_load_plugin_with_pluginbase_instance(tmp_path, loader):
                 self.was_setup = True
     """)
     loader.load_plugin(tmp_path / "base_plugin")
+    loader.finished()
     instance = loader.plugins["base_plugin"].instance
     assert instance is not None
     assert instance.was_setup is True
@@ -106,6 +107,7 @@ def test_plugin_instance_has_plugin_dir_before_setup(tmp_path, loader):
                 self.dir_at_setup = self.plugin_dir
     """)
     loader.load_plugin(tmp_path / "dir_inst")
+    loader.finished()
     inst = loader.plugins["dir_inst"].instance
     assert inst.dir_at_setup == (tmp_path / "dir_inst").resolve()
 
@@ -530,6 +532,155 @@ def test_handler_fires_when_event_emitted(tmp_path, bus):
 
 
 # ---------------------------------------------------------------------------
+# Aspects / deferred setup()
+# ---------------------------------------------------------------------------
+
+def test_configure_called_before_aspects_and_setup(tmp_path, loader):
+    make_plugin(tmp_path, "order_plugin", "name: O\nid: order_plugin\n", """
+        from plugin_system.core import PluginBase, ApiRouterAspect
+
+        calls = []
+
+        class OrderAPI(ApiRouterAspect):
+            def __init__(self, core):
+                super().__init__(core)
+                calls.append("aspect_init")
+
+        class OrderPlugin(PluginBase):
+            api = OrderAPI
+
+            def configure(self):
+                calls.append("configure")
+
+            def setup(self):
+                calls.append("setup")
+    """)
+    loader.load_plugin(tmp_path / "order_plugin")
+    loader.finished()
+    mod = sys.modules["_plugin_order_plugin.plugin"]
+    assert mod.calls == ["configure", "aspect_init", "setup"]
+
+
+def test_setup_deferred_until_finished(tmp_path, loader):
+    make_plugin(tmp_path, "deferred_plugin", "name: D\nid: deferred_plugin\n", """
+        from plugin_system.core import PluginBase
+
+        class DeferredPlugin(PluginBase):
+            def setup(self):
+                self.was_setup = True
+    """)
+    loader.load_plugin(tmp_path / "deferred_plugin")
+    instance = loader.plugins["deferred_plugin"].instance
+    assert instance is not None
+    assert not hasattr(instance, "was_setup")
+    loader.finished()
+    assert instance.was_setup is True
+
+
+def test_aspect_class_attribute_replaced_with_instance(tmp_path, loader):
+    make_plugin(tmp_path, "aspect_plugin", "name: AP\nid: aspect_plugin\n", """
+        from plugin_system.core import PluginBase, ApiRouterAspect
+
+        class AspectAPI(ApiRouterAspect):
+            pass
+
+        class AspectPlugin(PluginBase):
+            api = AspectAPI
+    """)
+    loader.load_plugin(tmp_path / "aspect_plugin")
+    instance = loader.plugins["aspect_plugin"].instance
+    mod = sys.modules["_plugin_aspect_plugin.plugin"]
+    assert type(instance).api is mod.AspectAPI
+    assert isinstance(instance.api, mod.AspectAPI)
+
+
+def test_aspect_router_mounted_before_setup(tmp_path, bus):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    loader = PluginLoader(bus=bus, app=app)
+    make_plugin(tmp_path, "route_plugin", "name: RP\nid: route_plugin\n", """
+        from plugin_system.core import PluginBase, ApiRouterAspect
+
+        class RouteAPI(ApiRouterAspect):
+            def __init__(self, core):
+                super().__init__(core)
+                self.router.add_api_route("/ping", lambda: {"ok": True}, methods=["GET"])
+
+        class RoutePlugin(PluginBase):
+            api = RouteAPI
+    """)
+    loader.load_plugin(tmp_path / "route_plugin")
+    client = TestClient(app)
+    resp = client.get("/v1/route_plugin/ping")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+
+def test_deferred_setup_failure_is_logged_not_raised(tmp_path, bus, caplog):
+    import logging
+    loader = PluginLoader(bus=bus)
+    make_plugin(tmp_path, "boom_plugin", "name: BP\nid: boom_plugin\n", """
+        from plugin_system.core import PluginBase
+
+        class BoomPlugin(PluginBase):
+            def setup(self):
+                raise RuntimeError("boom")
+    """)
+    make_plugin(tmp_path, "fine_plugin", "name: FP\nid: fine_plugin\n", """
+        from plugin_system.core import PluginBase
+
+        class FinePlugin(PluginBase):
+            def setup(self):
+                self.was_setup = True
+    """)
+    loader.load_plugin(tmp_path / "boom_plugin")
+    loader.load_plugin(tmp_path / "fine_plugin")
+    with caplog.at_level(logging.ERROR, logger="plugin_system.core.loader"):
+        loader.finished()
+    assert "boom_plugin" in caplog.text
+    fine_instance = loader.plugins["fine_plugin"].instance
+    assert fine_instance is not None
+    assert fine_instance.was_setup is True  # type: ignore[attr-defined]
+
+
+def test_setup_called_immediately_after_finished_already_ran(tmp_path, loader):
+    loader.finished()
+    make_plugin(tmp_path, "late_plugin", "name: LP\nid: late_plugin\n", """
+        from plugin_system.core import PluginBase
+
+        class LatePlugin(PluginBase):
+            def setup(self):
+                self.was_setup = True
+    """)
+    loader.load_plugin(tmp_path / "late_plugin")
+    late_instance = loader.plugins["late_plugin"].instance
+    assert late_instance is not None
+    assert late_instance.was_setup is True
+
+
+def test_macro_aspect_cleanup_on_unload(tmp_path, loader):
+    make_plugin(tmp_path, "macro_plugin", "name: MP\nid: macro_plugin\n", """
+        from plugin_system.core import PluginBase, MacroProviderAspect
+
+        class MacroM(MacroProviderAspect):
+            def __init__(self, core):
+                super().__init__(core)
+                self.register_macro("$macro_plugin.foo", "bar")
+
+        class MacroPlugin(PluginBase):
+            macros = MacroM
+    """)
+    loader.load_plugin(tmp_path / "macro_plugin")
+    loader.finished()
+    from plugin_system.core.macros import macro_registry
+    assert macro_registry.resolve("$macro_plugin.foo") == "bar"
+    loader.unload_plugin("macro_plugin")
+    assert macro_registry.resolve("$macro_plugin.foo") is None
+
+
+# ---------------------------------------------------------------------------
 # Unload / reload
 # ---------------------------------------------------------------------------
 
@@ -613,6 +764,23 @@ def test_reload_plugin(tmp_path, bus):
     loader.load_plugin(tmp_path / "reloadable")
     loader.reload_plugin("reloadable", tmp_path / "reloadable")
     assert "reloadable" in loader.plugins
+
+
+def test_reload_plugin_after_finished_runs_setup_immediately(tmp_path, bus):
+    loader = PluginLoader(bus=bus)
+    make_plugin(tmp_path, "reload_setup", "name: RS\nid: reload_setup\n", """
+        from plugin_system.core import PluginBase
+
+        class ReloadSetup(PluginBase):
+            def setup(self):
+                self.was_setup = True
+    """)
+    loader.load_plugin(tmp_path / "reload_setup")
+    loader.finished()
+    loader.reload_plugin("reload_setup", tmp_path / "reload_setup")
+    reloaded_instance = loader.plugins["reload_setup"].instance
+    assert reloaded_instance is not None
+    assert reloaded_instance.was_setup is True  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

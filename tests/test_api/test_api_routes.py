@@ -36,23 +36,28 @@ def greeter_app(tmp_path):
           ntp:
             tcp: [-1]
     """, """
-        from plugin_system.core import PluginBase, ApiRouterPlugin, Service
+        from plugin_system.core import PluginBase, ApiRouterAspect, Service
 
-        class GreeterPlugin(PluginBase, ApiRouterPlugin):
-            services = [Service.NTP]
-
-            def setup(self):
-                self._tmpl = self.config.get("greeting_template", "Hello, {username}!")
-                self._shout = self.config.get("shout", False)
+        class GreeterAPI(ApiRouterAspect):
+            def __init__(self, core):
+                super().__init__(core)
 
                 @self.router.get("/hello/{username}")
                 def greet(username: str):
-                    msg = self._tmpl.format(username=username)
-                    return {"message": msg.upper() if self._shout else msg}
+                    msg = core._tmpl.format(username=username)
+                    return {"message": msg.upper() if core._shout else msg}
 
                 @self.router.get("/status")
                 def status():
-                    return {"plugin": self.meta["name"], "version": self.meta["version"]}
+                    return {"plugin": core.meta["name"], "version": core.meta["version"]}
+
+        class GreeterPlugin(PluginBase):
+            services = [Service.NTP]
+            api = GreeterAPI
+
+            def configure(self):
+                self._tmpl = self.config.get("greeting_template", "Hello, {username}!")
+                self._shout = self.config.get("shout", False)
     """)
     app = FastAPI()
     loader = PluginLoader(bus=EventBus(), app=app)
@@ -113,18 +118,23 @@ def test_shout_config_uppercases_response(tmp_path):
           ntp:
             tcp: [-1]
     """, """
-        from plugin_system.core import PluginBase, ApiRouterPlugin, Service
+        from plugin_system.core import PluginBase, ApiRouterAspect, Service
 
-        class ShouterPlugin(PluginBase, ApiRouterPlugin):
-            services = [Service.NTP]
-
-            def setup(self):
-                self._shout = self.config.get("shout", False)
+        class ShouterAPI(ApiRouterAspect):
+            def __init__(self, core):
+                super().__init__(core)
 
                 @self.router.get("/hello/{username}")
                 def greet(username: str):
                     msg = f"Hello, {username}!"
-                    return {"message": msg.upper() if self._shout else msg}
+                    return {"message": msg.upper() if core._shout else msg}
+
+        class ShouterPlugin(PluginBase):
+            services = [Service.NTP]
+            api = ShouterAPI
+
+            def configure(self):
+                self._shout = self.config.get("shout", False)
     """)
     app = FastAPI()
     loader = PluginLoader(bus=EventBus(), app=app)
@@ -140,15 +150,20 @@ def test_shout_config_uppercases_response(tmp_path):
 
 def test_add_api_route_style_endpoints(tmp_path):
     make_plugin(tmp_path, "log_plugin", "name: Log\nid: log_plugin\nservice_ports:\n  syslog:\n    tcp: [-1]\n", """
-        from plugin_system.core import PluginBase, ApiRouterPlugin, Service
+        from plugin_system.core import PluginBase, ApiRouterAspect, Service
 
-        class LogPlugin(PluginBase, ApiRouterPlugin):
+        class LogAPI(ApiRouterAspect):
+            def __init__(self, core):
+                super().__init__(core)
+                self.router.add_api_route("/logs", core._get_logs, methods=["GET"])
+                self.router.add_api_route("/logs", core._clear_logs, methods=["DELETE"])
+
+        class LogPlugin(PluginBase):
             services = [Service.SYSLOG]
+            api = LogAPI
 
-            def setup(self):
+            def configure(self):
                 self._entries = ["entry1", "entry2"]
-                self.router.add_api_route("/logs", self._get_logs, methods=["GET"])
-                self.router.add_api_route("/logs", self._clear_logs, methods=["DELETE"])
 
             def _get_logs(self):
                 return {"entries": self._entries}
@@ -180,26 +195,34 @@ def test_add_api_route_style_endpoints(tmp_path):
 
 def test_two_plugins_mounted_at_distinct_prefixes(tmp_path):
     make_plugin(tmp_path, "ntp_plugin", "name: NTP\nid: ntp_plugin\nservice_ports:\n  ntp:\n    tcp: [-1]\n", """
-        from plugin_system.core import PluginBase, ApiRouterPlugin, Service
+        from plugin_system.core import PluginBase, ApiRouterAspect, Service
 
-        class NTPPlugin(PluginBase, ApiRouterPlugin):
-            services = [Service.NTP]
+        class NTPAPI(ApiRouterAspect):
+            def __init__(self, core):
+                super().__init__(core)
 
-            def setup(self):
                 @self.router.get("/ping")
                 def ping():
                     return {"service": "ntp"}
+
+        class NTPPlugin(PluginBase):
+            services = [Service.NTP]
+            api = NTPAPI
     """)
     make_plugin(tmp_path, "dns_plugin", "name: DNS\nid: dns_plugin\nservice_ports:\n  dns:\n    tcp: [-1]\n", """
-        from plugin_system.core import PluginBase, ApiRouterPlugin, Service
+        from plugin_system.core import PluginBase, ApiRouterAspect, Service
 
-        class DNSPlugin(PluginBase, ApiRouterPlugin):
-            services = [Service.DNS]
+        class DNSAPI(ApiRouterAspect):
+            def __init__(self, core):
+                super().__init__(core)
 
-            def setup(self):
                 @self.router.get("/ping")
                 def ping():
                     return {"service": "dns"}
+
+        class DNSPlugin(PluginBase):
+            services = [Service.DNS]
+            api = DNSAPI
     """)
     app = FastAPI()
     bus = EventBus()
@@ -218,10 +241,14 @@ def test_two_plugins_mounted_at_distinct_prefixes(tmp_path):
 
 def test_routed_plugin_without_fastapi_app_does_not_raise(tmp_path):
     make_plugin(tmp_path, "no_app", "name: NoApp\nid: no_app\nservice_ports:\n  dns:\n    tcp: [-1]\n", """
-        from plugin_system.core import PluginBase, ApiRouterPlugin, Service
+        from plugin_system.core import PluginBase, ApiRouterAspect, Service
 
-        class NoAppPlugin(PluginBase, ApiRouterPlugin):
+        class NoAppAPI(ApiRouterAspect):
+            pass
+
+        class NoAppPlugin(PluginBase):
             services = [Service.DNS]
+            api = NoAppAPI
     """)
     loader = PluginLoader(bus=EventBus(), app=None)
     loader.load_plugin(tmp_path / "no_app")  # should not raise
@@ -230,13 +257,18 @@ def test_routed_plugin_without_fastapi_app_does_not_raise(tmp_path):
 
 def test_routed_plugin_with_no_services_loads_at_plugin_id_prefix(tmp_path):
     make_plugin(tmp_path, "bare_routed", "name: Bare\nid: bare_routed\nservice_ports: -1\n", """
-        from plugin_system.core import PluginBase, ApiRouterPlugin
+        from plugin_system.core import PluginBase, ApiRouterAspect
 
-        class BareApiRouterPlugin(PluginBase, ApiRouterPlugin):
-            def setup(self):
+        class BareAPI(ApiRouterAspect):
+            def __init__(self, core):
+                super().__init__(core)
+
                 @self.router.get("/ping")
                 def ping():
                     return {"ok": True}
+
+        class BareApiRouterPlugin(PluginBase):
+            api = BareAPI
     """)
     app = FastAPI()
     loader = PluginLoader(bus=EventBus(), app=app)

@@ -4,6 +4,8 @@ Manages Postfix SMTP server configuration and provides email sending and test-ma
 
 **Mutation model: immediate apply.** Every `PUT` mutation calls `postconf -e` inline and applies the change to Postfix before returning. Uses `PluginStateFile` with `mutation_model="immediate"`, so `_save_state()` / `save_desired()` automatically commits `current = desired` and `pending_changes` stays `False` after every mutation.
 
+`SmtpPlugin` composes an `SmtpAPI(ApiRouterAspect)` aspect (`api = SmtpAPI`, taking over what was `_register_routes()`), instantiated by the loader after `configure()` runs. State loading and config-derived fields (`_smtp_host`, `_smtp_port`, `_default_from`) live in `configure()`; `setup()` only runs `_apply_state()` (when not `ignore_state_on_boot`) and logs.
+
 ## Routes
 
 | Method | Path | Summary |
@@ -93,7 +95,9 @@ inst._run_cmd = MagicMock(return_value=_proc(0))
 inst._smtp_send = MagicMock()
 inst._which = MagicMock(return_value="/usr/sbin/postconf")
 inst._postfix_running = MagicMock(return_value=True)
+inst.configure()
+inst.api = mod.SmtpAPI(inst)
 inst.setup()
 ```
 
-Use `tmp_path` for `plugin_dir` so state files are isolated per test. The `_proc(returncode, stdout, stderr)` helper builds a mock `CompletedProcess`. Two fixture tiers: `ctx` returns `(TestClient, instance)` for tests that need to inspect instance state; `client` returns just the `TestClient`.
+Use `tmp_path` for `plugin_dir` so state files are isolated per test. The `_proc(returncode, stdout, stderr)` helper builds a mock `CompletedProcess`. Two fixture tiers: `ctx` returns `(TestClient, instance)` for tests that need to inspect instance state; `client` returns just the `TestClient`. `_make_inst` mounts `inst.api.router` (not `inst.router`) onto the test `FastAPI()` app.

@@ -3,6 +3,11 @@ logging:
   level: DEBUG
   format: "%(levelname)s [%(request_id)s] %(name)s: %(message)s"
 
+  # Per-logger level overrides — quiets noisy third-party libraries without
+  # lowering the app's own log level above.
+  overrides:
+    pyroute2: WARNING
+
 # ── Plugins ───────────────────────────────────────────────────────────────────
 plugins:
   src_code_dir: plugins     # relative to the repo root; resolved at startup

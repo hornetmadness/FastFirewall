@@ -83,7 +83,7 @@ def get_macros(loader) -> dict:
         }
     """
     from plugin_system.core.macros import macro_registry
-    from plugin_system.core.macro_provider_plugin import MacroProviderPlugin
+    from plugin_system.core.macro_provider_plugin import MacroProviderAspect
     from box import Box
 
     result: dict = {}
@@ -99,8 +99,10 @@ def get_macros(loader) -> dict:
         result["service_port"] = {"kind": "built-in", "entries": sp_entries}
 
     for loaded in loader._plugins.values():
-        if loaded.instance is not None and isinstance(loaded.instance, MacroProviderPlugin):
-            for ns, entries_dict in loaded.instance.macro_snapshot().items():
+        for _name, aspect in loaded.aspects:
+            if not isinstance(aspect, MacroProviderAspect):
+                continue
+            for ns, entries_dict in aspect.macro_snapshot().items():
                 result[ns] = {
                     "kind": "plugin",
                     "plugin": loaded.plugin_id,
@@ -209,14 +211,34 @@ def make_cfg(dest: Path, cfg) -> None:
             d.mkdir(parents=True, exist_ok=True)
             created.append(d)
 
+    # Known weak/placeholder auth.secret_key values that should never be
+    # deployed — the bundled default ("CHANGE-ME") and a value that has
+    # slipped into a hand-edited config before ("111").
+    _placeholder_secrets = ('"CHANGE-ME"', '"111"')
+
     cfg_file = dest / "app_config.yaml"
-    if not cfg_file.exists():
-        # Copy the bundled default verbatim (preserves all comments and formatting),
-        # then replace the placeholder secret with a real generated key.
-        text = _BUNDLED_PATH.read_text()
-        text = text.replace('"CHANGE-ME"', f'"{_secrets.token_hex(32)}"', 1)
+    is_new = not cfg_file.exists()
+    # Copy the bundled default verbatim (preserves all comments and formatting)
+    # for a new config; otherwise read the existing one to check for repair.
+    text = _BUNDLED_PATH.read_text() if is_new else cfg_file.read_text()
+
+    # Replace a placeholder secret key with a real generated one — whether
+    # this is a brand-new config or a repair of one that still has a
+    # placeholder (e.g. copied by an older makecfg run, or edited by hand).
+    # Re-running --makecfg is always a safe way to close this gap.
+    replaced = False
+    for placeholder in _placeholder_secrets:
+        if placeholder in text:
+            text = text.replace(placeholder, f'"{_secrets.token_hex(32)}"', 1)
+            replaced = True
+            break
+
+    if is_new or replaced:
         cfg_file.write_text(text)
-        created.append(cfg_file)
+        if is_new:
+            created.append(cfg_file)
+        else:
+            print(f"Replaced placeholder auth.secret_key in {cfg_file}")
 
     # Seed each installed plugin's plugin.yaml into <dest>/plugins/<id>/plugin.yaml
     # so operators have a local copy to customise (edit config: section to override).

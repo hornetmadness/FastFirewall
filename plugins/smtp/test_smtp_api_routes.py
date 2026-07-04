@@ -73,6 +73,8 @@ def _make_inst(tmp_path, run_cmd_rv=None):
     inst._smtp_send = MagicMock()
     inst._which = MagicMock(return_value="/usr/sbin/postconf")
     inst._postfix_running = MagicMock(return_value=True)
+    inst.configure()
+    inst.api = mod.SmtpAPI(inst)
     inst.setup()
     return inst
 
@@ -80,7 +82,7 @@ def _make_inst(tmp_path, run_cmd_rv=None):
 def _make_client(tmp_path, run_cmd_rv=None) -> tuple[TestClient, MagicMock]:
     inst = _make_inst(tmp_path, run_cmd_rv)
     app = FastAPI()
-    app.include_router(inst.router, prefix="/v1/smtp")
+    app.include_router(inst.api.router, prefix="/v1/smtp")
     app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     return TestClient(app), inst
 

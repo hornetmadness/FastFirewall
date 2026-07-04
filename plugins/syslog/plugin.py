@@ -27,7 +27,7 @@ from pyinfra.operations import files as files_ops
 from pyinfra.operations import server as server_ops
 
 from infra import pyinfra_run_batch
-from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, Service
+from plugin_system.core import PluginBase, PluginStateFile, ApiRouterAspect, Service
 from plugin_system.core.events import Event, bus
 
 
@@ -64,17 +64,35 @@ _VALID_PRIORITIES = {"emerg", "alert", "crit", "err", "warning", "notice", "info
                      "0", "1", "2", "3", "4", "5", "6", "7"}
 
 
+# ── API aspect ──────────────────────────────────────────────────────────────────
+
+class SyslogAPI(ApiRouterAspect):
+    def __init__(self, core: "SyslogPlugin") -> None:
+        super().__init__(core)
+        add = self.router.add_api_route
+        _admin = [require_role("admin")]
+        add("/status",          core._status,        methods=["GET"],   summary="Plugin status and service health", dependencies=_admin)
+        add("/config",          core._get_config,    methods=["GET"],   summary="Get effective fluent-bit config settings", dependencies=_admin)
+        add("/config",          core._update_config, methods=["PATCH"], summary="Update fluent-bit config settings and reload", dependencies=_admin)
+        add("/config/reload",    core._reload,        methods=["POST"],  summary="Reload fluent-bit without changing config", dependencies=_admin)
+        add("/config/raw",       core._get_raw,       methods=["GET"],   summary="Read raw fluent-bit config file from disk", dependencies=_admin)
+        add("/config/diagnose",  core._diagnose,      methods=["GET"],   summary="Diagnose fluent-bit setup and journal access", dependencies=_admin)
+        add("/config/logrotate", core._get_logrotate, methods=["GET"],   summary="Get logrotate settings", dependencies=_admin)
+        add("/config/logrotate", core._update_logrotate, methods=["PATCH"], summary="Update logrotate settings", dependencies=_admin)
+        add("/config/logrotate/run", core._run_logrotate, methods=["POST"],  summary="Manually trigger log rotation", dependencies=_admin)
+        add("/files",           core._list_files,    methods=["GET"],   summary="List log files in log_dir", dependencies=_admin)
+        add("/logs/{filename}", core._read_log,      methods=["GET"],   summary="Read last N lines of a log file", dependencies=_admin)
+        add("/tail/{filename}", core._tail_log,      methods=["GET"],   summary="Tail a log file (alias for read with smaller default)", dependencies=_admin)
+        add("/journal",         core._journal,       methods=["GET"],   summary="Read systemd journal entries", dependencies=_admin)
+
+
 # ── plugin ─────────────────────────────────────────────────────────────────────
 
-class SyslogPlugin(PluginBase, ApiRouterPlugin):
+class SyslogPlugin(PluginBase):
     services = [Service.SYSLOG]
+    api = SyslogAPI
 
-    def __init__(self) -> None:
-        super().__init__()
-        # fluent-bit apt repo is declared in plugin.yaml repos: and registered
-        # by the loader before any module is imported — no runtime action needed.
-
-    def setup(self) -> None:
+    def configure(self) -> None:
         self._log_dir = Path(self.config.get("log_dir", "/var/log/fastfirewall"))
         self._fastfirewall_conf = Path(self.config.get("fastfirewall_conf", "/etc/fluent-bit/conf.d/fastfirewall")).with_suffix(".conf")
         self._fluent_bit_main_conf = Path(self.config.get("fluent_bit_main_conf", "/etc/fluent-bit/fluent-bit.conf"))
@@ -102,6 +120,7 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
         self._log_compress = bool(lr.get("compress", True))
         self._log_max_size = lr.get("max_size") or None
 
+    def setup(self) -> None:
         # Create log dir eagerly — works when running as root (e.g. in Docker).
         # _configure_services also does this via pyinfra for non-root environments.
         try:
@@ -113,7 +132,6 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
             self._configure_services()
         except Exception as exc:
             self.logger.warning("Service configuration failed — continuing without it: %s", exc, exc_info=True)
-        self._register_routes()
         self.logger.info("Syslog plugin ready; log_dir=%s", self._log_dir)
         bus.emit(Event(
             name="syslog.ready",
@@ -263,25 +281,6 @@ class SyslogPlugin(PluginBase, ApiRouterPlugin):
             )
             if proc.returncode != 0:
                 raise RuntimeError(f"fluent-bit restart failed: {proc.stderr.strip()}")
-
-    # ── route registration ─────────────────────────────────────────────────────
-
-    def _register_routes(self) -> None:
-        add = self.router.add_api_route
-        _admin = [require_role("admin")]
-        add("/status",          self._status,        methods=["GET"],   summary="Plugin status and service health", dependencies=_admin)
-        add("/config",          self._get_config,    methods=["GET"],   summary="Get effective fluent-bit config settings", dependencies=_admin)
-        add("/config",          self._update_config, methods=["PATCH"], summary="Update fluent-bit config settings and reload", dependencies=_admin)
-        add("/config/reload",    self._reload,        methods=["POST"],  summary="Reload fluent-bit without changing config", dependencies=_admin)
-        add("/config/raw",       self._get_raw,       methods=["GET"],   summary="Read raw fluent-bit config file from disk", dependencies=_admin)
-        add("/config/diagnose",  self._diagnose,      methods=["GET"],   summary="Diagnose fluent-bit setup and journal access", dependencies=_admin)
-        add("/config/logrotate", self._get_logrotate, methods=["GET"],   summary="Get logrotate settings", dependencies=_admin)
-        add("/config/logrotate", self._update_logrotate, methods=["PATCH"], summary="Update logrotate settings", dependencies=_admin)
-        add("/config/logrotate/run", self._run_logrotate, methods=["POST"],  summary="Manually trigger log rotation", dependencies=_admin)
-        add("/files",           self._list_files,    methods=["GET"],   summary="List log files in log_dir", dependencies=_admin)
-        add("/logs/{filename}", self._read_log,      methods=["GET"],   summary="Read last N lines of a log file", dependencies=_admin)
-        add("/tail/{filename}", self._tail_log,      methods=["GET"],   summary="Tail a log file (alias for read with smaller default)", dependencies=_admin)
-        add("/journal",         self._journal,       methods=["GET"],   summary="Read systemd journal entries", dependencies=_admin)
 
     # ── status ─────────────────────────────────────────────────────────────────
 

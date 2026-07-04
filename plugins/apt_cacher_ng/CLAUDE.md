@@ -4,6 +4,8 @@ Installs and manages apt-cacher-ng, a caching proxy for Debian/Ubuntu package do
 
 **Mutation model: immediate apply.** Every config mutation writes state and applies the conf file before returning. Uses `PluginStateFile` with `mutation_model="immediate"`, so `_save_state()` / `save_desired()` automatically commits `current = desired` and `pending_changes` stays `False` after every mutation.
 
+`AptCacherNgPlugin` composes an `AptCacherNgAPI(ApiRouterAspect)` aspect (`api = AptCacherNgAPI`, taking over what was `_register_routes()`), instantiated by the loader after `configure()` runs. Path/state-file setup and state loading (gated on `ignore_state_on_boot`) live in `configure()`; `setup()` only runs `_apply_state()` (when not `ignore_state_on_boot`) and `_sync_os_boot_service()`.
+
 ## Routes
 
 | Method | Path | Summary |
@@ -119,10 +121,12 @@ Tests in `test_apt_cacher_ng_plugin.py`. No real apt-cacher-ng needed — `_pyin
 ```python
 inst._pyinfra_run = MagicMock()
 inst.config["ignore_state_on_boot"] = True
+inst.configure()
+inst.api = mod.AptCacherNgAPI(inst)
 inst.setup()
 ```
 
-Use `tmp_path` for `plugin_dir` so state files are isolated per test. The `_proc(returncode, stdout, stderr)` helper builds a mock `CompletedProcess`. Two fixture tiers: `ctx` returns `(TestClient, instance)` for tests that need to inspect instance state; `client` returns just the `TestClient`.
+Use `tmp_path` for `plugin_dir` so state files are isolated per test. The `_proc(returncode, stdout, stderr)` helper builds a mock `CompletedProcess`. Two fixture tiers: `ctx` returns `(TestClient, instance)` for tests that need to inspect instance state; `client` returns just the `TestClient`. `_make_inst`/`_make_inst_boot` mount `inst.api.router` (not `inst.router`) onto the test `FastAPI()` app.
 
 To test proxy URL resolution with the networking macro, register and clean up the `interface` namespace:
 

@@ -115,6 +115,9 @@ def _make_plugin(tmp_path, config=None):
     plugin._pyinfra_run = MagicMock()
     plugin._ip_addr_show = MagicMock(return_value=[])
     plugin._ip_route_show = MagicMock(return_value=[])
+    plugin.configure()
+    plugin.api = mod.NetworkingAPI(plugin)
+    plugin.macros = mod.NetworkingMacros(plugin)
     with patch("subprocess.run", side_effect=_subprocess_run_ok):
         plugin.setup()
     plugin._pyinfra_run.reset_mock()
@@ -125,7 +128,7 @@ def _make_plugin(tmp_path, config=None):
 
 def _make_client(plugin) -> TestClient:
     app = FastAPI()
-    app.include_router(plugin.router, prefix="/v1/networking")
+    app.include_router(plugin.api.router, prefix="/v1/networking")
     app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     return TestClient(app)
 
@@ -1124,6 +1127,9 @@ def _make_plugin_raw(tmp_path, config=None):
     plugin._pyinfra_run = MagicMock()
     plugin._ip_addr_show = MagicMock(return_value=[])
     plugin._ip_route_show = MagicMock(return_value=[])
+    plugin.configure()
+    plugin.api = mod.NetworkingAPI(plugin)
+    plugin.macros = mod.NetworkingMacros(plugin)
     with patch("subprocess.run", side_effect=_subprocess_run_ok):
         plugin.setup()
     return plugin
@@ -1159,6 +1165,7 @@ def test_apply_state_does_not_crash_on_pyinfra_failure(tmp_path):
     plugin._pyinfra_run = MagicMock(side_effect=RuntimeError("permission denied"))
     plugin._ip_addr_show = MagicMock(return_value=[])
     plugin._ip_route_show = MagicMock(return_value=[])
+    plugin.configure()
     with patch("subprocess.run", side_effect=_subprocess_run_ok):
         plugin.setup()  # must not raise
     assert plugin._interfaces == {"eth0": {"addresses": ["10.0.0.1/24"]}}
@@ -1185,6 +1192,7 @@ def test_boot_apply_does_not_set_current_state_on_failure(tmp_path):
     plugin._pyinfra_run = MagicMock(side_effect=RuntimeError("failed"))
     plugin._ip_addr_show = MagicMock(return_value=[])
     plugin._ip_route_show = MagicMock(return_value=[])
+    plugin.configure()
     with patch("subprocess.run", side_effect=_subprocess_run_ok):
         plugin.setup()
     assert plugin._state_file.current_snapshot is None
@@ -1214,6 +1222,7 @@ def test_boot_apply_calls_networkctl_reload(tmp_path):
     plugin._pyinfra_run = MagicMock()
     plugin._ip_addr_show = MagicMock(return_value=[])
     plugin._ip_route_show = MagicMock(return_value=[])
+    plugin.configure()
     with patch("subprocess.run", side_effect=capture_run):
         plugin.setup()
     assert any(c and "networkctl" in c and "reload" in c for c in calls)
@@ -1233,6 +1242,9 @@ def _make_plugin_boot_import(tmp_path, ip_addr_data=None, ip_route_data=None, co
     plugin._pyinfra_run = MagicMock()
     plugin._ip_addr_show = MagicMock(return_value=ip_addr_data if ip_addr_data is not None else [])
     plugin._ip_route_show = MagicMock(return_value=ip_route_data if ip_route_data is not None else [])
+    plugin.configure()
+    plugin.api = mod.NetworkingAPI(plugin)
+    plugin.macros = mod.NetworkingMacros(plugin)
     with patch("subprocess.run", side_effect=_subprocess_run_ok):
         plugin.setup()
     return plugin
@@ -1324,7 +1336,8 @@ def test_boot_import_does_not_crash_on_ip_failure(tmp_path):
     plugin._ip_addr_show = MagicMock(side_effect=RuntimeError("permission denied"))
     plugin._ip_route_show = MagicMock(side_effect=RuntimeError("permission denied"))
     with patch("subprocess.run", side_effect=_subprocess_run_ok):
-        plugin.setup()  # must not raise
+        plugin.configure()  # must not raise
+        plugin.setup()
     assert plugin._interfaces == {}
     assert plugin._routes == {}
 
@@ -1544,55 +1557,61 @@ def test_diff_pending_false_after_apply(plugin, client):
 
 def test_interface_macro_name_resolves_to_device(tmp_path):
     from plugin_system.core.macros import macro_registry
+    mod = _load_module()
     plugin = _make_plugin(tmp_path)
     plugin._aliases["lan"] = "eth0"
-    plugin._register_interface_macros()
+    plugin.macros = mod.NetworkingMacros(plugin)
     assert macro_registry.resolve("$interface.lan.name") == "eth0"
     macro_registry.unregister("$interface")
 
 
 def test_interface_macro_address_resolves_to_ip_list(tmp_path):
     from plugin_system.core.macros import macro_registry
+    mod = _load_module()
     plugin = _make_plugin(tmp_path)
     plugin._aliases["lan"] = "eth0"
     plugin._interfaces["eth0"] = {"addresses": ["192.168.1.1/24"]}
-    plugin._register_interface_macros()
+    plugin.macros = mod.NetworkingMacros(plugin)
     assert macro_registry.resolve("$interface.lan.address") == ["192.168.1.1"]
     macro_registry.unregister("$interface")
 
 
 def test_interface_macro_address_empty_when_no_addresses(tmp_path):
     from plugin_system.core.macros import macro_registry
+    mod = _load_module()
     plugin = _make_plugin(tmp_path)
     plugin._aliases["lan"] = "eth0"
     plugin._interfaces["eth0"] = {}
-    plugin._register_interface_macros()
+    plugin.macros = mod.NetworkingMacros(plugin)
     assert macro_registry.resolve("$interface.lan.address") == []
     macro_registry.unregister("$interface")
 
 
 def test_interface_macro_unknown_alias_returns_none(tmp_path):
     from plugin_system.core.macros import macro_registry
+    mod = _load_module()
     plugin = _make_plugin(tmp_path)
-    plugin._register_interface_macros()
+    plugin.macros = mod.NetworkingMacros(plugin)
     assert macro_registry.resolve("$interface.missing.name") is None
     macro_registry.unregister("$interface")
 
 
 def test_interface_macro_unknown_field_returns_none(tmp_path):
     from plugin_system.core.macros import macro_registry
+    mod = _load_module()
     plugin = _make_plugin(tmp_path)
     plugin._aliases["lan"] = "eth0"
-    plugin._register_interface_macros()
+    plugin.macros = mod.NetworkingMacros(plugin)
     assert macro_registry.resolve("$interface.lan.other") is None
     macro_registry.unregister("$interface")
 
 
 def test_interface_macro_missing_field_returns_none(tmp_path):
     from plugin_system.core.macros import macro_registry
+    mod = _load_module()
     plugin = _make_plugin(tmp_path)
     plugin._aliases["lan"] = "eth0"
-    plugin._register_interface_macros()
+    plugin.macros = mod.NetworkingMacros(plugin)
     # no field — resolves to the alias subtree Box, not a leaf
     result = macro_registry.resolve("$interface.lan")
     assert result is None or not isinstance(result, str)
@@ -1605,19 +1624,23 @@ def test_interface_macro_no_args_returns_none(tmp_path):
 
 
 def test_macro_snapshot_includes_name_and_address(tmp_path):
+    mod = _load_module()
     plugin = _make_plugin(tmp_path)
     plugin._aliases["lan"] = "eth0"
     plugin._interfaces["eth0"] = {"addresses": ["10.0.0.1/24"]}
-    snap = plugin.macro_snapshot()
+    plugin.macros = mod.NetworkingMacros(plugin)
+    snap = plugin.macros.macro_snapshot()
     assert snap["interface"]["lan.name"] == "eth0"
     assert snap["interface"]["lan.address"] == ["10.0.0.1"]
 
 
 def test_macro_snapshot_omits_address_when_none(tmp_path):
+    mod = _load_module()
     plugin = _make_plugin(tmp_path)
     plugin._aliases["lan"] = "eth0"
     plugin._interfaces["eth0"] = {}
-    snap = plugin.macro_snapshot()
+    plugin.macros = mod.NetworkingMacros(plugin)
+    snap = plugin.macros.macro_snapshot()
     assert "lan.address" not in snap["interface"]
     assert snap["interface"]["lan.name"] == "eth0"
 

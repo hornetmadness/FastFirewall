@@ -65,10 +65,9 @@ from models import (  # noqa: E402
     VerdictMapKeyBody,
 )
 
-from plugin_system.core import ApiRouterPlugin, PluginBase, PluginStateFile, Service
-from plugin_system.core.decorators import on
+from plugin_system.core import ApiRouterAspect, PluginBase, PluginStateFile, Service
 from plugin_system.core.events import Event, bus
-from plugin_system.core.macros import extract_macros, macro_registry
+from plugin_system.core.macros import macro_registry
 
 
 def _rule_hash(data: dict) -> str:
@@ -84,14 +83,98 @@ _DEFAULT_CHAINS: dict[str, dict] = {
 
 
 
+# ── API aspect ─────────────────────────────────────────────────────────────────
+
+class FirewallAPI(ApiRouterAspect):
+    def __init__(self, core: "FirewallPlugin") -> None:
+        super().__init__(core)
+        add = self.router.add_api_route
+        _admin = [require_role("admin")]
+        _w = "https://wiki.nftables.org/wiki-nftables/index.php"
+        # filter rules
+        _d = f"[nftables rule management]({_w}/Simple_rule_management)"
+        add("/rules",                       core._list_rules,          methods=["GET"],    summary="List firewall rules",            description=_d, dependencies=_admin)
+        add("/rules",                       core._create_rule,         methods=["POST"],   summary="Create a firewall rule",         description=_d, status_code=201, dependencies=_admin)
+        add("/rules/{rule_id}",             core._get_rule,            methods=["GET"],    summary="Get a firewall rule",            description=_d, dependencies=_admin)
+        add("/rules/{rule_id}",             core._update_rule,         methods=["PUT"],    summary="Update a firewall rule",         description=_d, dependencies=_admin)
+        add("/rules/{rule_id}",             core._delete_rule,         methods=["DELETE"], summary="Delete a firewall rule",         description=_d, dependencies=_admin)
+        # chains
+        _d = f"[nftables chain configuration]({_w}/Configuring_chains)"
+        add("/chains",                      core._list_chains,         methods=["GET"],    summary="List chains and their policies", description=_d, dependencies=_admin)
+        add("/chains/{chain_name}",         core._get_chain,           methods=["GET"],    summary="Get a chain",                    description=_d, dependencies=_admin)
+        add("/chains/{chain_name}",         core._update_chain,        methods=["PUT"],    summary="Update chain policy or priority",description=_d, dependencies=_admin)
+        # named sets (§3)
+        _d = f"[nftables sets]({_w}/Sets)"
+        add("/sets",                        core._list_sets,           methods=["GET"],    summary="List named sets",                description=_d, dependencies=_admin)
+        add("/sets",                        core._create_set,          methods=["POST"],   summary="Create a named set",             description=_d, status_code=201, dependencies=_admin)
+        add("/sets/{set_name}",             core._get_set,             methods=["GET"],    summary="Get a named set",                description=_d, dependencies=_admin)
+        add("/sets/{set_name}",             core._delete_set,          methods=["DELETE"], summary="Delete a named set",             description=_d, dependencies=_admin)
+        add("/sets/{set_name}/elements",    core._add_set_elements,    methods=["POST"],   summary="Add elements to a set",          description=_d, dependencies=_admin)
+        add("/sets/{set_name}/elements",    core._remove_set_elements, methods=["DELETE"], summary="Remove elements from a set",     description=_d, dependencies=_admin)
+        # custom chains (§10)
+        _d = f"[nftables chain configuration]({_w}/Configuring_chains)"
+        add("/custom-chains",               core._list_custom_chains,  methods=["GET"],    summary="List custom chains",             description=_d, dependencies=_admin)
+        add("/custom-chains",               core._create_custom_chain, methods=["POST"],   summary="Create a custom chain",          description=_d, status_code=201, dependencies=_admin)
+        add("/custom-chains/{cc_name}",     core._get_custom_chain,    methods=["GET"],    summary="Get a custom chain",             description=_d, dependencies=_admin)
+        add("/custom-chains/{cc_name}",     core._delete_custom_chain, methods=["DELETE"], summary="Delete a custom chain",          description=_d, dependencies=_admin)
+        # flowtables (§7)
+        _d = f"[nftables flowtables]({_w}/Flowtables)"
+        add("/flowtables",                  core._list_flowtables,     methods=["GET"],    summary="List flowtables",                description=_d, dependencies=_admin)
+        add("/flowtables",                  core._create_flowtable,    methods=["POST"],   summary="Create a flowtable",             description=_d, status_code=201, dependencies=_admin)
+        add("/flowtables/{ft_name}",        core._get_flowtable,       methods=["GET"],    summary="Get a flowtable",                description=_d, dependencies=_admin)
+        add("/flowtables/{ft_name}",        core._delete_flowtable,    methods=["DELETE"], summary="Delete a flowtable",             description=_d, dependencies=_admin)
+        # NAT rules (§4)
+        _d = f"[nftables NAT]({_w}/Performing_Network_Address_Translation_(NAT))"
+        add("/nat/rules",                   core._list_nat_rules,      methods=["GET"],    summary="List NAT rules",                 description=_d, dependencies=_admin)
+        add("/nat/rules",                   core._create_nat_rule,     methods=["POST"],   summary="Create a NAT rule",              description=_d, status_code=201, dependencies=_admin)
+        add("/nat/rules/{rule_id}",         core._get_nat_rule,        methods=["GET"],    summary="Get a NAT rule",                 description=_d, dependencies=_admin)
+        add("/nat/rules/{rule_id}",         core._update_nat_rule,     methods=["PUT"],    summary="Update a NAT rule",              description=_d, dependencies=_admin)
+        add("/nat/rules/{rule_id}",         core._delete_nat_rule,     methods=["DELETE"], summary="Delete a NAT rule",              description=_d, dependencies=_admin)
+        # ingress rules (§11) — netdev family, per-device early drop
+        _d = f"[nftables netdev / ingress]({_w}/Nftables_families#netdev)"
+        add("/ingress/rules",               core._list_ingress_rules,  methods=["GET"],    summary="List ingress rules",             description=_d, dependencies=_admin)
+        add("/ingress/rules",               core._create_ingress_rule, methods=["POST"],   summary="Create an ingress rule",         description=_d, status_code=201, dependencies=_admin)
+        add("/ingress/rules/{rule_id}",     core._get_ingress_rule,    methods=["GET"],    summary="Get an ingress rule",            description=_d, dependencies=_admin)
+        add("/ingress/rules/{rule_id}",     core._update_ingress_rule, methods=["PUT"],    summary="Update an ingress rule",         description=_d, dependencies=_admin)
+        add("/ingress/rules/{rule_id}",     core._delete_ingress_rule, methods=["DELETE"], summary="Delete an ingress rule",         description=_d, dependencies=_admin)
+        # quotas (§8)
+        _d = f"[nftables quotas]({_w}/Matching_packet_rate_limiting#Quotas)"
+        add("/quotas",                      core._list_quotas,         methods=["GET"],    summary="List named quotas",              description=_d, dependencies=_admin)
+        add("/quotas",                      core._create_quota,        methods=["POST"],   summary="Create a named quota",           description=_d, status_code=201, dependencies=_admin)
+        add("/quotas/{quota_name}",         core._get_quota,           methods=["GET"],    summary="Get a named quota",              description=_d, dependencies=_admin)
+        add("/quotas/{quota_name}",         core._delete_quota,        methods=["DELETE"], summary="Delete a named quota",           description=_d, dependencies=_admin)
+        # verdict maps (§12)
+        _d = f"[nftables verdict maps]({_w}/Verdict_Maps_(vmaps))"
+        add("/maps",                        core._list_verdict_maps,          methods=["GET"],    summary="List verdict maps",                    description=_d, dependencies=_admin)
+        add("/maps",                        core._create_verdict_map,         methods=["POST"],   summary="Create a verdict map",                 description=_d, status_code=201, dependencies=_admin)
+        add("/maps/{map_name}",             core._get_verdict_map,            methods=["GET"],    summary="Get a verdict map",                    description=_d, dependencies=_admin)
+        add("/maps/{map_name}",             core._delete_verdict_map,         methods=["DELETE"], summary="Delete a verdict map",                 description=_d, dependencies=_admin)
+        add("/maps/{map_name}/entries",     core._add_verdict_map_entries,    methods=["POST"],   summary="Add entries to a verdict map",         description=_d, dependencies=_admin)
+        add("/maps/{map_name}/entries",     core._remove_verdict_map_entries, methods=["DELETE"], summary="Remove entries from a verdict map by key", description=_d, dependencies=_admin)
+        # counters (§8) — read-only live-state views
+        _d = f"[nftables counters]({_w}/Counters)"
+        add("/counters",                      core._list_counters, methods=["GET"],  summary="Live counter values from kernel",  description=_d, dependencies=_admin)
+        add("/counters/{counter_name}/reset", core._reset_counter, methods=["POST"], summary="Atomically reset a named counter", description=_d, dependencies=_admin)
+        # table / apply / compile / status
+        _d = f"[nftables operations at ruleset level]({_w}/Operations_at_ruleset_level)"
+        add("/table",      core._get_table, methods=["GET"],  summary="Show current table configuration",          description=_d, dependencies=_admin)
+        add("/check",      core._check,     methods=["POST"], summary="Dry-run validate (no apply)",               description=_d, dependencies=_admin)
+        add("/apply",      core._apply,     methods=["POST"], summary="Compile and apply rules to nftables",       description=_d, dependencies=_admin)
+        add("/compile",    core._compile,   methods=["POST"], summary="Compile rules to nft script (preview only)",description=_d, dependencies=_admin)
+        add("/discard",    core._discard,   methods=["POST"], summary="Revert pending changes to last applied state", dependencies=_admin)
+        add("/live-state", core._live_state,methods=["GET"],  summary="Live kernel ruleset (nft -j list table)",   description=_d, dependencies=_admin)
+        add("/status",     core._status,    methods=["GET"],  summary="Plugin status", dependencies=_admin)
+
+
 # ── plugin class ───────────────────────────────────────────────────────────────
 
-class FirewallPlugin(PluginBase, ApiRouterPlugin):
+class FirewallPlugin(PluginBase):
     services = [Service.FIREWALL]
+    api = FirewallAPI
 
     # ── lifecycle ──────────────────────────────────────────────────────
 
-    def setup(self) -> None:
+    def configure(self) -> None:
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "state_file", "firewall_state.json", self.logger,
             mutation_model="deferred", data_dir=self.data_dir, plugin_version=self.meta["version"],
@@ -111,10 +194,11 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         self._verdict_maps: dict[str, VerdictMap] = {}
         self._quotas: dict[str, FirewallQuota] = {}
         self._load_state()
+
+    def setup(self) -> None:
         if not self.config.get("ignore_state_on_boot", False):
             self._apply_state()
         self.logger.info("Loaded %d rules from %r", len(self._rules), self._state_file.path)
-        self._register_routes()
         self._sync_os_boot_service()
 
     def _sync_os_boot_service(self) -> None:
@@ -135,20 +219,6 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         self._save_state()
         self.logger.info("Shut down — state saved")
 
-    @on("plugins.all_loaded")
-    def _on_plugins_loaded(self, event: Event) -> None:
-        if self.config.get("ignore_state_on_boot", False):
-            return
-        current = self._collect_macro_snapshot()
-        if not current:
-            return
-        stored = self._state_file.get_macro_snapshot()
-        if stored == current:
-            return
-        changed = {k for k in current if current.get(k) != (stored or {}).get(k)}
-        self.logger.info("Macro values changed since last apply (%s) — re-applying", ", ".join(sorted(changed)))
-        self._apply_state()
-
     # ── persistence ────────────────────────────────────────────────────
 
     def _desired_snapshot(self) -> dict:
@@ -166,10 +236,6 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
 
     def _save_state(self) -> None:
         self._state_file.save_desired(self._desired_snapshot())
-
-    def _collect_macro_snapshot(self) -> dict:
-        macros = extract_macros(self._desired_snapshot())
-        return {m: macro_registry.resolve(m) for m in sorted(macros)}
 
     def _load_state(self) -> None:
         fresh_install = not self._state_file.path.exists()
@@ -265,7 +331,6 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
                 quotas=self._quotas,
             )
             self._apply_nft_script(script)
-            self._state_file.set_macro_snapshot(self._collect_macro_snapshot())
             self._state_file.commit(self._desired_snapshot())
             self.logger.info("Re-applied %d rules on boot", len(enabled))
         except Exception as exc:
@@ -292,86 +357,6 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
             text=True,
         )
         return result.returncode == 0, result.stderr.strip()
-
-    # ── route registration ─────────────────────────────────────────────
-
-    def _register_routes(self) -> None:
-        add = self.router.add_api_route
-        _admin = [require_role("admin")]
-        _w = "https://wiki.nftables.org/wiki-nftables/index.php"
-        # filter rules
-        _d = f"[nftables rule management]({_w}/Simple_rule_management)"
-        add("/rules",                       self._list_rules,          methods=["GET"],    summary="List firewall rules",            description=_d, dependencies=_admin)
-        add("/rules",                       self._create_rule,         methods=["POST"],   summary="Create a firewall rule",         description=_d, status_code=201, dependencies=_admin)
-        add("/rules/{rule_id}",             self._get_rule,            methods=["GET"],    summary="Get a firewall rule",            description=_d, dependencies=_admin)
-        add("/rules/{rule_id}",             self._update_rule,         methods=["PUT"],    summary="Update a firewall rule",         description=_d, dependencies=_admin)
-        add("/rules/{rule_id}",             self._delete_rule,         methods=["DELETE"], summary="Delete a firewall rule",         description=_d, dependencies=_admin)
-        # chains
-        _d = f"[nftables chain configuration]({_w}/Configuring_chains)"
-        add("/chains",                      self._list_chains,         methods=["GET"],    summary="List chains and their policies", description=_d, dependencies=_admin)
-        add("/chains/{chain_name}",         self._get_chain,           methods=["GET"],    summary="Get a chain",                    description=_d, dependencies=_admin)
-        add("/chains/{chain_name}",         self._update_chain,        methods=["PUT"],    summary="Update chain policy or priority",description=_d, dependencies=_admin)
-        # named sets (§3)
-        _d = f"[nftables sets]({_w}/Sets)"
-        add("/sets",                        self._list_sets,           methods=["GET"],    summary="List named sets",                description=_d, dependencies=_admin)
-        add("/sets",                        self._create_set,          methods=["POST"],   summary="Create a named set",             description=_d, status_code=201, dependencies=_admin)
-        add("/sets/{set_name}",             self._get_set,             methods=["GET"],    summary="Get a named set",                description=_d, dependencies=_admin)
-        add("/sets/{set_name}",             self._delete_set,          methods=["DELETE"], summary="Delete a named set",             description=_d, dependencies=_admin)
-        add("/sets/{set_name}/elements",    self._add_set_elements,    methods=["POST"],   summary="Add elements to a set",          description=_d, dependencies=_admin)
-        add("/sets/{set_name}/elements",    self._remove_set_elements, methods=["DELETE"], summary="Remove elements from a set",     description=_d, dependencies=_admin)
-        # custom chains (§10)
-        _d = f"[nftables chain configuration]({_w}/Configuring_chains)"
-        add("/custom-chains",               self._list_custom_chains,  methods=["GET"],    summary="List custom chains",             description=_d, dependencies=_admin)
-        add("/custom-chains",               self._create_custom_chain, methods=["POST"],   summary="Create a custom chain",          description=_d, status_code=201, dependencies=_admin)
-        add("/custom-chains/{cc_name}",     self._get_custom_chain,    methods=["GET"],    summary="Get a custom chain",             description=_d, dependencies=_admin)
-        add("/custom-chains/{cc_name}",     self._delete_custom_chain, methods=["DELETE"], summary="Delete a custom chain",          description=_d, dependencies=_admin)
-        # flowtables (§7)
-        _d = f"[nftables flowtables]({_w}/Flowtables)"
-        add("/flowtables",                  self._list_flowtables,     methods=["GET"],    summary="List flowtables",                description=_d, dependencies=_admin)
-        add("/flowtables",                  self._create_flowtable,    methods=["POST"],   summary="Create a flowtable",             description=_d, status_code=201, dependencies=_admin)
-        add("/flowtables/{ft_name}",        self._get_flowtable,       methods=["GET"],    summary="Get a flowtable",                description=_d, dependencies=_admin)
-        add("/flowtables/{ft_name}",        self._delete_flowtable,    methods=["DELETE"], summary="Delete a flowtable",             description=_d, dependencies=_admin)
-        # NAT rules (§4)
-        _d = f"[nftables NAT]({_w}/Performing_Network_Address_Translation_(NAT))"
-        add("/nat/rules",                   self._list_nat_rules,      methods=["GET"],    summary="List NAT rules",                 description=_d, dependencies=_admin)
-        add("/nat/rules",                   self._create_nat_rule,     methods=["POST"],   summary="Create a NAT rule",              description=_d, status_code=201, dependencies=_admin)
-        add("/nat/rules/{rule_id}",         self._get_nat_rule,        methods=["GET"],    summary="Get a NAT rule",                 description=_d, dependencies=_admin)
-        add("/nat/rules/{rule_id}",         self._update_nat_rule,     methods=["PUT"],    summary="Update a NAT rule",              description=_d, dependencies=_admin)
-        add("/nat/rules/{rule_id}",         self._delete_nat_rule,     methods=["DELETE"], summary="Delete a NAT rule",              description=_d, dependencies=_admin)
-        # ingress rules (§11) — netdev family, per-device early drop
-        _d = f"[nftables netdev / ingress]({_w}/Nftables_families#netdev)"
-        add("/ingress/rules",               self._list_ingress_rules,  methods=["GET"],    summary="List ingress rules",             description=_d, dependencies=_admin)
-        add("/ingress/rules",               self._create_ingress_rule, methods=["POST"],   summary="Create an ingress rule",         description=_d, status_code=201, dependencies=_admin)
-        add("/ingress/rules/{rule_id}",     self._get_ingress_rule,    methods=["GET"],    summary="Get an ingress rule",            description=_d, dependencies=_admin)
-        add("/ingress/rules/{rule_id}",     self._update_ingress_rule, methods=["PUT"],    summary="Update an ingress rule",         description=_d, dependencies=_admin)
-        add("/ingress/rules/{rule_id}",     self._delete_ingress_rule, methods=["DELETE"], summary="Delete an ingress rule",         description=_d, dependencies=_admin)
-        # quotas (§8)
-        _d = f"[nftables quotas]({_w}/Matching_packet_rate_limiting#Quotas)"
-        add("/quotas",                      self._list_quotas,         methods=["GET"],    summary="List named quotas",              description=_d, dependencies=_admin)
-        add("/quotas",                      self._create_quota,        methods=["POST"],   summary="Create a named quota",           description=_d, status_code=201, dependencies=_admin)
-        add("/quotas/{quota_name}",         self._get_quota,           methods=["GET"],    summary="Get a named quota",              description=_d, dependencies=_admin)
-        add("/quotas/{quota_name}",         self._delete_quota,        methods=["DELETE"], summary="Delete a named quota",           description=_d, dependencies=_admin)
-        # verdict maps (§12)
-        _d = f"[nftables verdict maps]({_w}/Verdict_Maps_(vmaps))"
-        add("/maps",                        self._list_verdict_maps,          methods=["GET"],    summary="List verdict maps",                    description=_d, dependencies=_admin)
-        add("/maps",                        self._create_verdict_map,         methods=["POST"],   summary="Create a verdict map",                 description=_d, status_code=201, dependencies=_admin)
-        add("/maps/{map_name}",             self._get_verdict_map,            methods=["GET"],    summary="Get a verdict map",                    description=_d, dependencies=_admin)
-        add("/maps/{map_name}",             self._delete_verdict_map,         methods=["DELETE"], summary="Delete a verdict map",                 description=_d, dependencies=_admin)
-        add("/maps/{map_name}/entries",     self._add_verdict_map_entries,    methods=["POST"],   summary="Add entries to a verdict map",         description=_d, dependencies=_admin)
-        add("/maps/{map_name}/entries",     self._remove_verdict_map_entries, methods=["DELETE"], summary="Remove entries from a verdict map by key", description=_d, dependencies=_admin)
-        # counters (§8) — read-only live-state views
-        _d = f"[nftables counters]({_w}/Counters)"
-        add("/counters",                      self._list_counters, methods=["GET"],  summary="Live counter values from kernel",  description=_d, dependencies=_admin)
-        add("/counters/{counter_name}/reset", self._reset_counter, methods=["POST"], summary="Atomically reset a named counter", description=_d, dependencies=_admin)
-        # table / apply / compile / status
-        _d = f"[nftables operations at ruleset level]({_w}/Operations_at_ruleset_level)"
-        add("/table",      self._get_table, methods=["GET"],  summary="Show current table configuration",          description=_d, dependencies=_admin)
-        add("/check",      self._check,     methods=["POST"], summary="Dry-run validate (no apply)",               description=_d, dependencies=_admin)
-        add("/apply",      self._apply,     methods=["POST"], summary="Compile and apply rules to nftables",       description=_d, dependencies=_admin)
-        add("/compile",    self._compile,   methods=["POST"], summary="Compile rules to nft script (preview only)",description=_d, dependencies=_admin)
-        add("/discard",    self._discard,   methods=["POST"], summary="Revert pending changes to last applied state", dependencies=_admin)
-        add("/live-state", self._live_state,methods=["GET"],  summary="Live kernel ruleset (nft -j list table)",   description=_d, dependencies=_admin)
-        add("/status",     self._status,    methods=["GET"],  summary="Plugin status", dependencies=_admin)
 
     # ── rule CRUD ──────────────────────────────────────────────────────
 
@@ -845,7 +830,6 @@ class FirewallPlugin(PluginBase, ApiRouterPlugin):
         except RuntimeError:
             self.logger.error("Failed to apply compiled firewall rules", exc_info=True)
             raise HTTPException(500, "Failed to apply firewall rules; check server logs")
-        self._state_file.set_macro_snapshot(self._collect_macro_snapshot())
         self._state_file.commit()
         bus.emit(Event(
             name="firewall.applied",

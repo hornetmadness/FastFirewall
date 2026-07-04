@@ -52,6 +52,8 @@ def _make_plugin(tmp_path, config=None):
     plugin.plugin_dir = tmp_path
     plugin.logger = logging.getLogger("test.syslog")
     plugin._pyinfra_run = MagicMock()
+    plugin.configure()
+    plugin.api = mod.SyslogAPI(plugin)
     with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
         plugin.setup()
     return plugin
@@ -59,7 +61,7 @@ def _make_plugin(tmp_path, config=None):
 
 def _make_client(plugin) -> TestClient:
     app = FastAPI()
-    app.include_router(plugin.router, prefix="/v1/syslog")
+    app.include_router(plugin.api.router, prefix="/v1/syslog")
     app.dependency_overrides[get_current_user] = lambda: AuthUser(username="test", roles=["admin"])
     return TestClient(app)
 

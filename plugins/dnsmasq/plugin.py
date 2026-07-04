@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from fastapi import Depends, HTTPException
 from ff_auth import require_role
-from plugin_system.core import ApiRouterPlugin, PluginBase, PluginStateFile, Service
+from plugin_system.core import ApiRouterAspect, PluginBase, PluginStateFile, Service
 from plugin_system.core.events import Event, bus
 
 from .libs.blocklist import BlocklistMixin
@@ -67,10 +67,65 @@ def _default_mdns() -> dict[str, Any]:
     return {"enabled": False, "interfaces": []}
 
 
+# ── API routes ──────────────────────────────────────────────────────────────────
+
+class DnsmasqAPI(ApiRouterAspect):
+    def __init__(self, core: "DnsmasqPlugin") -> None:
+        super().__init__(core)
+        add = self.router.add_api_route
+        _admin = [require_role("admin")]
+
+        add("/status",                            core._status,              methods=["GET"],    summary="Plugin status and counts", dependencies=_admin)
+
+        add("/dns",                               core._get_dns,             methods=["GET"],    summary="Get DNS config", dependencies=_admin)
+        add("/dns",                               core._update_dns,          methods=["PUT"],    summary="Update DNS config", dependencies=_admin)
+        add("/dns/records",                       core._list_records,        methods=["GET"],    summary="List DNS records", dependencies=_admin)
+        add("/dns/records",                       core._add_record,          methods=["POST"],   summary="Add a DNS record", status_code=201, dependencies=_admin)
+        add("/dns/records/{record_id}",           core._delete_record,       methods=["DELETE"], summary="Remove a DNS record", dependencies=_admin)
+
+        add("/dhcp",                              core._get_dhcp,            methods=["GET"],    summary="Get DHCP config", dependencies=_admin)
+        add("/dhcp",                              core._update_dhcp,         methods=["PUT"],    summary="Update DHCP config", dependencies=_admin)
+        add("/dhcp/ranges",                       core._list_ranges,         methods=["GET"],    summary="List DHCP ranges", dependencies=_admin)
+        add("/dhcp/ranges",                       core._add_range,           methods=["POST"],   summary="Add a DHCP range", status_code=201, dependencies=_admin)
+        add("/dhcp/ranges/{range_id}",            core._update_range,        methods=["PUT"],    summary="Update a DHCP range", dependencies=_admin)
+        add("/dhcp/ranges/{range_id}",            core._delete_range,        methods=["DELETE"], summary="Remove a DHCP range", dependencies=_admin)
+        add("/dhcp/leases",                       core._live_leases,         methods=["GET"],    summary="Live DHCP leases (from lease file)", dependencies=_admin)
+        add("/dhcp/static-leases",                core._list_static_leases,  methods=["GET"],    summary="List static DHCP leases", dependencies=_admin)
+        add("/dhcp/static-leases",                core._add_static_lease,    methods=["POST"],   summary="Add a static DHCP lease", status_code=201, dependencies=_admin)
+        add("/dhcp/static-leases/{lease_id}",     core._update_static_lease, methods=["PUT"],    summary="Update a static DHCP lease", dependencies=_admin)
+        add("/dhcp/static-leases/{lease_id}",     core._delete_static_lease, methods=["DELETE"], summary="Remove a static DHCP lease", dependencies=_admin)
+
+        add("/tftp",                              core._get_tftp,            methods=["GET"],    summary="Get TFTP config", dependencies=_admin)
+        add("/tftp",                              core._update_tftp,         methods=["PUT"],    summary="Update TFTP config", dependencies=_admin)
+
+        add("/pxe",                               core._get_pxe,             methods=["GET"],    summary="Get PXE config", dependencies=_admin)
+        add("/pxe",                               core._update_pxe,          methods=["PUT"],    summary="Update PXE config", dependencies=_admin)
+        add("/pxe/services",                      core._list_pxe_services,   methods=["GET"],    summary="List PXE service entries", dependencies=_admin)
+        add("/pxe/services",                      core._add_pxe_service,     methods=["POST"],   summary="Add a PXE service entry", status_code=201, dependencies=_admin)
+        add("/pxe/services/{index}",              core._delete_pxe_service,  methods=["DELETE"], summary="Remove a PXE service entry by index", dependencies=_admin)
+        add("/pxe/images",                        core._list_pxe_images,     methods=["GET"],    summary="List PXE images in data_dir", dependencies=_admin)
+        add("/pxe/images",                        core._upload_pxe_image,    methods=["POST"],   summary="Upload a PXE image", status_code=201, dependencies=_admin)
+        add("/pxe/images/{filename}",             core._get_pxe_image,       methods=["GET"],    summary="Get PXE image metadata", dependencies=_admin)
+        add("/pxe/images/{filename}",             core._delete_pxe_image,    methods=["DELETE"], summary="Delete a PXE image", dependencies=_admin)
+        add("/pxe/images/{filename}/rename",      core._rename_pxe_image,    methods=["POST"],   summary="Rename a PXE image", dependencies=_admin)
+
+        add("/mdns",                              core._get_mdns,            methods=["GET"],    summary="Get mDNS config", dependencies=_admin)
+        add("/mdns",                              core._update_mdns,         methods=["PUT"],    summary="Update mDNS config", dependencies=_admin)
+
+        add("/blocklists",                        core._list_blocklists,     methods=["GET"],    summary="List blocklists", dependencies=_admin)
+        add("/blocklists",                        core._add_blocklist,       methods=["POST"],   summary="Add a blocklist (fetches immediately)", status_code=201, dependencies=_admin)
+        add("/blocklists/{blocklist_id}",         core._delete_blocklist,    methods=["DELETE"], summary="Remove a blocklist", dependencies=_admin)
+        add("/blocklists/{blocklist_id}/refresh", core._refresh_blocklist,   methods=["POST"],   summary="Re-fetch a blocklist from its URL", dependencies=_admin)
+
+        add("/config",                            core._get_config,          methods=["GET"],    summary="Full dnsmasq config text", dependencies=_admin)
+        add("/apply",                             core._apply,               methods=["POST"],   summary="Write config and restart dnsmasq", dependencies=_admin)
+        add("/check",                             core._check,               methods=["POST"],   summary="Validate config (dnsmasq --test)", dependencies=_admin)
+        add("/discard",                           core._discard,             methods=["POST"],   summary="Discard pending changes", dependencies=_admin)
+
+
 # ── plugin class ───────────────────────────────────────────────────────────────
 
-class DnsmasqPlugin(PluginBase, ApiRouterPlugin,
-                    DnsMixin, DhcpMixin, TftpMixin, PxeMixin, MdnsMixin, BlocklistMixin):
+class DnsmasqPlugin(PluginBase, DnsMixin, DhcpMixin, TftpMixin, PxeMixin, MdnsMixin, BlocklistMixin):
     services = [
         Service.DNS,
         Service.DHCP,
@@ -78,8 +133,9 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin,
         Service.PXE,
         Service.MDNS,
     ]
+    api = DnsmasqAPI
 
-    def setup(self) -> None:
+    def configure(self) -> None:
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "state_file", "dnsmasq_state.json", self.logger,
             mutation_model="deferred", data_dir=self.data_dir, plugin_version=self.meta["version"],
@@ -95,9 +151,10 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin,
         self._mdns: dict[str, Any] = {}
         self._blocklists: dict[str, dict[str, Any]] = {}
         self._load_state()
+
+    def setup(self) -> None:
         if not self.config.get("ignore_state_on_boot", False):
             self._apply_state()
-        self._register_routes()
         self._sync_os_boot_service()
         self.logger.info(
             "DNSMasq plugin loaded: %d DNS record(s), %d DHCP range(s), %d blocklist(s)",
@@ -260,59 +317,6 @@ class DnsmasqPlugin(PluginBase, ApiRouterPlugin,
         r = subprocess.run(["sudo", "touch", path], capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             self.logger.warning("Could not create lease file %r: %s", path, r.stderr.strip())
-
-    # ── route registration ─────────────────────────────────────────────
-
-    def _register_routes(self) -> None:
-        add = self.router.add_api_route
-        _admin = [require_role("admin")]
-
-        add("/status",                            self._status,              methods=["GET"],    summary="Plugin status and counts", dependencies=_admin)
-
-        add("/dns",                               self._get_dns,             methods=["GET"],    summary="Get DNS config", dependencies=_admin)
-        add("/dns",                               self._update_dns,          methods=["PUT"],    summary="Update DNS config", dependencies=_admin)
-        add("/dns/records",                       self._list_records,        methods=["GET"],    summary="List DNS records", dependencies=_admin)
-        add("/dns/records",                       self._add_record,          methods=["POST"],   summary="Add a DNS record", status_code=201, dependencies=_admin)
-        add("/dns/records/{record_id}",           self._delete_record,       methods=["DELETE"], summary="Remove a DNS record", dependencies=_admin)
-
-        add("/dhcp",                              self._get_dhcp,            methods=["GET"],    summary="Get DHCP config", dependencies=_admin)
-        add("/dhcp",                              self._update_dhcp,         methods=["PUT"],    summary="Update DHCP config", dependencies=_admin)
-        add("/dhcp/ranges",                       self._list_ranges,         methods=["GET"],    summary="List DHCP ranges", dependencies=_admin)
-        add("/dhcp/ranges",                       self._add_range,           methods=["POST"],   summary="Add a DHCP range", status_code=201, dependencies=_admin)
-        add("/dhcp/ranges/{range_id}",            self._update_range,        methods=["PUT"],    summary="Update a DHCP range", dependencies=_admin)
-        add("/dhcp/ranges/{range_id}",            self._delete_range,        methods=["DELETE"], summary="Remove a DHCP range", dependencies=_admin)
-        add("/dhcp/leases",                       self._live_leases,         methods=["GET"],    summary="Live DHCP leases (from lease file)", dependencies=_admin)
-        add("/dhcp/static-leases",                self._list_static_leases,  methods=["GET"],    summary="List static DHCP leases", dependencies=_admin)
-        add("/dhcp/static-leases",                self._add_static_lease,    methods=["POST"],   summary="Add a static DHCP lease", status_code=201, dependencies=_admin)
-        add("/dhcp/static-leases/{lease_id}",     self._update_static_lease, methods=["PUT"],    summary="Update a static DHCP lease", dependencies=_admin)
-        add("/dhcp/static-leases/{lease_id}",     self._delete_static_lease, methods=["DELETE"], summary="Remove a static DHCP lease", dependencies=_admin)
-
-        add("/tftp",                              self._get_tftp,            methods=["GET"],    summary="Get TFTP config", dependencies=_admin)
-        add("/tftp",                              self._update_tftp,         methods=["PUT"],    summary="Update TFTP config", dependencies=_admin)
-
-        add("/pxe",                               self._get_pxe,             methods=["GET"],    summary="Get PXE config", dependencies=_admin)
-        add("/pxe",                               self._update_pxe,          methods=["PUT"],    summary="Update PXE config", dependencies=_admin)
-        add("/pxe/services",                      self._list_pxe_services,   methods=["GET"],    summary="List PXE service entries", dependencies=_admin)
-        add("/pxe/services",                      self._add_pxe_service,     methods=["POST"],   summary="Add a PXE service entry", status_code=201, dependencies=_admin)
-        add("/pxe/services/{index}",              self._delete_pxe_service,  methods=["DELETE"], summary="Remove a PXE service entry by index", dependencies=_admin)
-        add("/pxe/images",                        self._list_pxe_images,     methods=["GET"],    summary="List PXE images in data_dir", dependencies=_admin)
-        add("/pxe/images",                        self._upload_pxe_image,    methods=["POST"],   summary="Upload a PXE image", status_code=201, dependencies=_admin)
-        add("/pxe/images/{filename}",             self._get_pxe_image,       methods=["GET"],    summary="Get PXE image metadata", dependencies=_admin)
-        add("/pxe/images/{filename}",             self._delete_pxe_image,    methods=["DELETE"], summary="Delete a PXE image", dependencies=_admin)
-        add("/pxe/images/{filename}/rename",      self._rename_pxe_image,    methods=["POST"],   summary="Rename a PXE image", dependencies=_admin)
-
-        add("/mdns",                              self._get_mdns,            methods=["GET"],    summary="Get mDNS config", dependencies=_admin)
-        add("/mdns",                              self._update_mdns,         methods=["PUT"],    summary="Update mDNS config", dependencies=_admin)
-
-        add("/blocklists",                        self._list_blocklists,     methods=["GET"],    summary="List blocklists", dependencies=_admin)
-        add("/blocklists",                        self._add_blocklist,       methods=["POST"],   summary="Add a blocklist (fetches immediately)", status_code=201, dependencies=_admin)
-        add("/blocklists/{blocklist_id}",         self._delete_blocklist,    methods=["DELETE"], summary="Remove a blocklist", dependencies=_admin)
-        add("/blocklists/{blocklist_id}/refresh", self._refresh_blocklist,   methods=["POST"],   summary="Re-fetch a blocklist from its URL", dependencies=_admin)
-
-        add("/config",                            self._get_config,          methods=["GET"],    summary="Full dnsmasq config text", dependencies=_admin)
-        add("/apply",                             self._apply,               methods=["POST"],   summary="Write config and restart dnsmasq", dependencies=_admin)
-        add("/check",                             self._check,               methods=["POST"],   summary="Validate config (dnsmasq --test)", dependencies=_admin)
-        add("/discard",                           self._discard,             methods=["POST"],   summary="Discard pending changes", dependencies=_admin)
 
     # ── status ─────────────────────────────────────────────────────────
 

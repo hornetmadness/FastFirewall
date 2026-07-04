@@ -42,7 +42,7 @@ from pyinfra.operations import systemd as systemd_ops
 from plugin_system.core.macros import macro_registry
 
 from infra import pyinfra_run_batch
-from plugin_system.core import ApiRouterPlugin, PluginBase, PluginStateFile, Service
+from plugin_system.core import ApiRouterAspect, PluginBase, PluginStateFile, Service
 from plugin_system.core.decorators import on
 from plugin_system.core.events import Event, bus
 
@@ -93,12 +93,33 @@ _DEFAULT_STATE: dict[str, Any] = {
 }
 
 
+# ── API routes ───────────────────────────────────────────────────────────────
+
+class CaddyAPI(ApiRouterAspect):
+    def __init__(self, core: "CaddyPlugin") -> None:
+        super().__init__(core)
+        add = self.router.add_api_route
+        _admin = [require_role("admin")]
+        add("/status",             core._status,          methods=["GET"],    summary="Plugin status and pending-changes flag", dependencies=_admin)
+        add("/config/apps",        core._list_apps,       methods=["GET"],    summary="List registered proxy apps", dependencies=_admin)
+        add("/config/apps",        core._add_app,         methods=["POST"],   summary="Register a proxy app", status_code=201, dependencies=_admin)
+        add("/config/apps/{name}", core._get_app,         methods=["GET"],    summary="Get one proxy app", dependencies=_admin)
+        add("/config/apps/{name}", core._update_app,      methods=["PUT"],    summary="Replace a proxy app", dependencies=_admin)
+        add("/config/apps/{name}", core._delete_app,      methods=["DELETE"], summary="Remove a proxy app", status_code=204, dependencies=_admin)
+        add("/config/settings",    core._get_settings,    methods=["GET"],    summary="Get global proxy settings", dependencies=_admin)
+        add("/config/settings",    core._update_settings, methods=["PATCH"],  summary="Update global proxy settings", dependencies=_admin)
+        add("/check",              core._check,           methods=["POST"],   summary="Preview generated Caddy config (dry-run)", dependencies=_admin)
+        add("/apply",              core._apply,           methods=["POST"],   summary="Apply Caddy config", dependencies=_admin)
+        add("/discard",            core._discard,         methods=["POST"],   summary="Discard pending changes", dependencies=_admin)
+
+
 # ── Plugin ───────────────────────────────────────────────────────────────────
 
-class CaddyPlugin(PluginBase, ApiRouterPlugin):
+class CaddyPlugin(PluginBase):
     services = [Service.APP_PROXY]
+    api = CaddyAPI
 
-    def setup(self) -> None:
+    def configure(self) -> None:
         self._system_conf = Path(
             self.config.get("system_conf_file", "/etc/caddy/caddy.json")
         )
@@ -108,13 +129,16 @@ class CaddyPlugin(PluginBase, ApiRouterPlugin):
         )
         self._state: dict[str, Any] = self._state_file.load_desired(default=dict(_DEFAULT_STATE))
 
-        self._register_routes()
-
         self.logger.info(
             "Caddy plugin loaded: %d app(s), config=%s",
             len(self._state.get("apps", {})),
             self._data_config_path(),
         )
+
+    def setup(self) -> None:
+        if self.config.get("ignore_state_on_boot", False):
+            return
+        self._apply_state()
 
     def teardown(self) -> None:
         self._save_state()
@@ -140,23 +164,6 @@ class CaddyPlugin(PluginBase, ApiRouterPlugin):
         success, err = pyinfra_run_batch([(op.__module__, op.__name__, norm_kwargs)])[0]
         if not success:
             raise RuntimeError(f"pyinfra '{op.__name__}' failed:\n{err}")
-
-    # ── route registration ───────────────────────────────────────────────────
-
-    def _register_routes(self) -> None:
-        add = self.router.add_api_route
-        _admin = [require_role("admin")]
-        add("/status",             self._status,          methods=["GET"],    summary="Plugin status and pending-changes flag", dependencies=_admin)
-        add("/config/apps",        self._list_apps,       methods=["GET"],    summary="List registered proxy apps", dependencies=_admin)
-        add("/config/apps",        self._add_app,         methods=["POST"],   summary="Register a proxy app", status_code=201, dependencies=_admin)
-        add("/config/apps/{name}", self._get_app,         methods=["GET"],    summary="Get one proxy app", dependencies=_admin)
-        add("/config/apps/{name}", self._update_app,      methods=["PUT"],    summary="Replace a proxy app", dependencies=_admin)
-        add("/config/apps/{name}", self._delete_app,      methods=["DELETE"], summary="Remove a proxy app", status_code=204, dependencies=_admin)
-        add("/config/settings",    self._get_settings,    methods=["GET"],    summary="Get global proxy settings", dependencies=_admin)
-        add("/config/settings",    self._update_settings, methods=["PATCH"],  summary="Update global proxy settings", dependencies=_admin)
-        add("/check",              self._check,           methods=["POST"],   summary="Preview generated Caddy config (dry-run)", dependencies=_admin)
-        add("/apply",              self._apply,           methods=["POST"],   summary="Apply Caddy config", dependencies=_admin)
-        add("/discard",            self._discard,         methods=["POST"],   summary="Discard pending changes", dependencies=_admin)
 
     # ── event handlers ───────────────────────────────────────────────────────
 
@@ -184,17 +191,6 @@ class CaddyPlugin(PluginBase, ApiRouterPlugin):
             del self._state["apps"][name]
             self._save_state()
             self.logger.debug("app_proxy.unregister: removed '%s'", name)
-
-    @on("plugins.all_loaded")
-    def _on_plugins_loaded(self, event: Event) -> None:
-        """Apply state once all plugins have loaded and macros are registered."""
-        if self.config.get("ignore_state_on_boot", False):
-            return
-        self.logger.info("Applying Caddy config now that all plugins are loaded")
-        try:
-            self._apply_state()
-        except Exception:
-            self.logger.error("Caddy apply failed on plugins.all_loaded", exc_info=True)
 
     # ── API handlers ─────────────────────────────────────────────────────────
 

@@ -46,7 +46,7 @@ from pyinfra.operations import server as server_ops
 from pyinfra.operations import systemd as systemd_ops
 
 from infra import pyinfra_run_batch
-from plugin_system.core import PluginBase, PluginStateFile, ApiRouterPlugin, MacroProviderPlugin, Service
+from plugin_system.core import PluginBase, PluginStateFile, ApiRouterAspect, MacroProviderAspect, Service
 from plugin_system.core.decorators import on
 from plugin_system.core.events import Event, bus
 
@@ -106,10 +106,82 @@ class KernmodBody(BaseModel):
     persist: bool = True
 
 
+# ── API routes ─────────────────────────────────────────────────────────────────
+
+class HostAPI(ApiRouterAspect):
+    def __init__(self, core: "HostPlugin") -> None:
+        super().__init__(core)
+        add = self.router.add_api_route
+        _admin = [require_role("admin")]
+
+        add("/status",              core._status,           methods=["GET"],    summary="Plugin status and managed-resource counts", dependencies=_admin)
+
+        add("/hostname",            core._get_hostname,     methods=["GET"],    summary="Get current hostname", dependencies=_admin)
+        add("/hostname",            core._set_hostname,     methods=["PUT"],    summary="Set system hostname", dependencies=_admin)
+
+        add("/domainname",          core._get_domainname,   methods=["GET"],    summary="Get managed domain name", dependencies=_admin)
+        add("/domainname",          core._set_domainname,   methods=["PUT"],    summary="Set system domain name", dependencies=_admin)
+        add("/domainname",          core._delete_domainname, methods=["DELETE"], summary="Remove managed domain name", dependencies=_admin)
+
+        add("/sysctl",                     core._list_sysctl,      methods=["GET"],    summary="List all sysctl parameters with ff_managed flag", dependencies=_admin)
+        add("/sysctl-all",                 core._list_all_sysctl,  methods=["GET"],    summary="List all sysctl parameters", dependencies=_admin)
+        add("/sysctl/{key}",               core._set_sysctl,       methods=["PUT"],    summary="Set a sysctl kernel parameter", dependencies=_admin)
+        add("/sysctl/{key}",               core._delete_sysctl,    methods=["DELETE"], summary="Stop managing a sysctl parameter", dependencies=_admin)
+        add("/sysctl/{key}/import",        core._import_sysctl,    methods=["POST"],   summary="Import an existing sysctl key into FF management", status_code=201, dependencies=_admin)
+
+        add("/users",                      core._list_users,       methods=["GET"],    summary="List all users with ff_managed flag", dependencies=_admin)
+        add("/users/{name}",               core._set_user,         methods=["POST"],   summary="Create or reconfigure a system user",   status_code=201, dependencies=_admin)
+        add("/users/{name}",               core._delete_user,      methods=["DELETE"], summary="Remove a system user", dependencies=_admin)
+        add("/users/{name}/import",        core._import_user,      methods=["POST"],   summary="Import an existing system user into FF management", status_code=201, dependencies=_admin)
+
+        add("/groups",                     core._list_groups,        methods=["GET"],    summary="List all groups with ff_managed flag", dependencies=_admin)
+        add("/groups/{name}",              core._set_group,          methods=["POST"],   summary="Create or reconfigure a system group",  status_code=201, dependencies=_admin)
+        add("/groups/{name}",              core._delete_group,       methods=["DELETE"], summary="Remove a system group", dependencies=_admin)
+        add("/groups/{name}/import",       core._import_group,       methods=["POST"],   summary="Import an existing system group into FF management", status_code=201, dependencies=_admin)
+        add("/groups/{name}/members",      core._list_group_members, methods=["GET"],    summary="List group members with ff_managed flag", dependencies=_admin)
+        add("/groups/{name}/members",      core._add_group_member,   methods=["POST"],   summary="Add a user to a group", status_code=201, dependencies=_admin)
+        add("/groups/{name}/members/{username}", core._remove_group_member, methods=["DELETE"], summary="Remove a user from a group", dependencies=_admin)
+
+        add("/cron",                       core._list_cron,        methods=["GET"],    summary="List all cron entries with ff_managed flag", dependencies=_admin)
+        add("/cron/{name}",                core._set_cron,         methods=["POST"],   summary="Create or update a cron entry",         status_code=201, dependencies=_admin)
+        add("/cron/{name}",                core._delete_cron,      methods=["DELETE"], summary="Remove a cron entry", dependencies=_admin)
+        add("/cron/{name}/import",         core._import_cron,      methods=["POST"],   summary="Import an existing system cron entry into FF management", status_code=201, dependencies=_admin)
+
+        add("/kernmod",                    core._list_kernmod,     methods=["GET"],    summary="List all kernel modules with ff_managed flag", dependencies=_admin)
+        add("/kernmod/{name}",             core._set_kernmod,      methods=["PUT"],    summary="Load and manage a kernel module", dependencies=_admin)
+        add("/kernmod/{name}",             core._delete_kernmod,   methods=["DELETE"], summary="Stop managing a kernel module", dependencies=_admin)
+        add("/kernmod/{name}/import",      core._import_kernmod,   methods=["POST"],   summary="Import an already-loaded kernel module into FF management", status_code=201, dependencies=_admin)
+
+
+# ── Macros ───────────────────────────────────────────────────────────────────
+
+class HostMacros(MacroProviderAspect):
+    def __init__(self, core: "HostPlugin") -> None:
+        super().__init__(core)
+        self.core: "HostPlugin" = core
+        hostname = socket.gethostname()
+        domain = core._state.get("domainname") or core._get_system_domain()
+        self.register_macro("$host.hostname", hostname)
+        self.register_macro("$host.fqdn", f"{hostname}.{domain}" if domain else hostname)
+        if domain:
+            self.register_macro("$host.domainname", domain)
+
+    def macro_snapshot(self) -> dict[str, dict]:
+        hostname = socket.gethostname()
+        domain = self.core._state.get("domainname") or self.core._get_system_domain()
+        entries: dict[str, Any] = {"hostname": hostname}
+        if domain:
+            entries["domainname"] = domain
+        entries["fqdn"] = f"{hostname}.{domain}" if domain else hostname
+        return {"host": entries}
+
+
 # ── Plugin ─────────────────────────────────────────────────────────────────────
 
-class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
+class HostPlugin(PluginBase):
     services = [Service.HOST, Service.SYSCTL, Service.CRON, Service.USERS, Service.GROUPS]
+    api = HostAPI
+    macros = HostMacros
 
     _EMPTY_STATE: dict[str, Any] = {
         "sysctl": {},
@@ -121,7 +193,7 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
-    def setup(self) -> None:
+    def configure(self) -> None:
         self._state_file = PluginStateFile.from_config(
             self.plugin_dir, self.config, "state_file", "host_state.json", self.logger,
             mutation_model="immediate", data_dir=self.data_dir, plugin_version=self.meta["version"],
@@ -130,16 +202,16 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             self._state: dict[str, Any] = {k: {} for k in self._EMPTY_STATE}
         else:
             self._state = self._load_state()
+
+    def setup(self) -> None:
+        if not self.config.get("ignore_state_on_boot", False):
             self._apply_state()
-        self._register_routes()
-        self._register_host_macros()
         init_cfg: dict[str, Any] = self.config.get("init") or {}
         if init_cfg.get("enable_init_script", False):
             self._run_init_script(init_cfg)
 
     def teardown(self) -> None:
         self._save_state()
-        self.unregister_macro("$host")
 
     # ── persistence ────────────────────────────────────────────────────────────
 
@@ -688,50 +760,6 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
             self.logger.error("initsys.service.remove: failed to remove %r", service_name, exc_info=True)
             return {"success": False}
 
-    # ── route registration ─────────────────────────────────────────────────────
-
-    def _register_routes(self) -> None:
-        add = self.router.add_api_route
-        _admin = [require_role("admin")]
-
-        add("/status",              self._status,           methods=["GET"],    summary="Plugin status and managed-resource counts", dependencies=_admin)
-
-        add("/hostname",            self._get_hostname,     methods=["GET"],    summary="Get current hostname", dependencies=_admin)
-        add("/hostname",            self._set_hostname,     methods=["PUT"],    summary="Set system hostname", dependencies=_admin)
-
-        add("/domainname",          self._get_domainname,   methods=["GET"],    summary="Get managed domain name", dependencies=_admin)
-        add("/domainname",          self._set_domainname,   methods=["PUT"],    summary="Set system domain name", dependencies=_admin)
-        add("/domainname",          self._delete_domainname, methods=["DELETE"], summary="Remove managed domain name", dependencies=_admin)
-
-        add("/sysctl",                     self._list_sysctl,      methods=["GET"],    summary="List all sysctl parameters with ff_managed flag", dependencies=_admin)
-        add("/sysctl-all",                 self._list_all_sysctl,  methods=["GET"],    summary="List all sysctl parameters", dependencies=_admin)
-        add("/sysctl/{key}",               self._set_sysctl,       methods=["PUT"],    summary="Set a sysctl kernel parameter", dependencies=_admin)
-        add("/sysctl/{key}",               self._delete_sysctl,    methods=["DELETE"], summary="Stop managing a sysctl parameter", dependencies=_admin)
-        add("/sysctl/{key}/import",        self._import_sysctl,    methods=["POST"],   summary="Import an existing sysctl key into FF management", status_code=201, dependencies=_admin)
-
-        add("/users",                      self._list_users,       methods=["GET"],    summary="List all users with ff_managed flag", dependencies=_admin)
-        add("/users/{name}",               self._set_user,         methods=["POST"],   summary="Create or reconfigure a system user",   status_code=201, dependencies=_admin)
-        add("/users/{name}",               self._delete_user,      methods=["DELETE"], summary="Remove a system user", dependencies=_admin)
-        add("/users/{name}/import",        self._import_user,      methods=["POST"],   summary="Import an existing system user into FF management", status_code=201, dependencies=_admin)
-
-        add("/groups",                     self._list_groups,        methods=["GET"],    summary="List all groups with ff_managed flag", dependencies=_admin)
-        add("/groups/{name}",              self._set_group,          methods=["POST"],   summary="Create or reconfigure a system group",  status_code=201, dependencies=_admin)
-        add("/groups/{name}",              self._delete_group,       methods=["DELETE"], summary="Remove a system group", dependencies=_admin)
-        add("/groups/{name}/import",       self._import_group,       methods=["POST"],   summary="Import an existing system group into FF management", status_code=201, dependencies=_admin)
-        add("/groups/{name}/members",      self._list_group_members, methods=["GET"],    summary="List group members with ff_managed flag", dependencies=_admin)
-        add("/groups/{name}/members",      self._add_group_member,   methods=["POST"],   summary="Add a user to a group", status_code=201, dependencies=_admin)
-        add("/groups/{name}/members/{username}", self._remove_group_member, methods=["DELETE"], summary="Remove a user from a group", dependencies=_admin)
-
-        add("/cron",                       self._list_cron,        methods=["GET"],    summary="List all cron entries with ff_managed flag", dependencies=_admin)
-        add("/cron/{name}",                self._set_cron,         methods=["POST"],   summary="Create or update a cron entry",         status_code=201, dependencies=_admin)
-        add("/cron/{name}",                self._delete_cron,      methods=["DELETE"], summary="Remove a cron entry", dependencies=_admin)
-        add("/cron/{name}/import",         self._import_cron,      methods=["POST"],   summary="Import an existing system cron entry into FF management", status_code=201, dependencies=_admin)
-
-        add("/kernmod",                    self._list_kernmod,     methods=["GET"],    summary="List all kernel modules with ff_managed flag", dependencies=_admin)
-        add("/kernmod/{name}",             self._set_kernmod,      methods=["PUT"],    summary="Load and manage a kernel module", dependencies=_admin)
-        add("/kernmod/{name}",             self._delete_kernmod,   methods=["DELETE"], summary="Stop managing a kernel module", dependencies=_admin)
-        add("/kernmod/{name}/import",      self._import_kernmod,   methods=["POST"],   summary="Import an already-loaded kernel module into FF management", status_code=201, dependencies=_admin)
-
     # ── status ─────────────────────────────────────────────────────────────────
 
     def _status(self) -> dict:
@@ -779,23 +807,6 @@ class HostPlugin(PluginBase, ApiRouterPlugin, MacroProviderPlugin):
         if fqdn != hostname and fqdn.startswith(hostname + "."):
             return fqdn[len(hostname) + 1:]
         return None
-
-    def _register_host_macros(self) -> None:
-        hostname = socket.gethostname()
-        domain = self._state.get("domainname") or self._get_system_domain()
-        self.register_macro("$host.hostname", hostname)
-        self.register_macro("$host.fqdn", f"{hostname}.{domain}" if domain else hostname)
-        if domain:
-            self.register_macro("$host.domainname", domain)
-
-    def macro_snapshot(self) -> dict[str, dict]:
-        hostname = socket.gethostname()
-        domain = self._state.get("domainname") or self._get_system_domain()
-        entries: dict[str, Any] = {"hostname": hostname}
-        if domain:
-            entries["domainname"] = domain
-        entries["fqdn"] = f"{hostname}.{domain}" if domain else hostname
-        return {"host": entries}
 
     def _get_domainname(self) -> dict:
         return {

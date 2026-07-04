@@ -50,7 +50,7 @@ Groups store their member list in the state file:
 
 ## Macro namespace — `$host`
 
-`HostPlugin` is a `MacroProviderPlugin`. It registers the `host` namespace with three keys:
+`HostPlugin` composes a `HostMacros(MacroProviderAspect)` aspect (`macros = HostMacros`). It registers the `host` namespace with three keys:
 
 | Macro | Resolves to |
 |---|---|
@@ -89,9 +89,7 @@ Groups store their member list in the state file:
 
 **`_get_system_domain()`** — static; parses `socket.getfqdn()` and strips the leading `hostname.` prefix. Returns `None` if the FQDN equals the short hostname (no domain detectable).
 
-**`_resolve_host_macro(*segments)`** — the `$host` namespace resolver. Dispatches on `segments[0]` to return `hostname`, `domainname`, or `fqdn`.
-
-**`macro_snapshot()`** — returns `{"host": {"hostname": ..., "domainname": ..., "fqdn": ...}}` for `--show-macros` / `GET /v1/macros`. `domainname` is only included when a domain is known.
+**`HostMacros.macro_snapshot()`** — returns `{"host": {"hostname": ..., "domainname": ..., "fqdn": ...}}` for `--show-macros` / `GET /v1/macros`. `domainname` is only included when a domain is known.
 
 **`_pyinfra_run_many(ops)`** — runs a batch of `(op, kwargs)` pairs in a single worker subprocess via `pyinfra_run_batch`. Returns `list[(success, error_or_None)]`, one entry per input operation.
 
