@@ -120,7 +120,23 @@ class NetworkingMacros(MacroProviderAspect):
                 [str(ipaddress.ip_interface(a).ip) for a in addresses],
             )
             self.register_macro(
-                f"$interface.{alias}.net_addr",
+                f"$interface.{alias}.network_address",
+                [str(ipaddress.ip_interface(a).network.network_address) for a in addresses],
+            )
+            self.register_macro(
+                f"$interface.{alias}.broadcast_address",
+                [str(ipaddress.ip_interface(a).network.broadcast_address) for a in addresses],
+            )
+            self.register_macro(
+                f"$interface.{alias}.subnet",
+                [str(ipaddress.ip_interface(a).netmask) for a in addresses],
+            )
+            self.register_macro(
+                f"$interface.{alias}.cidr",
+                [ipaddress.ip_interface(a).network.prefixlen for a in addresses],
+            )
+            self.register_macro(
+                f"$interface.{alias}.network_cidr",
                 [str(ipaddress.ip_interface(a).network) for a in addresses],
             )
 
@@ -134,9 +150,21 @@ class NetworkingMacros(MacroProviderAspect):
             addrs = [str(ipaddress.ip_interface(a).ip) for a in addresses]
             if addrs:
                 entries[f"{alias}.address"] = addrs
-            nets = [str(ipaddress.ip_interface(a).network) for a in addresses]
+            nets = [str(ipaddress.ip_interface(a).network.network_address) for a in addresses]
             if nets:
-                entries[f"{alias}.net_addr"] = nets
+                entries[f"{alias}.network_address"] = nets
+            broadcasts = [str(ipaddress.ip_interface(a).network.broadcast_address) for a in addresses]
+            if broadcasts:
+                entries[f"{alias}.broadcast_address"] = broadcasts
+            subnets = [str(ipaddress.ip_interface(a).netmask) for a in addresses]
+            if subnets:
+                entries[f"{alias}.subnet"] = subnets
+            cidrs = [ipaddress.ip_interface(a).network.prefixlen for a in addresses]
+            if cidrs:
+                entries[f"{alias}.cidr"] = cidrs
+            network_cidrs = [str(ipaddress.ip_interface(a).network) for a in addresses]
+            if network_cidrs:
+                entries[f"{alias}.network_cidr"] = network_cidrs
         return {"interface": entries}
 
 

@@ -1576,6 +1576,61 @@ def test_interface_macro_address_resolves_to_ip_list(tmp_path):
     macro_registry.unregister("$interface")
 
 
+def test_interface_macro_network_address_resolves_to_network_address_without_cidr(tmp_path):
+    from plugin_system.core.macros import macro_registry
+    mod = _load_module()
+    plugin = _make_plugin(tmp_path)
+    plugin._aliases["lan"] = "eth0"
+    plugin._interfaces["eth0"] = {"addresses": ["192.168.1.1/24"]}
+    plugin.macros = mod.NetworkingMacros(plugin)
+    assert macro_registry.resolve("$interface.lan.network_address") == ["192.168.1.0"]
+    macro_registry.unregister("$interface")
+
+
+def test_interface_macro_broadcast_address_resolves_to_broadcast_list(tmp_path):
+    from plugin_system.core.macros import macro_registry
+    mod = _load_module()
+    plugin = _make_plugin(tmp_path)
+    plugin._aliases["lan"] = "eth0"
+    plugin._interfaces["eth0"] = {"addresses": ["192.168.1.1/24"]}
+    plugin.macros = mod.NetworkingMacros(plugin)
+    assert macro_registry.resolve("$interface.lan.broadcast_address") == ["192.168.1.255"]
+    macro_registry.unregister("$interface")
+
+
+def test_interface_macro_subnet_resolves_to_netmask_list(tmp_path):
+    from plugin_system.core.macros import macro_registry
+    mod = _load_module()
+    plugin = _make_plugin(tmp_path)
+    plugin._aliases["lan"] = "eth0"
+    plugin._interfaces["eth0"] = {"addresses": ["192.168.1.1/24"]}
+    plugin.macros = mod.NetworkingMacros(plugin)
+    assert macro_registry.resolve("$interface.lan.subnet") == ["255.255.255.0"]
+    macro_registry.unregister("$interface")
+
+
+def test_interface_macro_cidr_resolves_to_prefixlen_list(tmp_path):
+    from plugin_system.core.macros import macro_registry
+    mod = _load_module()
+    plugin = _make_plugin(tmp_path)
+    plugin._aliases["lan"] = "eth0"
+    plugin._interfaces["eth0"] = {"addresses": ["192.168.1.1/24"]}
+    plugin.macros = mod.NetworkingMacros(plugin)
+    assert macro_registry.resolve("$interface.lan.cidr") == [24]
+    macro_registry.unregister("$interface")
+
+
+def test_interface_macro_network_cidr_resolves_to_network_with_prefix_list(tmp_path):
+    from plugin_system.core.macros import macro_registry
+    mod = _load_module()
+    plugin = _make_plugin(tmp_path)
+    plugin._aliases["lan"] = "eth0"
+    plugin._interfaces["eth0"] = {"addresses": ["192.168.1.1/24"]}
+    plugin.macros = mod.NetworkingMacros(plugin)
+    assert macro_registry.resolve("$interface.lan.network_cidr") == ["192.168.1.0/24"]
+    macro_registry.unregister("$interface")
+
+
 def test_interface_macro_address_empty_when_no_addresses(tmp_path):
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
@@ -1632,6 +1687,11 @@ def test_macro_snapshot_includes_name_and_address(tmp_path):
     snap = plugin.macros.macro_snapshot()
     assert snap["interface"]["lan.name"] == "eth0"
     assert snap["interface"]["lan.address"] == ["10.0.0.1"]
+    assert snap["interface"]["lan.network_address"] == ["10.0.0.0"]
+    assert snap["interface"]["lan.broadcast_address"] == ["10.0.0.255"]
+    assert snap["interface"]["lan.subnet"] == ["255.255.255.0"]
+    assert snap["interface"]["lan.cidr"] == [24]
+    assert snap["interface"]["lan.network_cidr"] == ["10.0.0.0/24"]
 
 
 def test_macro_snapshot_omits_address_when_none(tmp_path):
@@ -1642,6 +1702,11 @@ def test_macro_snapshot_omits_address_when_none(tmp_path):
     plugin.macros = mod.NetworkingMacros(plugin)
     snap = plugin.macros.macro_snapshot()
     assert "lan.address" not in snap["interface"]
+    assert "lan.network_address" not in snap["interface"]
+    assert "lan.broadcast_address" not in snap["interface"]
+    assert "lan.subnet" not in snap["interface"]
+    assert "lan.cidr" not in snap["interface"]
+    assert "lan.network_cidr" not in snap["interface"]
     assert snap["interface"]["lan.name"] == "eth0"
 
 

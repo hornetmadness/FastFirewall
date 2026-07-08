@@ -3164,10 +3164,10 @@ def test_pending_changes_in_apply_response(tmp_path):
 def test_src_address_macro_resolves_to_ip_saddr():
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
-    macro_registry.register("$interface.lan.net_addr", ["192.168.1.0/24"])
+    macro_registry.register("$interface.lan.network_cidr", ["192.168.1.0/24"])
     try:
         rule = mod.FirewallRule(name="lan-ssh", action="accept", protocol="tcp",
-                                src_address="$interface.lan.net_addr", dst_port=22)
+                                src_address="$interface.lan.network_cidr", dst_port=22)
         expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
         assert expr is not None
         assert "ip saddr 192.168.1.0/24" in expr
@@ -3178,10 +3178,10 @@ def test_src_address_macro_resolves_to_ip_saddr():
 def test_dst_address_macro_resolves_to_ip_daddr():
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
-    macro_registry.register("$interface.wan.net_addr", ["10.0.0.0/8"])
+    macro_registry.register("$interface.wan.network_cidr", ["10.0.0.0/8"])
     try:
         rule = mod.FirewallRule(name="fwd-to-wan", action="accept",
-                                dst_address="$interface.wan.net_addr")
+                                dst_address="$interface.wan.network_cidr")
         expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
         assert expr is not None
         assert "ip daddr 10.0.0.0/8" in expr
@@ -3192,10 +3192,10 @@ def test_dst_address_macro_resolves_to_ip_daddr():
 def test_src_address_macro_multiple_addrs_produces_inline_set():
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
-    macro_registry.register("$interface.lan.net_addr", ["192.168.1.0/24", "10.0.0.0/8"])
+    macro_registry.register("$interface.lan.network_cidr", ["192.168.1.0/24", "10.0.0.0/8"])
     try:
         rule = mod.FirewallRule(name="multi-lan", action="accept",
-                                src_address="$interface.lan.net_addr")
+                                src_address="$interface.lan.network_cidr")
         expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
         assert expr is not None
         assert "ip saddr { 192.168.1.0/24, 10.0.0.0/8 }" in expr
@@ -3206,10 +3206,10 @@ def test_src_address_macro_multiple_addrs_produces_inline_set():
 def test_src_address_macro_unresolved_skips_rule():
     from plugin_system.core.macros import macro_registry
     mod = _load_module()
-    # don't register $interface.lan.net_addr — it should resolve to None
+    # don't register $interface.lan.network_cidr — it should resolve to None
     macro_registry.unregister("$interface")
     rule = mod.FirewallRule(name="missing-iface", action="accept",
-                            src_address="$interface.lan.net_addr")
+                            src_address="$interface.lan.network_cidr")
     expr = mod._rule_to_nft_expr(rule, logging.getLogger("test"))
     assert expr is None
 
