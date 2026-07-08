@@ -234,12 +234,14 @@ class ChainConfig(BaseModel):
     policy: Literal["accept", "drop"] = "drop"
     priority: int = 0
     preamble: list[str] = []
+    epilogue: list[str] = []
 
 
 class ChainUpdate(BaseModel):
     policy: Optional[Literal["accept", "drop"]] = None
     priority: Optional[int] = None
     preamble: Optional[list[Annotated[str, Field(max_length=512)]]] = None
+    epilogue: Optional[list[Annotated[str, Field(max_length=512)]]] = None
 
 
 class CompileRequest(BaseModel):

@@ -75,9 +75,13 @@ def _rule_hash(data: dict) -> str:
 
 
 _DEFAULT_CHAINS: dict[str, dict] = {
-    "input":   {"policy": "drop",   "priority": 0, "preamble": ["iif lo accept", "ct state established,related accept", "ct state invalid drop"]},
-    "forward": {"policy": "drop",   "priority": 0, "preamble": ["ct state established,related accept"]},
-    "output":  {"policy": "accept", "priority": 0, "preamble": []},
+    "input":   {"policy": "drop",   "priority": 0,
+                "preamble": ["iif lo accept", "ct state established,related accept", "ct state invalid drop"],
+                "epilogue": ['log prefix "input-drop: " level warn drop']},
+    "forward": {"policy": "drop",   "priority": 0,
+                "preamble": ["ct state established,related accept"],
+                "epilogue": ['log prefix "forward-drop: " level warn drop']},
+    "output":  {"policy": "accept", "priority": 0, "preamble": [], "epilogue": []},
 }
 
 
@@ -401,7 +405,7 @@ class FirewallPlugin(PluginBase):
         if not rule:
             raise HTTPException(404, f"Rule {rule_id!r} not found")
         updates = body.model_dump(exclude_unset=True)
-        updated = rule.model_copy(update=updates)
+        updated = type(rule).model_validate({**rule.model_dump(), **updates})
         self._rules[rule_id] = updated
         self._save_state()
         bus.emit(Event(
@@ -611,7 +615,7 @@ class FirewallPlugin(PluginBase):
         if not rule:
             raise HTTPException(404, f"Ingress rule {rule_id!r} not found")
         updates = body.model_dump(exclude_unset=True)
-        updated = rule.model_copy(update=updates)
+        updated = type(rule).model_validate({**rule.model_dump(), **updates})
         self._ingress_rules[rule_id] = updated
         self._save_state()
         snap = self._snapshot_ingress_map()
