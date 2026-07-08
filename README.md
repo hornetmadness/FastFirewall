@@ -965,15 +965,19 @@ Automatically populated from each plugin's `service_ports` declaration in `plugi
 
 **Plugin-defined namespaces: `$interface`, `$host`**
 
-The networking plugin exposes interface aliases as the `$interface` namespace. Each alias provides two sub-keys:
+The networking plugin exposes interface aliases as the `$interface` namespace. Each alias provides these sub-keys:
 
 | Macro | Resolves to |
 |---|---|
 | `$interface.lan.name` | OS device name (e.g. `"enp3s0"`) |
 | `$interface.lan.address` | L3 addresses on that device (e.g. `["192.168.0.1"]`) |
-| `$interface.lan.net_addr` | Network address (e.g. `["192.168.0.0/24"]`) |
+| `$interface.lan.network_address` | Network address, no CIDR suffix (e.g. `["192.168.0.0"]`) |
+| `$interface.lan.broadcast_address` | Broadcast address (e.g. `["192.168.0.255"]`) |
+| `$interface.lan.subnet` | Netmask (e.g. `["255.255.255.0"]`) |
+| `$interface.lan.cidr` | Prefix length (e.g. `[24]`) |
+| `$interface.lan.network_cidr` | Network address with prefix, CIDR notation (e.g. `["192.168.0.0/24"]`) |
 
-Set an alias with `PUT /v1/networking/config/aliases/lan` `{"interface": "enp3s0"}` and both macros become available immediately.
+Set an alias with `PUT /v1/networking/config/aliases/lan` `{"interface": "enp3s0"}` and all macros become available immediately.
 
 The host plugin exposes the `$host` namespace:
 
