@@ -430,7 +430,7 @@ Rules are stored in a JSON file. An implicit `deny all` is always appended at th
 | `/rules/{id}` | DELETE | Delete a rule |
 | `/chains` | GET | List chains and their policies |
 | `/chains/{name}` | GET | Get a chain |
-| `/chains/{name}` | PUT | Update chain policy, priority, or preamble |
+| `/chains/{name}` | PUT | Update chain policy, priority, preamble, or epilogue |
 | `/sets` | GET | List named sets |
 | `/sets` | POST | Create a named set |
 | `/sets/{name}` | GET / DELETE | Get or delete a named set |
@@ -500,17 +500,17 @@ Rules are stored in a JSON file. An implicit `deny all` is always appended at th
 | `priority` | `int` | `100` | lower = matched first |
 | `enabled` | `bool` | `true` | disabled rules are compiled out |
 
-**Chains and preamble:**
+**Chains, preamble, and epilogue:**
 
-Each chain has a `preamble` — a list of raw nft expressions inserted before user rules. The defaults are:
+Each chain has a `preamble` — a list of raw nft expressions inserted before user rules — and an `epilogue` — raw nft expressions inserted after user rules, right before the implicit chain policy takes over. The defaults are:
 
-| Chain | Default policy | Default preamble |
-|---|---|---|
-| `input` | `drop` | `["iif lo accept", "ct state established,related accept", "ct state invalid drop"]` |
-| `forward` | `drop` | `["ct state established,related accept"]` |
-| `output` | `accept` | `[]` |
+| Chain | Default policy | Default preamble | Default epilogue |
+|---|---|---|---|
+| `input` | `drop` | `["iif lo accept", "ct state established,related accept", "ct state invalid drop"]` | `['log prefix "input-drop: " level warn drop']` |
+| `forward` | `drop` | `["ct state established,related accept"]` | `['log prefix "forward-drop: " level warn drop']` |
+| `output` | `accept` | `[]` | `[]` |
 
-Preamble rules are stored in state and compiled into the script. Update them via `PUT /chains/{name}` with `{"preamble": [...]}`. Changes are deferred; `POST /apply` is required.
+`input`/`forward` default to a log-then-drop epilogue so traffic falling through to the default-deny policy is logged instead of silently dropped. Preamble/epilogue rules are stored in state and compiled into the script. Update them via `PUT /chains/{name}` with `{"preamble": [...]}` / `{"epilogue": [...]}`. Changes are deferred; `POST /apply` is required.
 
 **Example — create and apply a rule:**
 ```bash

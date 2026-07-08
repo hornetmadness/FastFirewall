@@ -306,6 +306,29 @@ def test_update_rule_404_for_unknown_id(client):
     assert client.put("/v1/firewall/rules/ghost", json={"name": "x"}).status_code == 404
 
 
+def test_update_rule_log_field_stays_nested_model(client):
+    rule = _create_rule(client, name="logged-rule")
+    data = client.put(
+        f"/v1/firewall/rules/{rule['id']}",
+        json={"log": {"prefix": "test-drop: ", "level": "warn"}},
+    ).json()
+    assert data["log"] == {"prefix": "test-drop: ", "level": "warn", "group": None, "flags": None, "snaplen": None}
+    # must compile without AttributeError: 'dict' object has no attribute 'prefix'
+    output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
+    assert any('log prefix "test-drop: " level warn' in line for line in output)
+
+
+def test_update_rule_rate_limit_field_stays_nested_model(client):
+    rule = _create_rule(client, name="limited-rule")
+    data = client.put(
+        f"/v1/firewall/rules/{rule['id']}",
+        json={"rate_limit": {"rate": 10, "unit": "second"}},
+    ).json()
+    assert data["rate_limit"]["rate"] == 10
+    output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
+    assert any("limit rate 10/second" in line for line in output)
+
+
 # ---------------------------------------------------------------------------
 # Delete
 # ---------------------------------------------------------------------------
@@ -1105,6 +1128,37 @@ def test_update_chain_policy_leaves_preamble_unchanged(client):
     client.put("/v1/firewall/chains/forward", json={"policy": "accept"})
     updated = client.get("/v1/firewall/chains/forward").json()["preamble"]
     assert updated == original
+
+
+def test_chain_response_includes_epilogue(client):
+    input_data = client.get("/v1/firewall/chains/input").json()
+    assert "epilogue" in input_data
+    assert 'log prefix "input-drop: " level warn drop' in input_data["epilogue"]
+
+    output_data = client.get("/v1/firewall/chains/output").json()
+    assert output_data["epilogue"] == []
+
+
+def test_update_chain_epilogue(client):
+    data = client.put("/v1/firewall/chains/forward", json={"epilogue": []}).json()
+    assert data["epilogue"] == []
+    output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
+    assert not any("forward-drop" in line for line in output)
+
+
+def test_update_chain_policy_leaves_epilogue_unchanged(client):
+    original = client.get("/v1/firewall/chains/forward").json()["epilogue"]
+    client.put("/v1/firewall/chains/forward", json={"policy": "accept"})
+    updated = client.get("/v1/firewall/chains/forward").json()["epilogue"]
+    assert updated == original
+
+
+def test_epilogue_after_user_rules(client):
+    client.post("/v1/firewall/rules", json={"name": "allow-http", "protocol": "tcp", "dst_port": 80, "action": "accept"})
+    output = client.post("/v1/firewall/compile", json={"filter_name": "fw"}).json()["output"]
+    rule_idx = next(i for i, l in enumerate(output) if "allow-http" in l)
+    epilogue_idx = next(i for i, l in enumerate(output) if "input-drop" in l)
+    assert rule_idx < epilogue_idx
 
 
 def test_update_chain_404_for_unknown(client):
@@ -2004,6 +2058,15 @@ def test_update_ingress_rule(client):
     data = client.post("/v1/firewall/ingress/rules", json={"name": "old", "device": "eth0"}).json()
     updated = client.put(f"/v1/firewall/ingress/rules/{data['id']}", json={"name": "new"}).json()
     assert updated["name"] == "new"
+
+
+def test_update_ingress_rule_log_field_stays_nested_model(client):
+    data = client.post("/v1/firewall/ingress/rules", json={"name": "logged", "device": "eth0"}).json()
+    updated = client.put(
+        f"/v1/firewall/ingress/rules/{data['id']}",
+        json={"log": {"prefix": "ingress-drop: ", "level": "warn"}},
+    ).json()
+    assert updated["log"]["prefix"] == "ingress-drop: "
 
 
 def test_delete_ingress_rule(client):

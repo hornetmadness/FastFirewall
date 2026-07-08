@@ -17,7 +17,7 @@ Manages firewall rules and compiles them to nftables scripts applied via a sudo 
 | `DELETE` | `/rules/{rule_id}` | Delete a firewall rule |
 | `GET` | `/chains` | List chains and their policies |
 | `GET` | `/chains/{name}` | Get a single chain |
-| `PUT` | `/chains/{name}` | Update chain policy, priority, or preamble |
+| `PUT` | `/chains/{name}` | Update chain policy, priority, preamble, or epilogue |
 | `GET` | `/sets` | List named sets |
 | `POST` | `/sets` | Create a named set |
 | `GET` | `/sets/{name}` | Get a named set |
@@ -101,13 +101,15 @@ Every rule and chain response includes `applied: bool`. It is computed at respon
 
 The compiler always generates all three chains regardless of whether user rules target them:
 
-| Chain | Hook | Default policy | Default preamble |
-|---|---|---|---|
-| `input` | `input` | `drop` | `["iif lo accept", "ct state established,related accept", "ct state invalid drop"]` |
-| `forward` | `forward` | `drop` | `["ct state established,related accept"]` |
-| `output` | `output` | `accept` | `[]` |
+| Chain | Hook | Default policy | Default preamble | Default epilogue |
+|---|---|---|---|---|
+| `input` | `input` | `drop` | `["iif lo accept", "ct state established,related accept", "ct state invalid drop"]` | `['log prefix "input-drop: " level warn drop']` |
+| `forward` | `forward` | `drop` | `["ct state established,related accept"]` | `['log prefix "forward-drop: " level warn drop']` |
+| `output` | `output` | `accept` | `[]` | `[]` |
 
 Each chain has a `preamble` — a list of raw nft expressions compiled into the script before user rules. Preamble rules are stored in state and are editable via `PUT /chains/{name}` with `{"preamble": [...]}`. Changes are deferred — `POST /apply` is required to push them to the kernel.
+
+Each chain also has an `epilogue` — raw nft expressions compiled in **after** all user rules for that chain, right before the implicit chain policy takes over. The `input` and `forward` chains (both `policy: drop`) default to a `log prefix "..." level warn drop` epilogue rule so packets falling through to the default-deny are logged instead of silently dropped; `output` (`policy: accept`) has none. Editable via `PUT /chains/{name}` with `{"epilogue": [...]}`, same deferred-apply semantics as `preamble`.
 
 ## Rule IDs
 
@@ -134,9 +136,9 @@ On first boot (when the state file does not yet exist), the plugin seeds two def
       {"id": "...", "name": "allow-ssh", "chain": "input", "action": "accept", "protocol": "tcp", ...}
     ],
     "chains": {
-      "input":   {"policy": "drop",   "priority": 0, "preamble": ["iif lo accept", "ct state established,related accept", "ct state invalid drop"]},
-      "forward": {"policy": "drop",   "priority": 0, "preamble": ["ct state established,related accept"]},
-      "output":  {"policy": "accept", "priority": 0, "preamble": []}
+      "input":   {"policy": "drop",   "priority": 0, "preamble": ["iif lo accept", "ct state established,related accept", "ct state invalid drop"], "epilogue": ["log prefix \"input-drop: \" level warn drop"]},
+      "forward": {"policy": "drop",   "priority": 0, "preamble": ["ct state established,related accept"], "epilogue": ["log prefix \"forward-drop: \" level warn drop"]},
+      "output":  {"policy": "accept", "priority": 0, "preamble": [], "epilogue": []}
     }
   },
   "current_state": {
@@ -165,6 +167,8 @@ add rule inet fastfirewall input ct state established,related accept
 add rule inet fastfirewall forward ct state established,related accept
 add rule inet fastfirewall input tcp dport 22 accept comment "Allow SSH from any source"
 add rule inet fastfirewall input tcp dport 8000 accept comment "Allow FastFirewall API from any source"
+add rule inet fastfirewall input log prefix "input-drop: " level warn drop
+add rule inet fastfirewall forward log prefix "forward-drop: " level warn drop
 ```
 
 `add table` is idempotent (no-op if already exists). `flush table` atomically removes all existing chains and rules. `add chain` + `add rule` rebuild the ruleset from the current desired state.

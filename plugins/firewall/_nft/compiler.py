@@ -506,6 +506,11 @@ def _compile_to_script(
         label = json.dumps(f"{rule.comment or rule.name} [id:{rule.id}]")
         lines.append(f"add rule inet {filter_name} {rule.chain} {expr} comment {label}")
 
+    # filter chain epilogue rules (after user rules — e.g. default log+drop)
+    for chain_name, cfg in chains.items():
+        for expr in cfg.epilogue:
+            lines.append(f"add rule inet {filter_name} {chain_name} {expr}")
+
     # §4 NAT rules
     for rule in sorted(enabled_nat, key=lambda r: r.priority):
         expr = _nat_rule_to_nft_expr(rule, logger)

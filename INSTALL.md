@@ -167,7 +167,7 @@ cd FastFirewall
 uv sync --all-packages --extra dev
 ```
 
-`--all-packages` is required — without it, transitive dependencies of workspace member plugins (e.g. `ifstate` from the networking plugin) are not installed and the dev environment is incomplete.
+`--all-packages` is required — without it, transitive dependencies of workspace member plugins are not installed and the dev environment is incomplete.
 
 Run the server from the repo root:
 
