@@ -657,18 +657,19 @@ class HostPlugin(PluginBase):
             self.logger.warning("initsys.service.start: no supported init system detected, skipping %r", service_name)
             return {"success": False}
         status = self._get_service_status(init_system, service_name)
-        if status["running"] is True:
-            self.logger.debug("initsys.service.start: %r already running, skipping", service_name)
+        if status["running"] is True and status["enabled"] is not False:
+            self.logger.debug("initsys.service.start: %r already running and enabled, skipping", service_name)
             return {"success": True}
         try:
-            if init_system == "systemd":
-                self._pyinfra_run(systemd_ops.service, name=f"Start {service_name}", service=service_name, running=True, _sudo=True)
-            else:
-                self._pyinfra_run(server_ops.service, name=f"Start {service_name}", service=service_name, running=True, _sudo=True)
-            return {"success": True}
+            self._enable_service(init_system, service_name)
         except Exception:
             self.logger.error("initsys.service.start: failed to start %r", service_name, exc_info=True)
             return {"success": False}
+        status = self._get_service_status(init_system, service_name)
+        if status["running"] is not True:
+            self.logger.error("initsys.service.start: %r did not start successfully", service_name)
+            return {"success": False}
+        return {"success": True}
 
     @on("initsys.service.stop")
     def _handle_service_stop(self, event: Event) -> dict[str, bool]:

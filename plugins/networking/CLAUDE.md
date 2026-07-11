@@ -108,7 +108,7 @@ Set `link.kind = "wifi"` and provide a `wifi: {ssid, psk}` body. At apply time:
 
 **`_identify()`** — reads `perm_hwaddr` (or `address`) from `/sys/class/net/{name}/`. Uses module-level `_SYS_NET_DIR` constant (patchable in tests).
 
-**`_sync_os_boot_service()`** — when `use_systemd_networkd=true`: disables competing managers, emits `initsys.service.start` for `systemd-networkd.service`. When false: emits `initsys.service.remove` for `fastfirewall-networking` (cleans up old custom unit).
+**`_sync_os_boot_service()`** — disables each configured competing manager, emits `initsys.service.start` for `systemd-networkd.service`, and emits `initsys.service.remove` for `fastfirewall-networking` (cleans up an old custom unit from a pre-systemd-networkd version of this plugin).
 
 `NetworkingPlugin` composes a `NetworkingAPI(ApiRouterAspect)` aspect (`api = NetworkingAPI`, taking over what was `_register_routes()`) and a `NetworkingMacros(MacroProviderAspect)` aspect (`macros = NetworkingMacros`, taking over `_register_interface_macros()` and `macro_snapshot()`) — both instantiated by the loader after `configure()` runs, so they read already-loaded state. State loading (and the first-boot `_import_state_from_system()` call) lives in `configure()`; `setup()` only runs `_apply_state()` (when needed) and `_sync_os_boot_service()`.
 
@@ -155,9 +155,9 @@ Interface alias `PUT`/`DELETE` mutations call `self._state_file.commit(self._des
 
 | Event | When |
 |---|---|
-| `initsys.service.disable` | `use_systemd_networkd: true` — one event per entry in `disable_os_managers` |
-| `initsys.service.start` | `use_systemd_networkd: true` — starts `systemd-networkd.service` |
-| `initsys.service.remove` | `use_systemd_networkd: false` — removes `fastfirewall-networking` legacy unit if it exists |
+| `initsys.service.disable` | always on `setup()` — one event per entry in `disable_os_managers` |
+| `initsys.service.start` | always on `setup()` — starts `systemd-networkd.service` |
+| `initsys.service.remove` | always on `setup()` — removes `fastfirewall-networking` legacy unit if it exists |
 
 ## Config options (`plugin.yaml`)
 
@@ -165,8 +165,7 @@ Interface alias `PUT`/`DELETE` mutations call `self._state_file.commit(self._des
 |---|---|---|
 | `state_file` | `networking_state.json` | filename inside `data/` |
 | `ignore_state_on_boot` | `false` | skip `_apply_state()` / `_import_state_from_system()` on startup |
-| `use_systemd_networkd` | `false` | start `systemd-networkd` and disable competing managers at setup time |
-| `disable_os_managers` | `[NetworkManager, networking]` | service names to stop/disable when `use_systemd_networkd: true` |
+| `disable_os_managers` | `[NetworkManager, networking]` | service names to stop/disable in favor of `systemd-networkd` |
 | `debug` | `false` | include `debug` key in `POST /apply` response with networkd filenames |
 
 ## Testing

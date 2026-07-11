@@ -29,11 +29,10 @@ service_ports:
 config:
   state_file: networking_state.json
   ignore_state_on_boot: false
-  use_systemd_networkd: false
   debug: true
-  # List of systemd service names to stop and disable when use_systemd_networkd is true.
-  # This is non-reversible: FastFirewall will not re-enable these services
-  # if use_systemd_networkd is later set back to false. To restore, manually run:
+  # List of systemd service names to stop and disable in favor of systemd-networkd.
+  # This is non-reversible: FastFirewall will not re-enable these services.
+  # To restore, manually run:
   #   sudo systemctl enable --now <service>
   disable_os_managers:
     - NetworkManager

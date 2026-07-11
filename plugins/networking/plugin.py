@@ -272,20 +272,18 @@ class NetworkingPlugin(PluginBase, LiveMixin, BuilderMixin, BondsMixin, BridgesM
             self.logger.warning("Could not re-apply networking config on boot: %s", exc)
 
     def _sync_os_boot_service(self) -> None:
-        if self.config.get("use_systemd_networkd", False):
-            for mgr in self.config.get("disable_os_managers", []):
-                results = bus.emit(Event("initsys.service.disable", payload={"service_name": mgr}))
-                if not results or not (results[0] or {}).get("success"):
-                    self.logger.warning("Could not disable competing network manager %r", mgr)
-            bus.emit(Event(
-                "initsys.service.start",
-                payload={"service_name": "systemd-networkd.service"},
-            ))
-        else:
-            bus.emit(Event(
-                "initsys.service.remove",
-                payload={"service_name": "fastfirewall-networking"},
-            ))
+        for mgr in self.config.get("disable_os_managers", []):
+            results = bus.emit(Event("initsys.service.disable", payload={"service_name": mgr}))
+            if not results or not (results[0] or {}).get("success"):
+                self.logger.warning("Could not disable competing network manager %r", mgr)
+        bus.emit(Event(
+            "initsys.service.start",
+            payload={"service_name": "systemd-networkd.service"},
+        ))
+        bus.emit(Event(
+            "initsys.service.remove",
+            payload={"service_name": "fastfirewall-networking"},
+        ))
 
     def _import_state_from_system(self) -> None:
         try:

@@ -1712,33 +1712,32 @@ def test_macro_snapshot_omits_address_when_none(tmp_path):
 
 # ── os boot service ────────────────────────────────────────────────────────────
 
-def test_use_systemd_networkd_emits_service_start_for_networkd(tmp_path):
+def test_boot_service_sync_emits_service_start_for_networkd(tmp_path):
     received = []
     global_bus.subscribe("initsys.service.start", received.append)
     try:
-        _make_plugin(tmp_path, config={"use_systemd_networkd": True})
+        _make_plugin(tmp_path)
         start_names = [e.payload["service_name"] for e in received]
         assert "systemd-networkd.service" in start_names
     finally:
         global_bus.unsubscribe("initsys.service.start", received.append)
 
 
-def test_use_systemd_networkd_true_does_not_emit_service_add(tmp_path):
+def test_boot_service_sync_does_not_emit_service_add(tmp_path):
     received = []
     global_bus.subscribe("initsys.service.add", received.append)
     try:
-        _make_plugin(tmp_path, config={"use_systemd_networkd": True})
+        _make_plugin(tmp_path)
         assert received == []
     finally:
         global_bus.unsubscribe("initsys.service.add", received.append)
 
 
-def test_use_systemd_networkd_disables_configured_managers(tmp_path):
+def test_boot_service_sync_disables_configured_managers(tmp_path):
     disable_events = []
     global_bus.subscribe("initsys.service.disable", disable_events.append)
     try:
         _make_plugin(tmp_path, config={
-            "use_systemd_networkd": True,
             "disable_os_managers": ["NetworkManager", "networking"],
         })
         names = [e.payload["service_name"] for e in disable_events]
@@ -1748,38 +1747,17 @@ def test_use_systemd_networkd_disables_configured_managers(tmp_path):
         global_bus.unsubscribe("initsys.service.disable", disable_events.append)
 
 
-def test_use_systemd_networkd_false_emits_no_disable_events(tmp_path):
+def test_boot_service_sync_empty_managers_list_emits_no_disable_events(tmp_path):
     disable_events = []
     global_bus.subscribe("initsys.service.disable", disable_events.append)
     try:
-        _make_plugin(tmp_path, config={"use_systemd_networkd": False, "disable_os_managers": ["NetworkManager"]})
+        _make_plugin(tmp_path, config={"disable_os_managers": []})
         assert disable_events == []
     finally:
         global_bus.unsubscribe("initsys.service.disable", disable_events.append)
 
 
-def test_use_systemd_networkd_empty_managers_list_emits_no_disable_events(tmp_path):
-    disable_events = []
-    global_bus.subscribe("initsys.service.disable", disable_events.append)
-    try:
-        _make_plugin(tmp_path, config={"use_systemd_networkd": True, "disable_os_managers": []})
-        assert disable_events == []
-    finally:
-        global_bus.unsubscribe("initsys.service.disable", disable_events.append)
-
-
-def test_use_systemd_networkd_false_emits_service_remove(tmp_path):
-    received = []
-    global_bus.subscribe("initsys.service.remove", received.append)
-    try:
-        _make_plugin(tmp_path, config={"use_systemd_networkd": False})
-        assert len(received) == 1
-        assert received[0].payload["service_name"] == "fastfirewall-networking"
-    finally:
-        global_bus.unsubscribe("initsys.service.remove", received.append)
-
-
-def test_use_systemd_networkd_default_false_emits_service_remove(tmp_path):
+def test_boot_service_sync_always_emits_service_remove_for_legacy_unit(tmp_path):
     received = []
     global_bus.subscribe("initsys.service.remove", received.append)
     try:
