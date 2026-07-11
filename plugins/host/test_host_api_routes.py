@@ -1193,6 +1193,33 @@ def test_service_start_missing_name_is_ignored(tmp_path):
     plugin._pyinfra_run.assert_not_called()
 
 
+def test_service_start_enables_when_running_but_disabled(tmp_path):
+    from pyinfra.operations import systemd as systemd_ops
+    plugin = _make_svc_plugin(tmp_path)
+    with patch.object(type(plugin), "_detect_init_system", return_value="systemd"), \
+         patch.object(type(plugin), "_get_service_status", side_effect=[
+             {"running": True, "enabled": False, "exists": True},
+             {"running": True, "enabled": True, "exists": True},
+         ]):
+        result = plugin._handle_service_start(Event("initsys.service.start", payload={"service_name": "ff-nft"}))
+    assert result["success"] is True
+    service_calls = [c for c in plugin._pyinfra_run.call_args_list if c[0][0] is systemd_ops.service]
+    assert len(service_calls) == 1
+    assert service_calls[0].kwargs["enabled"] is True
+    assert service_calls[0].kwargs["running"] is True
+
+
+def test_service_start_returns_failure_when_service_did_not_start(tmp_path):
+    plugin = _make_svc_plugin(tmp_path)
+    with patch.object(type(plugin), "_detect_init_system", return_value="systemd"), \
+         patch.object(type(plugin), "_get_service_status", side_effect=[
+             {"running": False, "enabled": False, "exists": True},
+             {"running": False, "enabled": True, "exists": True},
+         ]):
+        result = plugin._handle_service_start(Event("initsys.service.start", payload={"service_name": "ff-nft"}))
+    assert result["success"] is False
+
+
 # stop
 
 def test_service_stop_calls_pyinfra_when_running(tmp_path):
