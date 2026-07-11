@@ -35,7 +35,7 @@ Built on FastAPI and driven entirely by plugins. Every feature is a plugin; the 
 
 - Python 3.12+
 - `pipx` and `uv` (see install steps below)
-- Root or sudo access (plugins call `nftables`, `systemctl`, `ifstate`, etc.)
+- Root or sudo access (plugins call `nftables`, `systemctl`, `networkctl`, etc.)
 - Linux (Debian/Ubuntu tested; most plugins work on any systemd-based distro)
 
 ## Installation
@@ -263,7 +263,7 @@ This edits the `enabled` field in the plugin's `plugin.yaml` and exits. The chan
 
 ### OS boot service registration (`enable_os_boot`)
 
-Some plugins can register a lightweight systemd oneshot service that applies their configuration at OS boot — before FastFirewall itself starts. This is useful for critical services like the firewall and networking, where you want rules and interfaces active during early boot even if FastFirewall fails to start.
+Some plugins can register a lightweight systemd oneshot service that applies their configuration at OS boot — before FastFirewall itself starts. This is useful for critical services like the firewall, where you want rules active during early boot even if FastFirewall fails to start.
 
 Set `enable_os_boot: true` in the relevant plugin's `plugin.yaml` config block:
 
@@ -278,13 +278,12 @@ Supported plugins and their registered services:
 | Plugin | Service name | What it applies |
 |---|---|---|
 | `firewall` | `fastfirewall-nft` | Compiled `.nft` ruleset via `nft -f` |
-| `networking` | `fastfirewall-networking` | Interface config via `ifstate apply` — see warning below |
 | `dnsmasq` | `dnsmasq` | Ensures dnsmasq is enabled for boot |
 | `apt_cacher_ng` | `apt-cacher-ng` | Ensures apt-cacher-ng is enabled for boot |
 
 The registration or removal happens automatically each time FastFirewall starts — setting the flag and restarting FastFirewall is all that's needed.
 
-> **Warning — non-reversible change for the networking plugin:** When `enable_os_boot: true` is set, the networking plugin stops and disables every service listed in `disable_os_managers` in `plugins/networking/plugin.yaml` (by default: `NetworkManager`, `networking`, `systemd-networkd`). This lets ifstate fully own interface bring-up at boot. **FastFirewall will not re-enable those services if you later set `enable_os_boot` back to `false`.** To restore a previous network manager run `sudo systemctl enable --now <service>` manually. Review `disable_os_managers` and remove any entries that should remain running before enabling this flag.
+The networking plugin does not use `enable_os_boot` — it always manages `systemd-networkd` directly (see the warning in the [Networking Plugin](#networking-plugin) section below).
 
 ### API error responses
 
@@ -534,7 +533,7 @@ curl -su admin:admin -X POST http://localhost:8000/v1/firewall/apply
 **Routes:** `/v1/networking/`  
 **Depends on:** host plugin
 
-Manages network interfaces and static routes via [ifstate](https://github.com/ipinfra/ifstate). Desired state is stored in a JSON file; nothing is applied to the kernel until `POST /apply`. Sysctl parameters are managed by the host plugin (`PUT /v1/host/sysctl/{key}`).
+Manages network interfaces, routes, bonds, bridges, and WireGuard peers declaratively via **systemd-networkd**. Desired state is stored in a JSON file; nothing is applied to the kernel until `POST /apply` writes `.network`/`.netdev` files to `/etc/systemd/network/` and reloads with `networkctl reload`/`reconfigure`. Sysctl parameters are managed by the host plugin (`PUT /v1/host/sysctl/{key}`).
 
 **Deferred apply model:** mutations (PUT/POST/DELETE) only update the state file. `GET /status` will show `pending_changes: true` until you apply.
 
@@ -546,15 +545,19 @@ Manages network interfaces and static routes via [ifstate](https://github.com/ip
 | `/config/routes` | GET | List managed routes |
 | `/config/routes` | POST | Add a route |
 | `/config/routes/{id}` | DELETE | Remove a route |
+| `/config/bonds`, `/config/bridges` | GET / POST / PUT / DELETE | Manage virtual bond/bridge devices and their members |
+| `/config/interfaces/{name}/peers` | GET / POST / PUT / DELETE | Manage WireGuard peers on an interface |
 | `/config/diff` | GET | Diff between last applied and desired state |
-| `/config` | GET | Full desired state (YAML or JSON) |
-| `/interfaces` | GET | Live interface state from `ifstatecli show` |
-| `/check` | POST | Dry-run via `ifstatecli check` |
-| `/apply` | POST | Apply via `ifstatecli apply` |
+| `/config` | GET | Full desired state — generated `.network`/`.netdev` file contents |
+| `/interfaces` | GET | Live interface state from `ip -j addr show` |
+| `/check` | POST | Dry-run; previews generated config files without applying |
+| `/apply` | POST | Write config files and reload via `networkctl` |
 | `/discard` | POST | Revert pending changes to last applied state |
 | `/ping` | POST | Run ping from the gateway |
 | `/mtr` | POST | Run mtr and return hop table |
 | `/status` | GET | Plugin status and pending changes |
+
+Interfaces also support native DHCP (`dhcp4`/`dhcp6: true`) and WiFi (`link.kind: "wifi"` + `wifi: {ssid, psk}` via `wpa_supplicant`) — see `plugins/networking/CLAUDE.md` for the full field reference.
 
 **Interface aliases** let you assign friendly names to interface device names (e.g. `lan` → `enp3s0`). Each alias exposes two macros — `$interface.lan.name` (the OS device name) and `$interface.lan.address` (the L3 address of that device) — and are used by the bootstrap wizard.
 
@@ -564,6 +567,8 @@ curl -su admin:admin -X PUT http://localhost:8000/v1/networking/config/aliases/l
   -H "Content-Type: application/json" \
   -d '{"interface": "enp3s0"}'
 ```
+
+> **Warning — non-reversible on first boot:** The networking plugin always stops and disables every service listed in `disable_os_managers` in `plugins/networking/plugin.yaml` (by default: `NetworkManager`, `networking`) in favor of `systemd-networkd`. FastFirewall will **not** re-enable those services later. To restore a previous network manager run `sudo systemctl enable --now <service>` manually. Review `disable_os_managers` before first boot and remove any entries that should remain running on your system.
 
 ---
 
